@@ -34,9 +34,13 @@ class PaperBroker(var balance: Double = 1000.0) {
     var realizedPnl = 0.0
     val history = mutableListOf<String>()
 
-    fun open(symbol: String, dir: Int, price: Double, leverage: Int): Position? {
+    fun open(symbol: String, dir: Int, price: Double, leverage: Int): Position? =
+        openSized(symbol, dir, price, leverage, MARGIN_FRACTION)
+
+    /** Opens a position committing [marginFraction] of the balance as margin. */
+    fun openSized(symbol: String, dir: Int, price: Double, leverage: Int, marginFraction: Double): Position? {
         if (positions.containsKey(symbol)) return null
-        val margin = balance * MARGIN_FRACTION
+        val margin = balance * marginFraction.coerceIn(0.0001, 1.0)
         val qty = margin * leverage / price
         val plan = TpSlPlanner.plan(price, dir, leverage)
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
@@ -131,6 +135,12 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Periodic report settings. */
     var reportOn = false
     var reportIntervalMin = 15L
+
+    /** Share of the account balance committed as margin per trade (0.01 - 1.0). */
+    var riskFraction: Double = PaperBroker.MARGIN_FRACTION
+        set(value) {
+            field = value.coerceIn(0.01, 1.0)
+        }
 
     private val pairs = HashMap<String, PairInfo>()
 
@@ -291,7 +301,102 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /** Places a real market order with TP/SL attached. Returns a status line, or null to skip. */
-    private fun openLive(symbol: String, dir: Int, price: Double, confidence: Double): String? {
+    private fun openLive(symbol: String, dir: Int, price: Double, confidence: Double): String? =
+        placeLive(symbol, dir, price, riskFraction, confidence)
+
+    /**
+     * One-tap manual entry (paper or live).
+     * [sizeFraction] is the share of the account margin committed (0.10 = 10%).
+     */
+    fun manualEntry(symbol: String, dir: Int, sizeFraction: Double): String {
+        val sym = symbol.trim().uppercase().ifEmpty { "BTCUSDT" }
+        if (!live) {
+            val px = symbolPrice(sym)
+            if (px <= 0) return "No price for $sym."
+            if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
+            val pos = broker.openSized(sym, dir, px, leverage, sizeFraction)
+                ?: return "SKIP $sym: could not open."
+            return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
+                "stop ${fmt(pos.stop)} (paper)"
+        }
+        val px = symbolPrice(sym)
+        if (px <= 0) return "No price for $sym."
+        return placeLive(sym, dir, px, sizeFraction, null)
+    }
+
+    /** Closes every open position (paper: simulated, live: market close-all). */
+    fun closeAll(): String {
+        if (live) {
+            return try {
+                rest.closeAllPositions()
+                "Close-all-positions sent to the exchange."
+            } catch (e: Exception) {
+                "Close all failed: ${e.message ?: e.javaClass.simpleName}"
+            }
+        }
+        val syms = broker.positions.keys.toList()
+        if (syms.isEmpty()) return "No open positions."
+        var closed = 0
+        for (s in syms) {
+            val px = symbolPrice(s)
+            if (px > 0 && broker.close(s, px) != null) closed++
+        }
+        return "Closed $closed paper position(s)."
+    }
+
+    /** Cancels every open order (live only). */
+    fun cancelAllOrders(): String = if (!live) {
+        "Paper mode: no exchange orders to cancel."
+    } else {
+        try {
+            rest.cancelAllOrders()
+            "Cancel-all-orders sent to the exchange."
+        } catch (e: Exception) {
+            "Cancel failed: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    /** Last price for a symbol (exchange first, candles as fallback). */
+    fun symbolPrice(symbol: String): Double {
+        val live = runCatching { rest.lastPrice(symbol) }.getOrNull() ?: 0.0
+        if (live > 0) return live
+        return candles(symbol, "15m").lastOrNull()?.close ?: 0.0
+    }
+
+    /** How the market and the trader's book feel right now (cached for 60s). */
+    fun marketMood(): MarketMood {
+        val now = System.currentTimeMillis()
+        val cached = moodCache
+        if (cached != null && now - cached.first < 60_000) return cached.second
+        val sym = universe.firstOrNull() ?: "BTCUSDT"
+        val series = runCatching { candles(sym, "15m") }.getOrDefault(emptyList())
+        val funding = runCatching {
+            rest.fundingRate(sym).optString("fundingRate").toDoubleOrNull()
+        }.getOrNull()
+        val mood = MarketMoodCalc.assess(series, funding, unrealizedPct())
+        moodCache = now to mood
+        return mood
+    }
+
+    private var moodCache: Pair<Long, MarketMood>? = null
+
+    /** Unrealized P&L as a fraction of the margin committed, or null when flat. */
+    private fun unrealizedPct(): Double? {
+        if (broker.positions.isEmpty()) return null
+        val prices = broker.positions.keys.associateWith { symbolPrice(it) }
+        val margin = broker.balance * riskFraction * broker.positions.size
+        if (margin <= 0) return null
+        return broker.unrealized(prices) / margin
+    }
+
+    /** Shared live order path used by the scanner and the one-tap trade button. */
+    private fun placeLive(
+        symbol: String,
+        dir: Int,
+        price: Double,
+        marginFraction: Double,
+        confidence: Double?,
+    ): String {
         val livePositions = rest.pendingPositions(symbol)
         for (i in 0 until livePositions.length()) {
             if (livePositions.getJSONObject(i).optString("symbol") == symbol) {
@@ -300,7 +405,7 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         val lev = effectiveLeverage(symbol)
         val available = rest.availableUsdt()
-        val margin = available * PaperBroker.MARGIN_FRACTION
+        val margin = available * marginFraction.coerceIn(0.0001, 1.0)
         // TP/SL triggers are MARK_PRICE, so plan the levels from the mark price
         // when the exchange publishes one; fall back to the signal price.
         val mark = runCatching {
@@ -337,8 +442,9 @@ class TraderEngine(private val rest: BitunixRest) {
             )
             val orderId = order.optString("orderId")
             val status = waitForFill(orderId)
-            return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)} " +
-                "conf ${"%.0f".format(confidence)} | order $orderId $status"
+            val conf = if (confidence != null) " conf ${"%.0f".format(confidence)}" else ""
+            return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
+                "| order $orderId $status"
         } catch (e: BitunixApiException) {
             return "LIVE ERROR $symbol: ${e.message}"
         }
@@ -657,6 +763,30 @@ class TraderEngine(private val rest: BitunixRest) {
                 else events.joinToString("\n")
             }
             t.startsWith("close position") -> closePosition(t.removePrefix("close position").trim().uppercase().ifEmpty { "BTCUSDT" })
+            t.startsWith("close all") -> closeAll()
+            t.startsWith("manual entry") -> {
+                val parts = t.removePrefix("manual entry").trim().split(Regex("\\s+"))
+                val sym = parts.getOrElse(0) { "BTCUSDT" }.uppercase()
+                val dir = if (parts.getOrElse(1) { "long" }.startsWith("s")) -1 else 1
+                val pct = parts.getOrElse(2) { "10" }.toDoubleOrNull() ?: 10.0
+                manualEntry(sym, dir, (pct / 100.0).coerceIn(0.01, 1.0))
+            }
+            t.startsWith("set leverage") -> {
+                val v = t.removePrefix("set leverage").trim().toIntOrNull()
+                if (v == null || v !in 1..125) "Usage: set leverage <1-125>"
+                else {
+                    leverage = v
+                    "Leverage set to $v x."
+                }
+            }
+            t.startsWith("set risk") -> {
+                val v = t.removePrefix("set risk").trim().toDoubleOrNull()
+                if (v == null || v !in 1.0..100.0) "Usage: set risk <1-100> (percent of balance per trade)"
+                else {
+                    riskFraction = v / 100.0
+                    "Margin per trade set to ${v.toInt()}% of balance."
+                }
+            }
             t.startsWith("scan once") -> {
                 val out = scanOnce()
                 if (out.isEmpty()) "Scan done: no qualifying signals."

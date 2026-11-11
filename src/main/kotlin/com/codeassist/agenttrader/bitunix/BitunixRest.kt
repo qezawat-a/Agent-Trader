@@ -370,6 +370,54 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         signedPost("/api/v1/futures/trade/cancel_all_orders", JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin))
 
+    /**
+     * Places up to 5 orders in one call (rate limit 2 req/s).
+     * Each order follows the place_order fields; the response holds
+     * data.successList and data.failureList.
+     */
+    fun batchOrder(symbol: String, orders: List<JSONObject>): JSONObject {
+        val list = JSONArray()
+        orders.forEach { list.put(it) }
+        return signedPost("/api/v1/futures/trade/batch_order", JSONObject()
+            .put("symbol", symbol).put("orderList", list))
+    }
+
+    /**
+     * Modifies a pending order (price, qty and/or its TP/SL).
+     * Either orderId or clientId is required; orderId wins when both are sent.
+     */
+    fun modifyOrder(
+        orderId: String? = null,
+        clientId: String? = null,
+        symbol: String? = null,
+        qty: String? = null,
+        price: String? = null,
+        tpPrice: String? = null,
+        tpStopType: String? = null,
+        tpOrderType: String? = null,
+        tpOrderPrice: String? = null,
+        slPrice: String? = null,
+        slStopType: String? = null,
+        slOrderType: String? = null,
+        slOrderPrice: String? = null,
+    ): JSONObject {
+        val body = JSONObject()
+        if (orderId != null) body.put("orderId", orderId)
+        if (clientId != null) body.put("clientId", clientId)
+        if (symbol != null) body.put("symbol", symbol)
+        if (qty != null) body.put("qty", qty)
+        if (price != null) body.put("price", price)
+        if (tpPrice != null) body.put("tpPrice", tpPrice)
+        if (tpStopType != null) body.put("tpStopType", tpStopType)
+        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+        if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
+        if (slPrice != null) body.put("slPrice", slPrice)
+        if (slStopType != null) body.put("slStopType", slStopType)
+        if (slOrderType != null) body.put("slOrderType", slOrderType)
+        if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
+        return signedPost("/api/v1/futures/trade/modify_order", body)
+    }
+
     // ---- TP/SL ----
 
     /** Position-level TP/SL: closes the whole position at market when triggered. */
@@ -400,6 +448,66 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun cancelTpSl(symbol: String, orderId: String): JSONObject =
         signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
             .put("symbol", symbol).put("orderId", orderId))
+
+    /**
+     * Partial TP/SL order on an open position: at least one of tpPrice/slPrice
+     * and at least one of tpQty/slQty is required.
+     */
+    fun placeTpSlOrder(
+        symbol: String,
+        positionId: String,
+        tpPrice: String? = null,
+        slPrice: String? = null,
+        tpQty: String? = null,
+        slQty: String? = null,
+        tpStopType: String = "MARK_PRICE",
+        slStopType: String = "MARK_PRICE",
+        tpOrderType: String? = null,
+        tpOrderPrice: String? = null,
+        slOrderType: String? = null,
+        slOrderPrice: String? = null,
+    ): JSONObject {
+        val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
+        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
+        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
+        if (tpQty != null) body.put("tpQty", tpQty)
+        if (slQty != null) body.put("slQty", slQty)
+        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+        if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
+        if (slOrderType != null) body.put("slOrderType", slOrderType)
+        if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
+        return signedPost("/api/v1/futures/tpsl/place_order", body)
+    }
+
+    /** Modifies a partial TP/SL order (orderId required). */
+    fun modifyTpSlOrder(
+        orderId: String,
+        tpPrice: String? = null,
+        slPrice: String? = null,
+        tpQty: String? = null,
+        slQty: String? = null,
+        tpStopType: String = "MARK_PRICE",
+        slStopType: String = "MARK_PRICE",
+        tpOrderType: String? = null,
+        tpOrderPrice: String? = null,
+        slOrderType: String? = null,
+        slOrderPrice: String? = null,
+    ): JSONObject {
+        val body = JSONObject().put("orderId", orderId)
+        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
+        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
+        if (tpQty != null) body.put("tpQty", tpQty)
+        if (slQty != null) body.put("slQty", slQty)
+        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+        if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
+        if (slOrderType != null) body.put("slOrderType", slOrderType)
+        if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
+        return signedPost("/api/v1/futures/tpsl/modify_order", body)
+    }
+
+    /** Current position mode of the account: ONE_WAY or HEDGE. */
+    fun positionMode(): JSONObject =
+        dataObject(signedGet("/api/v1/futures/account/position_mode"))
 
     /**
      * Pending TP/SL orders. The API wants int32 for side/positionMode, so those

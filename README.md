@@ -15,6 +15,24 @@ Grab the APK from the [Releases](https://github.com/qezawat-a/Agent-Trader/relea
 
 ## Features
 
+- **Four screens, always one tap away** — bottom nav (Chat / Trade / Control / Settings),
+  a back arrow in the top bar, and the Android back button returns to the chat.
+  Settings and every list scroll properly; the keyboard never covers the input.
+- **Control panel** — engine, trading, scanner and report toggles, plus sliders for
+  leverage (1–125x), margin per trade (1–100%) and report interval. One-tap actions for
+  scan, funding, tiers, close-all, cancel-all, diagnose and repair.
+- **Fast trading** — pick a symbol, tap LONG or SHORT, set the size with a slider, go.
+  Paper by default; LIVE is a deliberate toggle that refuses to arm without Bitunix keys.
+- **Agentic brain** — the LLM receives the live account state, the market's mood and the
+  user's emotional state, and can act on the engine with tool calls (`<tool>status</tool>`)
+  followed by a second pass with the results. It acknowledges stress once, briefly, then
+  stays precise; it refuses to open or close positions without an explicit request.
+- **Self-repair** — `/diagnose` inspects provider, engine, feed and risk state; `/repair`
+  applies only the safe fixes (re-pick a working model, restart the trading loop,
+  reconnect the WebSocket feed, clamp leverage) and reports exactly what it changed.
+- **Market mood** — volatility, distance from the high, funding crowding and your own
+  unrealized P&L are turned into a stress score (CALM → PANIC) with human-readable drivers.
+
 - **Agentic chat** — talk to an LLM (OpenAI, OpenRouter, DeepSeek, Gemini-compat, ...)
   with multi-turn memory, a configurable persona ("soul"), and slash commands:
   `/help /models /set_model /connect_provider /check_ai /price /clear /code_review

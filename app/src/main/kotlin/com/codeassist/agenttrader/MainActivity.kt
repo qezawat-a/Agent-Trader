@@ -4,9 +4,11 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,19 +16,35 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -49,11 +67,19 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.codeassist.agenttrader.agent.AgentBrain
 import com.codeassist.agenttrader.agent.AgentConfig
 import com.codeassist.agenttrader.agent.CommandRouter
 import com.codeassist.agenttrader.agent.ModelClient
+import com.codeassist.agenttrader.agent.SelfRepair
 import com.codeassist.agenttrader.bitunix.BitunixRest
+import com.codeassist.agenttrader.trader.AgentRuntimeError
 import com.codeassist.agenttrader.trader.TraderEngine
+import com.codeassist.agenttrader.trader.fmt
+import com.codeassist.agenttrader.ui.AppScreen
+import com.codeassist.agenttrader.ui.ControlScreen
+import com.codeassist.agenttrader.ui.StatusPill
+import com.codeassist.agenttrader.ui.TradeScreen
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -101,6 +127,14 @@ fun TraderTheme(content: @Composable () -> Unit) {
 
 private data class ChatMsg(val text: String, val isUser: Boolean, val time: String)
 
+/** What the app can do — injected into the brain so it can guide the user accurately. */
+private val CAPABILITIES = """
+Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
+Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-125>, set risk <1-100>
+The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
+""".trim()
+
 private fun now(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
 
 @Composable
@@ -141,7 +175,8 @@ fun AgentApp(
     val history = remember { mutableStateListOf<Pair<String, String>>() }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
-    var showSettings by remember { mutableStateOf(false) }
+    var screen by remember { mutableStateOf(AppScreen.CHAT) }
+    var mood by remember { mutableStateOf<com.codeassist.agenttrader.trader.MarketMood?>(null) }
     var settingsMsg by remember { mutableStateOf("") }
     var lastKeys by remember { mutableStateOf(config.bitunixApiKey to config.bitunixSecret) }
     val listState = rememberLazyListState()
@@ -155,8 +190,163 @@ fun AgentApp(
         })
     }
 
+    // Android back returns to the chat instead of closing the app.
+    BackHandler(enabled = screen != AppScreen.CHAT) { screen = AppScreen.CHAT }
+
+    /** Engine toggles — one tap, no typing. */
+    fun toggleEngine(on: Boolean) {
+        engine.engineOn = on
+        if (!on) {
+            engine.trading = false
+            onTradingChange(false)
+        }
+        say(if (on) "Engine ON — scanning every 30s." else "Engine OFF.")
+    }
+
+    fun toggleTrading(on: Boolean) {
+        if (on && !engine.engineOn) {
+            engine.engineOn = true
+            say("Engine ON first, trading started.")
+        } else {
+            say(if (on) "Trading started (${if (engine.live) "LIVE — real orders" else "paper"})." else "Trading stopped.")
+        }
+        engine.trading = on
+        onTradingChange(on)
+    }
+
+    fun toggleScan(on: Boolean) {
+        engine.scanOn = on
+        say(if (on) "Scanner ON — ranking the universe by volume." else "Scanner OFF — fixed universe.")
+    }
+
+    fun toggleReport(on: Boolean) {
+        engine.reportOn = on
+        say(if (on) "Periodic reports ON (every ${engine.reportIntervalMin} min)." else "Periodic reports OFF.")
+    }
+
+    fun toggleLive(on: Boolean) {
+        if (on && (config.bitunixApiKey.isBlank() || config.bitunixSecret.isBlank())) {
+            say("LIVE needs real Bitunix keys — add them in Settings first. Staying in PAPER.")
+            return
+        }
+        config.live = on
+        engine.live = on
+        // The feed follows the mode immediately (config changes do not recompose).
+        if (on && config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()) {
+            engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+        } else {
+            engine.stopLiveFeed()
+        }
+        say(
+            if (on) "LIVE mode ON — orders hit the exchange. The private feed is connecting."
+            else "PAPER mode — orders are simulated.",
+        )
+    }
+
+    /** Snapshot of the provider + engine for self-diagnosis. */
+    fun diagnoseReport(): String {
+        val d = SelfRepair.diagnose(
+            SelfRepair.ProviderState(
+                baseUrl = config.baseUrl,
+                apiKeyPresent = config.apiKey.isNotBlank(),
+                model = config.model,
+                modelsAvailable = 0,
+                lastError = AgentRuntimeError.last,
+            ),
+            SelfRepair.EngineState(
+                live = engine.live,
+                engineOn = engine.engineOn,
+                trading = engine.trading,
+                loopRunning = engine.isLoopRunning,
+                feedConnected = engine.liveFeedOn,
+                bitunixKeysPresent = config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
+                openPositions = engine.broker.positions.size,
+                leverage = engine.leverage,
+            ),
+        )
+        return "Diagnosis [${d.worst}]:\n" + d.summary()
+    }
+
+    /** Diagnoses and applies only the repairs that are safe to apply automatically. */
+    fun repairNow(): String {
+        val d = SelfRepair.diagnose(
+            SelfRepair.ProviderState(
+                config.baseUrl, config.apiKey.isNotBlank(), config.model, 0, AgentRuntimeError.last,
+            ),
+            SelfRepair.EngineState(
+                engine.live, engine.engineOn, engine.trading, engine.isLoopRunning, engine.liveFeedOn,
+                config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
+                engine.broker.positions.size, engine.leverage,
+            ),
+        )
+        val applied = SelfRepair.applyAutoFixes(d) { action ->
+            when (action) {
+                "pick_model" -> runCatching {
+                    val models = ModelClient(config.baseUrl, config.apiKey).listModels()
+                    if (models.isEmpty()) "could not list models" else {
+                        config.model = models.first()
+                        "model set to ${models.first()}"
+                    }
+                }.getOrElse { "model probe failed: ${it.message}" }
+                "probe_provider" -> runCatching {
+                    ModelClient(config.baseUrl, config.apiKey).listModels().size
+                }.map { "provider reachable ($it models)" }
+                    .getOrElse { "provider probe failed: ${it.message}" }
+                "restart_loop" -> {
+                    engine.startLoop(30) { msg -> say(msg) }
+                    "trading loop restarted"
+                }
+                "reconnect_feed" -> {
+                    engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+                    "private feed reconnecting"
+                }
+                "clamp_leverage" -> {
+                    engine.leverage = engine.leverage.coerceAtMost(125)
+                    "leverage clamped to ${engine.leverage}x"
+                }
+                else -> "nothing to do for $action"
+            }
+        }
+        return "Repair report:\n$applied"
+    }
+
+    /** Runs a trader command (or the self-repair flow) from a button. */
+    fun runAction(cmd: String) {
+        when {
+            cmd.startsWith("diagnose") -> runAsync(post, ::say) { diagnoseReport() }
+            cmd.startsWith("repair") -> runAsync(post, ::say) { repairNow() }
+            else -> runAsync(post, ::say) { engine.handle(cmd) }
+        }
+    }
+
+    /** Live context handed to the LLM so it can reason with real numbers. */
+    fun liveContext(moodSnapshot: com.codeassist.agenttrader.trader.MarketMood? = mood): String =
+        AgentBrain.buildContext(
+        mode = if (engine.live) "LIVE" else "PAPER",
+        balance = "${"%.2f".format(engine.broker.balance)} USDT",
+        positionsSummary = engine.broker.positions.entries.joinToString(", ") {
+            "${it.key} ${if (it.value.dir > 0) "LONG" else "SHORT"} qty ${fmt(it.value.qty)} @ ${fmt(it.value.entry)}"
+        }.ifEmpty { "none" },
+        moodLine = moodSnapshot?.summary() ?: "",
+        fundingLine = engine.broker.positions.size.toString().let { "" },
+    )
+
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    }
+
+    // Refresh the market feeling every 30s (off the UI thread).
+    LaunchedEffect(engineVersion) {
+        while (true) {
+            val m = Thread {
+                val res = runCatching { engine.marketMood() }.getOrNull()
+                post(object : Runnable {
+                    override fun run() { mood = res }
+                })
+            }
+            m.start()
+            kotlinx.coroutines.delay(30_000)
+        }
     }
 
     // Keep the autonomous loop alive across engine re-creations (e.g. after key change).
@@ -401,18 +591,8 @@ fun AgentApp(
                         )
                     }
                 }
-                "/diagnose" -> {
-                    say(
-                        "Diagnostic report:\n" +
-                        "- Provider URL: ${if (config.baseUrl.isNotBlank()) config.baseUrl else "NOT SET"}\n" +
-                        "- API key: ${if (config.apiKey.isNotBlank()) "set" else "NOT SET"}\n" +
-                        "- Bitunix keys: ${if (config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()) "set (live ready)" else "not set"}\n" +
-                        "- Model: ${config.model.ifBlank { "none" }}\n" +
-                        "- Mode: ${if (engine.live) "LIVE" else "PAPER"}, leverage ${engine.leverage}x\n" +
-                        "- Engine: ${if (engine.engineOn) "on" else "off"}, trading ${if (engine.trading) "on" else "off"}, scan ${if (engine.scanOn) "on" else "off"}\n" +
-                        "- Last error: ${com.codeassist.agenttrader.trader.AgentRuntimeError.last.ifBlank { "none" }}"
-                    )
-                }
+                "/diagnose" -> runAsync(post, ::say) { diagnoseReport() }
+                "/repair" -> runAsync(post, ::say) { repairNow() }
                 else -> say("${parsed.command} is not wired yet.")
             }
             is CommandRouter.Parsed.Trader -> runAsync(post, { r ->
@@ -431,122 +611,253 @@ fun AgentApp(
                 } else {
                     busy = true
                     history.add("user" to parsed.text)
-                    val window = listOf("system" to config.soul) + history.takeLast(12)
+                    val moodSignal = AgentBrain.detectMood(parsed.text)
+                    val moodSnapshot = mood
                     runAsync(post, { s ->
                         say(s)
                         history.add("assistant" to s)
                         busy = false
                     }) {
-                        ModelClient(config.baseUrl, config.apiKey).chat(config.model, window)
+                        val client = ModelClient(config.baseUrl, config.apiKey)
+                        val sys = AgentBrain.buildSystemPrompt(
+                            soul = config.soul,
+                            context = liveContext(moodSnapshot),
+                            mood = moodSignal,
+                            appCapabilities = CAPABILITIES,
+                        )
+                        val window = listOf("system" to sys) + history.takeLast(12)
+                        var reply = client.chat(config.model, window)
+                        // Agentic step: run the tools the model asked for, then let it answer.
+                        val tools = AgentBrain.extractToolCalls(reply)
+                        if (tools.isNotEmpty()) {
+                            val results = tools.map { t -> "» $t\n" + engine.handle(t) }
+                            val withTools = window + listOf(
+                                "assistant" to reply,
+                                "user" to "Tool results:\n" + results.joinToString("\n") +
+                                    "\nNow answer the user using these results.",
+                            )
+                            reply = client.chat(config.model, withTools)
+                        }
+                        AgentBrain.stripToolCalls(reply)
                     }
                 }
             }
         }
     }
 
-    Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-        if (showSettings) {
-            SettingsScreen(config, engine, settingsMsg, post) { msg, back ->
-                settingsMsg = msg
-                if (back) {
-                    showSettings = false
-                    // Recreate the engine only when the Bitunix credentials changed.
-                    val newKeys = config.bitunixApiKey to config.bitunixSecret
-                    if (newKeys != lastKeys) {
-                        lastKeys = newKeys
-                        onEngineRecreate()
-                    }
-                }
-            }
-        } else {
-            val insets = WindowInsets.systemBars.asPaddingValues()
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .padding(insets)
-                    .padding(12.dp)
+    val scheme = MaterialTheme.colorScheme
+    Surface(Modifier.fillMaxSize(), color = scheme.background) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(WindowInsets.systemBars.asPaddingValues())
+                .imePadding(),
+        ) {
+            // ---- Top bar: always shows where you are and how to get back ----
+            Row(
+                Modifier.fillMaxWidth().padding(start = 6.dp, end = 10.dp, top = 6.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Header
-                Row(
-                    Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Agent Trader", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = if (engine.live) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
-                    ) {
-                        Text(
-                            if (engine.live) "LIVE" else "PAPER",
-                            Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                            color = if (engine.live) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onTertiary,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontSize = 11.sp,
-                        )
+                if (screen != AppScreen.CHAT) {
+                    IconButton(onClick = { screen = AppScreen.CHAT }) {
+                        Icon(Icons.Default.ArrowBack, "Back", tint = scheme.onSurface)
                     }
-                    OutlinedButton(
-                        onClick = { showSettings = true },
-                        modifier = Modifier.padding(start = 8.dp),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                    ) { Text("⚙", fontSize = 16.sp) }
+                } else {
+                    IconButton(onClick = { screen = AppScreen.CONTROL }) {
+                        Icon(Icons.Default.Build, "Control panel", tint = scheme.onSurface)
+                    }
                 }
-
-                // Quick action bar
-                val actions = listOf(
-                    "Help" to "/help",
-                    "Models" to "/models",
-                    "Engine" to "engine on",
-                    "Trade" to "start trading",
-                    "Stop" to "stop trading",
-                    "Status" to "status",
-                    "PnL" to "pnl",
-                    "Close" to "close position BTCUSDT",
-                    "Clear" to "/clear",
+                Text(
+                    when (screen) {
+                        AppScreen.CHAT -> "Agent Trader"
+                        AppScreen.CONTROL -> "Control"
+                        AppScreen.TRADE -> "Trade"
+                        AppScreen.SETTINGS -> "Settings"
+                    },
+                    Modifier.weight(1f),
+                    style = MaterialTheme.typography.titleMedium,
                 )
-                LazyRow(
-                    Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(actions) { (label, cmd) ->
-                        AssistChip(
-                            onClick = { if (!busy) handle(cmd) },
-                            label = { Text(label) },
-                            enabled = !busy,
-                        )
+                StatusPill(
+                    if (engine.live) "LIVE" else "PAPER",
+                    if (engine.live) scheme.error else scheme.tertiary,
+                )
+                if (engine.trading) {
+                    Spacer(Modifier.width(6.dp))
+                    StatusPill("TRADING", scheme.primary)
+                }
+            }
+
+            Box(Modifier.weight(1f)) {
+                when (screen) {
+                    AppScreen.CHAT -> {
+                        Column(Modifier.fillMaxSize().padding(horizontal = 10.dp)) {
+                            // Fast toggles: everything on/off in one tap.
+                            LazyRow(
+                                Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                item {
+                                    QuickToggle("Engine", engine.engineOn) { toggleEngine(!engine.engineOn) }
+                                }
+                                item {
+                                    QuickToggle("Trade", engine.trading) { toggleTrading(!engine.trading) }
+                                }
+                                item {
+                                    QuickToggle("Scan", engine.scanOn) { toggleScan(!engine.scanOn) }
+                                }
+                                item {
+                                    QuickToggle("Report", engine.reportOn) { toggleReport(!engine.reportOn) }
+                                }
+                                item {
+                                    QuickToggle("Live", engine.live, danger = true) { toggleLive(!engine.live) }
+                                }
+                            }
+                            // Quick actions
+                            LazyRow(
+                                Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                val actions = listOf(
+                                    "Scan" to "scan once",
+                                    "Status" to "status",
+                                    "Balance" to "balance",
+                                    "Positions" to "positions",
+                                    "PnL" to "pnl",
+                                    "Funding" to "funding",
+                                    "Orders" to "orders",
+                                    "Repair" to "repair",
+                                    "Help" to "/help",
+                                )
+                                items(actions) { (label, cmd) ->
+                                    AssistChip(
+                                        onClick = { if (!busy) runAction(cmd) },
+                                        label = { Text(label, fontSize = 12.sp) },
+                                        enabled = !busy,
+                                    )
+                                }
+                            }
+
+                            // Messages (scrollable)
+                            LazyColumn(
+                                Modifier.weight(1f).fillMaxWidth(),
+                                state = listState,
+                                verticalArrangement = Arrangement.spacedBy(6.dp),
+                                contentPadding = PaddingValues(bottom = 6.dp),
+                            ) {
+                                items(messages) { msg -> Bubble(msg) }
+                            }
+
+                            // Input row
+                            Row(
+                                Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.Bottom,
+                            ) {
+                                OutlinedTextField(
+                                    value = input,
+                                    onValueChange = { input = it },
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true,
+                                    placeholder = { Text("Ask anything, or /command") },
+                                )
+                                Button(
+                                    onClick = {
+                                        val line = input.trim()
+                                        input = ""
+                                        if (line.isNotEmpty()) handle(line)
+                                    },
+                                    enabled = !busy,
+                                    modifier = Modifier.padding(start = 6.dp),
+                                ) { Text("Send") }
+                            }
+                        }
+                    }
+
+                    AppScreen.CONTROL -> ControlScreen(
+                        engine = engine,
+                        mood = mood,
+                        onToggleEngine = { v -> toggleEngine(v) },
+                        onToggleTrading = { v -> toggleTrading(v) },
+                        onToggleScan = { v -> toggleScan(v) },
+                        onToggleReport = { v -> toggleReport(v) },
+                        onAction = { runAction(it) },
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                    )
+
+                    AppScreen.TRADE -> TradeScreen(
+                        engine = engine,
+                        onExecute = { sym, dir, frac ->
+                            runAction("manual entry $sym ${if (dir > 0) "long" else "short"} ${(frac * 100).toInt()}")
+                        },
+                        onClose = { sym -> runAction("close position $sym") },
+                        modifier = Modifier.padding(horizontal = 10.dp),
+                    )
+
+                    AppScreen.SETTINGS -> SettingsScreen(config, engine, settingsMsg, post) { msg, back ->
+                        settingsMsg = msg
+                        if (back) {
+                            screen = AppScreen.CHAT
+                            // Recreate the engine only when the Bitunix credentials changed.
+                            val newKeys = config.bitunixApiKey to config.bitunixSecret
+                            if (newKeys != lastKeys) {
+                                lastKeys = newKeys
+                                onEngineRecreate()
+                            }
+                        }
                     }
                 }
+            }
 
-                // Messages
-                LazyColumn(
-                    Modifier.weight(1f).fillMaxWidth(),
-                    state = listState,
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    items(messages) { msg -> Bubble(msg) }
-                }
-
-                // Input row
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
-                    OutlinedTextField(
-                        value = input,
-                        onValueChange = { input = it },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true,
-                        placeholder = { Text("Message or /command") },
-                    )
-                    Button(
-                        onClick = {
-                            val line = input.trim()
-                            input = ""
-                            if (line.isNotEmpty()) handle(line)
-                        },
-                        enabled = !busy,
-                        modifier = Modifier.padding(start = 8.dp),
-                    ) { Text("Send") }
-                }
+            // ---- Bottom navigation: the start menu is always one tap away ----
+            NavigationBar {
+                NavigationBarItem(
+                    selected = screen == AppScreen.CHAT,
+                    onClick = { screen = AppScreen.CHAT },
+                    icon = { Icon(Icons.Default.Person, null) },
+                    label = { Text("Chat") },
+                )
+                NavigationBarItem(
+                    selected = screen == AppScreen.TRADE,
+                    onClick = { screen = AppScreen.TRADE },
+                    icon = { Icon(Icons.Default.PlayArrow, null) },
+                    label = { Text("Trade") },
+                )
+                NavigationBarItem(
+                    selected = screen == AppScreen.CONTROL,
+                    onClick = { screen = AppScreen.CONTROL },
+                    icon = { Icon(Icons.Default.Build, null) },
+                    label = { Text("Control") },
+                )
+                NavigationBarItem(
+                    selected = screen == AppScreen.SETTINGS,
+                    onClick = { screen = AppScreen.SETTINGS },
+                    icon = { Icon(Icons.Default.Settings, null) },
+                    label = { Text("Settings") },
+                )
             }
         }
     }
+}
+
+/** One-tap toggle chip used in the chat quick bar. */
+@Composable
+private fun QuickToggle(label: String, active: Boolean, danger: Boolean = false, onClick: () -> Unit) {
+    val scheme = MaterialTheme.colorScheme
+    val color = when {
+        danger && active -> scheme.error
+        active -> scheme.primary
+        else -> scheme.outline
+    }
+    AssistChip(
+        onClick = onClick,
+        label = { Text(label, fontSize = 12.sp, color = if (active) color else scheme.onSurfaceVariant) },
+        leadingIcon = {
+            Box(
+                Modifier.size(8.dp),
+            ) {
+                Surface(color = color, shape = RoundedCornerShape(50), modifier = Modifier.fillMaxSize()) {}
+            }
+        },
+    )
 }
 
 @Composable
@@ -647,7 +958,8 @@ fun SettingsScreen(
         Modifier
             .fillMaxSize()
             .padding(insets)
-            .padding(12.dp),
+            .padding(12.dp)
+            .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text("Settings", style = MaterialTheme.typography.titleLarge)

@@ -45,7 +45,8 @@ object CommandRouter {
         "tiers", "history orders", "cancel orders",
         "report on", "report off", "report interval",
         "settings trade", "scan on", "scan off", "scan once",
-        "close position", "mid management",
+        "close position", "close all", "manual entry", "set leverage", "set risk",
+        "mid management",
     )
 
     fun parse(input: String): Parsed {
