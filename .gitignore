@@ -6,4 +6,8 @@ local.properties
 *.aab
 *.jks
 *.keystore
+.kotlin/
+captures/
+.idea/
+*.iml
 .DS_Store

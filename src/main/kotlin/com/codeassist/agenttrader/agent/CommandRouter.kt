@@ -8,9 +8,12 @@ object CommandRouter {
 
     val AGENT_COMMANDS: List<Pair<String, String>> = listOf(
         "/help" to "Show this command list",
+        "/clear" to "Clear the chat and session memory",
         "/models" to "List models found for your API key",
         "/set_model <name>" to "Choose the model to use",
-        "/connect_provider" to "Set the base URL and API key from .env",
+        "/connect_provider <url> <key>" to "Set the LLM base URL and API key",
+        "/check_ai" to "Check the model connection and limits",
+        "/price <symbol>" to "Fetch the live Bitunix last price",
         "/add_mcp <name> <url>" to "Register an MCP server",
         "/mcp" to "List MCP servers",
         "/add_skill <name> <text>" to "Add a skill",
@@ -24,7 +27,6 @@ object CommandRouter {
         "/verify" to "Build and run to verify the last change",
         "/simplify" to "Simplify the selected code",
         "/team_spawn" to "Start sub-agents for a larger task",
-        "/check_ai" to "Check the model connection and limits",
         "/check_system" to "Check the trader engine, scanner and agent code",
         "/autopsy" to "Analyse the last failure step by step",
         "/diagnose" to "Collect logs and diagnostics for an issue",
@@ -37,9 +39,12 @@ object CommandRouter {
     }
 
     private val traderPrefixes = listOf(
-        "start trading", "stop trading", "engine on", "engine off", "status", "report on",
-        "report off", "report interval", "trades_history", "tpsl_history", "pnl", "settings trade",
-        "scan on", "scan off", "close position", "positions history", "mid management",
+        "engine on", "engine off", "start trading", "stop trading",
+        "status", "balance", "positions history", "positions", "orders",
+        "pnl", "trades_history", "tpsl_history",
+        "report on", "report off", "report interval",
+        "settings trade", "scan on", "scan off", "scan once",
+        "close position", "mid management",
     )
 
     fun parse(input: String): Parsed {

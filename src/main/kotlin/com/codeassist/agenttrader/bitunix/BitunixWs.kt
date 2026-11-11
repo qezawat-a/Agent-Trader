@@ -9,16 +9,20 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
  * Bitunix futures WebSocket client.
  *
- * Public:  wss://fapi.bitunix.com/public/   (market data, no login)
- * Private: wss://fapi.bitunix.com/private/  (login first, then order / position / tpsl / balance)
+ * Official WS URL for futures: wss://fstream.bitunix.com/ws (one endpoint serves both the
+ * public market channels and the private ones — the private connection just logs in first).
  *
- * Limits from the docs: at most 5 messages per second per connection (ping and subscribe count),
- * and at most 300 channel subscriptions per connection. Exceeding the limit disconnects the socket.
+ * Limits from the docs: at most 5 messages per second per connection (ping and subscribe
+ * count), and at most 300 channel subscriptions per connection. The server drops silent
+ * sessions (~26s), so we send an application-level ping every 5s and pump all outgoing
+ * frames through a 250ms queue (4 msg/s).
  */
 class BitunixWs(
     private val apiKey: String,
@@ -33,52 +37,116 @@ class BitunixWs(
     }
 
     private val client = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
-    private var publicSocket: WebSocket? = null
-    private var privateSocket: WebSocket? = null
-    // One queue per socket: requests made before a socket is ready are sent once it is ready.
-    private val pendingPublic = mutableListOf<Pair<String, JSONArray>>()
-    private val pendingPrivate = mutableListOf<Pair<String, JSONArray>>()
+    private val pump = Executors.newSingleThreadScheduledExecutor { r ->
+        Thread(r, "bitunix-ws-pump").apply { isDaemon = true }
+    }
+    private var pumpsStarted = false
 
-    fun connectPublic() {
-        publicSocket = client.newWebSocket(
-            Request.Builder().url(PUBLIC_URL).build(),
-            socketListener(privateChannel = false),
+    private fun ensurePumps() {
+        synchronized(this) {
+            if (!pumpsStarted) {
+                pumpsStarted = true
+                startPumps()
+            }
+        }
+    }
+
+    private class SocketState(val privateChannel: Boolean) {
+        val socket = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        val channels = java.util.Collections.synchronizedSet(LinkedHashSet<Pair<String, String?>>())
+        val queue = ConcurrentLinkedQueue<String>()
+        val ready = java.util.concurrent.atomic.AtomicBoolean(false)
+        val manualClose = java.util.concurrent.atomic.AtomicBoolean(false)
+        val attempt = java.util.concurrent.atomic.AtomicLong(0)
+    }
+
+    private val public = SocketState(privateChannel = false)
+    private val private = SocketState(privateChannel = true)
+
+    fun connectPublic() = connect(public)
+
+    /** Opens the private socket. Subscriptions are sent only after the login reply succeeds. */
+    fun connectPrivate() = connect(private)
+
+    private fun connect(state: SocketState) {
+        ensurePumps()
+        state.manualClose.set(false)
+        state.ready.set(false)
+        state.socket.set(
+            client.newWebSocket(
+                Request.Builder().url(WS_URL).build(),
+                socketListener(state),
+            )
         )
     }
 
-    /** Opens the private socket. Subscriptions are sent only after the login reply succeeds. */
-    fun connectPrivate() {
-        privateSocket = client.newWebSocket(
-            Request.Builder().url(PRIVATE_URL).build(),
-            socketListener(privateChannel = true),
-        )
+    /** Reconnects with exponential backoff (1s → 30s cap) on the pump thread. */
+    private fun scheduleReconnect(state: SocketState) {
+        val n = state.attempt.incrementAndGet()
+        val delay = (1L shl n.toInt().coerceAtMost(5)).coerceAtMost(30L)
+        pump.schedule({ if (!state.manualClose.get()) connect(state) }, delay, TimeUnit.SECONDS)
+    }
+    private fun startPumps() {
+        // 250ms send pump keeps outgoing traffic under the 5 msg/s limit.
+        pump.scheduleWithFixedDelay({
+            for (state in listOf(public, private)) {
+                val ws = state.socket.get()
+                if (ws != null && state.ready.get()) {
+                    val frame = state.queue.poll()
+                    if (frame != null) ws.send(frame)
+                }
+            }
+        }, 250L, 250L, TimeUnit.MILLISECONDS)
+        // Application-level ping every 5s: the server drops silent sessions (~26s).
+        pump.scheduleWithFixedDelay({
+            for (state in listOf(public, private)) {
+                val ws = state.socket.get()
+                if (ws != null && state.ready.get()) {
+                    ws.send(JSONObject().put("op", "ping").put("ping", System.currentTimeMillis()).toString())
+                }
+            }
+        }, 5L, 5L, TimeUnit.SECONDS)
     }
 
     /** Subscribe a public market channel, e.g. ("market_kline_15min", "BTCUSDT"). */
-    fun subscribePublic(ch: String, symbol: String) = send(publicSocket, pendingPublic, "subscribe", ch, symbol)
+    fun subscribePublic(ch: String, symbol: String) {
+        public.channels.add(ch to symbol)
+        send(public, "subscribe", ch, symbol)
+    }
 
-    fun unsubscribePublic(ch: String, symbol: String) = send(publicSocket, pendingPublic, "unsubscribe", ch, symbol)
+    fun unsubscribePublic(ch: String, symbol: String) {
+        public.channels.remove(ch to symbol)
+        send(public, "unsubscribe", ch, symbol)
+    }
 
     /** Private channels: "order", "position", "tpsl", "balance" (no symbol). */
-    fun subscribePrivate(ch: String) = send(privateSocket, pendingPrivate, "subscribe", ch, null)
+    fun subscribePrivate(ch: String) {
+        private.channels.add(ch to null)
+        send(private, "subscribe", ch, null)
+    }
 
     fun close() {
-        publicSocket?.close(1000, "bye")
-        privateSocket?.close(1000, "bye")
+        public.manualClose.set(true)
+        private.manualClose.set(true)
+        public.socket.get()?.close(1000, "bye")
+        private.socket.get()?.close(1000, "bye")
+        pump.shutdownNow()
         client.dispatcher.executorService.shutdown()
     }
 
-    private fun socketListener(privateChannel: Boolean) = object : WebSocketListener() {
+    private fun socketListener(state: SocketState) = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            if (privateChannel) {
+            state.attempt.set(0)
+            if (state.privateChannel) {
                 login(webSocket)
             } else {
+                state.ready.set(true)
+                state.socket.set(webSocket)
                 listener.onOpen(false)
-                flush(webSocket, pendingPublic)
+                resubscribe(state)
             }
         }
 
@@ -90,13 +158,14 @@ class BitunixWs(
                 return
             }
             when (msg.optString("op")) {
-                "pong" -> Unit
+                "pong", "" -> Unit
                 "ping" -> webSocket.send(JSONObject().put("op", "pong").put("pong", msg.optLong("ping")).toString())
                 "login" -> {
-                    val ok = msg.optInt("code", -1) == 0
-                    if (ok) {
+                    if (msg.optInt("code", -1) == 0) {
+                        state.ready.set(true)
+                        state.socket.set(webSocket)
                         listener.onOpen(true)
-                        flush(webSocket, pendingPrivate)
+                        resubscribe(state)
                     } else {
                         listener.onError("Login failed: ${msg.optString("msg")}")
                     }
@@ -105,7 +174,7 @@ class BitunixWs(
                     val ch = msg.optString("ch")
                     if (ch.isNotEmpty() && msg.has("data")) {
                         val data = msg.opt("data")
-                        // Kline docs say data is a list, but the example shows an object. Accept both.
+                        // Kline docs say data is a list, but examples show an object. Accept both.
                         val obj = when (data) {
                             is JSONObject -> data
                             is JSONArray -> if (data.length() > 0) data.optJSONObject(0) ?: JSONObject() else JSONObject()
@@ -118,13 +187,22 @@ class BitunixWs(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            state.ready.set(false)
             listener.onError(t.message ?: t.javaClass.simpleName)
-            listener.onClosed(privateChannel, "failure")
+            listener.onClosed(state.privateChannel, "failure")
+            if (!state.manualClose.get()) scheduleReconnect(state)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            listener.onClosed(privateChannel, "closed $code $reason")
+            state.ready.set(false)
+            listener.onClosed(state.privateChannel, "closed $code $reason")
         }
+    }
+
+    /** Re-subscribes every channel booked on this socket after a (re)connect. */
+    private fun resubscribe(state: SocketState) {
+        val snapshot = synchronized(state.channels) { state.channels.toList() }
+        snapshot.forEach { (ch, sym) -> send(state, "subscribe", ch, sym) }
     }
 
     private fun login(ws: WebSocket) {
@@ -143,27 +221,16 @@ class BitunixWs(
         ws.send(JSONObject().put("op", "login").put("args", args).toString())
     }
 
-    private fun send(ws: WebSocket?, queue: MutableList<Pair<String, JSONArray>>, op: String, ch: String, symbol: String?) {
+    /** Queues a request; the 250ms pump sends it once the socket is ready. */
+    private fun send(state: SocketState, op: String, ch: String, symbol: String?) {
         val arg = JSONObject().put("ch", ch)
         if (symbol != null) arg.put("symbol", symbol)
         val args = JSONArray().put(arg)
-        if (ws == null) {
-            queue.add(op to args)
-            return
-        }
-        ws.send(JSONObject().put("op", op).put("args", args).toString())
-    }
-
-    private fun flush(ws: WebSocket, queue: MutableList<Pair<String, JSONArray>>) {
-        queue.forEach { (op, args) ->
-            ws.send(JSONObject().put("op", op).put("args", args).toString())
-        }
-        queue.clear()
+        state.queue.add(JSONObject().put("op", op).put("args", args).toString())
     }
 
     companion object {
-        const val PUBLIC_URL = "wss://fapi.bitunix.com/public/"
-        const val PRIVATE_URL = "wss://fapi.bitunix.com/private/"
+        const val WS_URL = "wss://fstream.bitunix.com/ws"
 
         fun sha256Hex(input: String): String =
             MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
