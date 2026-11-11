@@ -139,11 +139,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         limit: Int = 200,
         endTime: Long? = null,
         type: String? = null,
+        startTime: Long? = null,
     ): List<Candle> {
         val q = mutableMapOf(
             "symbol" to symbol, "interval" to interval, "limit" to limit.toString(),
         )
         if (endTime != null) q["endTime"] = endTime.toString()
+        if (startTime != null) q["startTime"] = startTime.toString()
         if (type != null) q["type"] = type
         val json = publicGet("/api/v1/futures/market/kline", q)
         val arr = dataArray(json)
@@ -160,10 +162,14 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }.sortedBy { it.time }
     }
 
-    /** 24h tickers (lastPrice, quoteVol, open, high, low). */
+    /**
+     * 24h tickers (lastPrice, quoteVol, open, high, low).
+     * NOTE: the endpoint ignores the `symbols` filter — it always returns every
+     * symbol — so results are filtered client-side.
+     */
     fun tickers(symbols: String = ""): JSONArray {
         val q = if (symbols.isBlank()) emptyMap() else mapOf("symbols" to symbols)
-        return dataArray(publicGet("/api/v1/futures/market/tickers", q))
+        return filterTickers(dataArray(publicGet("/api/v1/futures/market/tickers", q)), symbols)
     }
 
     fun lastPrice(symbol: String): Double {
@@ -188,15 +194,17 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun depth(symbol: String, limit: Int = 15): JSONObject = dataObject(publicGet(
         "/api/v1/futures/market/depth", mapOf("symbol" to symbol, "limit" to limit.toString())))
 
-    /** Mark price — TP/SL triggers use MARK_PRICE, so plan levels from this price. */
-    fun markPrice(symbol: String): JSONObject = dataObject(publicGet(
-        "/api/v1/futures/market/mark_price", mapOf("symbol" to symbol)))
+    /**
+     * Mark price for a symbol. Bitunix does not serve a dedicated mark_price
+     * endpoint (404), but the single-symbol funding endpoint publishes markPrice,
+     * indexPrice and lastPrice.
+     */
+    fun markPrice(symbol: String): JSONObject = fundingRate(symbol)
 
-    /** Index price (the basis the mark price is derived from). */
-    fun indexPrice(symbol: String): JSONObject = dataObject(publicGet(
-        "/api/v1/futures/market/index_price", mapOf("symbol" to symbol)))
+    /** Index price for a symbol (same source as [markPrice]). */
+    fun indexPrice(symbol: String): JSONObject = fundingRate(symbol)
 
-    /** Funding settlement history (docs list two paths; the first one is canonical). */
+    /** Funding settlement history (canonical path: get_funding_rate_history). */
     fun fundingRateHistory(
         symbol: String,
         limit: Int = 100,
@@ -206,11 +214,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         val q = mutableMapOf("symbol" to symbol, "limit" to limit.toString())
         if (startTime != null) q["startTime"] = startTime.toString()
         if (endTime != null) q["endTime"] = endTime.toString()
-        return try {
-            dataArray(publicGet("/api/v1/futures/market/get_funding_rate_history", q))
-        } catch (_: BitunixApiException) {
-            dataArray(publicGet("/api/v1/futures/market/funding_rate/history", q))
-        }
+        return dataArray(publicGet("/api/v1/futures/market/get_funding_rate_history", q))
     }
 
     // ---- Account (signed) ----
@@ -255,7 +259,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             .put("symbol", symbol).put("marginCoin", marginCoin).put("amount", amount)
         if (side != null) body.put("side", side)
         if (positionId != null) body.put("positionId", positionId)
-        return signedPost("/api/v1/futures/account/adjust_position_margin", body)
+        return try {
+            signedPost("/api/v1/futures/account/adjust_position_margin", body)
+        } catch (_: BitunixApiException) {
+            // The official examples use the position-scoped path; try it as fallback.
+            signedPost("/api/v1/futures/position/adjust_margin", body)
+        }
     }
 
     /**
@@ -435,6 +444,24 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         fun sha256Hex(input: String): String =
             MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
+
+        /**
+         * The tickers endpoint ignores the `symbols` filter and returns every
+         * symbol, so the filter is applied here. Blank input passes through.
+         */
+        fun filterTickers(all: JSONArray, symbols: String): JSONArray {
+            if (symbols.isBlank()) return all
+            val wanted = symbols.split(",")
+                .map { it.trim().uppercase() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+            val out = JSONArray()
+            for (i in 0 until all.length()) {
+                val o = all.optJSONObject(i) ?: continue
+                if (o.optString("symbol").uppercase() in wanted) out.put(o)
+            }
+            return out
+        }
 
         /**
          * Builds the four signed headers per the official docs:
