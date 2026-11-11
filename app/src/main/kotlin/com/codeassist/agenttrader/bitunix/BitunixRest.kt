@@ -84,13 +84,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         if (signed) {
             val nonce = UUID.randomUUID().toString().replace("-", "")
             val timestamp = System.currentTimeMillis().toString()
-            val queryParams = query.toSortedMap().entries.joinToString("") { it.key + it.value }
-            val digest = sha256Hex(nonce + timestamp + apiKey + queryParams + (body ?: ""))
-            val sign = sha256Hex(digest + secretKey)
-            conn.setRequestProperty("api-key", apiKey)
-            conn.setRequestProperty("nonce", nonce)
-            conn.setRequestProperty("timestamp", timestamp)
-            conn.setRequestProperty("sign", sign)
+            signedHeaders(apiKey, secretKey, nonce, timestamp, query, body)
+                .forEach { (k, v) -> conn.setRequestProperty(k, v) }
         }
         if (body != null) {
             conn.doOutput = true
@@ -128,11 +123,25 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     // ---- Market data (public) ----
 
-    /** Kline history. Returns candles oldest first; the forming candle is the last row. */
-    fun klines(symbol: String, interval: String, limit: Int = 200): List<Candle> {
-        val json = publicGet("/api/v1/futures/market/kline", mapOf(
+    /**
+     * Kline history. Only CLOSED candles are returned — the forming candle is
+     * excluded; rows arrive newest first and we sort them ascending.
+     * [endTime] (exclusive, ms) pages backward through history; [type] is
+     * LAST_PRICE (default) or MARK_PRICE. limit is 100..200 per request.
+     */
+    fun klines(
+        symbol: String,
+        interval: String,
+        limit: Int = 200,
+        endTime: Long? = null,
+        type: String? = null,
+    ): List<Candle> {
+        val q = mutableMapOf(
             "symbol" to symbol, "interval" to interval, "limit" to limit.toString(),
-        ))
+        )
+        if (endTime != null) q["endTime"] = endTime.toString()
+        if (type != null) q["type"] = type
+        val json = publicGet("/api/v1/futures/market/kline", q)
         val arr = dataArray(json)
         return (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
@@ -167,6 +176,10 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun fundingRate(symbol: String): JSONObject = dataObject(publicGet(
         "/api/v1/futures/market/funding_rate", mapOf("symbol" to symbol)))
 
+    /** Funding rates for ALL symbols: fundingRate, markPrice, nextFundingTime, fundingInterval. */
+    fun fundingRateBatch(): JSONArray =
+        dataArray(publicGet("/api/v1/futures/market/funding_rate/batch"))
+
     // ---- Account (signed) ----
 
     /** Futures balance for a margin coin. Fields include available/freeze/margin. */
@@ -191,6 +204,15 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     fun changePositionMode(mode: String): JSONObject =
         signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
+
+    /**
+     * Per-symbol account trading settings: marginMode, leverage (one-way) and
+     * long/short leverage (hedge). Pass comma-separated symbols (max 50) or all.
+     */
+    fun tradingSettings(symbols: String = ""): JSONArray {
+        val q = if (symbols.isBlank()) emptyMap() else mapOf("symbols" to symbols)
+        return dataArray(signedGet("/api/v1/futures/account/trading_settings", q))
+    }
 
     // ---- Positions (signed) ----
 
@@ -277,6 +299,31 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         fun sha256Hex(input: String): String =
             MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
+
+        /**
+         * Builds the four signed headers per the official docs:
+         *   digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)
+         *   sign   = SHA256(digest + secretKey)
+         * queryParams are concatenated key+value, sorted by key, no separators.
+         */
+        fun signedHeaders(
+            apiKey: String,
+            secretKey: String,
+            nonce: String,
+            timestamp: String,
+            query: Map<String, String>,
+            body: String?,
+        ): Map<String, String> {
+            val queryParams = query.toSortedMap().entries.joinToString("") { it.key + it.value }
+            val digest = sha256Hex(nonce + timestamp + apiKey + queryParams + (body ?: ""))
+            val sign = sha256Hex(digest + secretKey)
+            return mapOf(
+                "api-key" to apiKey,
+                "nonce" to nonce,
+                "timestamp" to timestamp,
+                "sign" to sign,
+            )
+        }
     }
 }
 

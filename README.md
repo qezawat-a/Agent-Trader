@@ -24,16 +24,24 @@ Grab the APK from the [Releases](https://github.com/qezawat-a/Agent-Trader/relea
     `sign = SHA256(digest + secretKey)`; 8 req/s throttle; retries on 10001/10005/10006/40007
   - `place_order` always sends the required `marginCoin`; `side` names the POSITION
     (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with `MARK_PRICE`
-  - Market data: kline (`15m`/`1h`), tickers, trading pairs (precision/min volume),
-    funding rate
-  - Account/positions/orders history, flash-close, close-all
+  - Market data: kline (`15m`/`1h`, closed candles only, `endTime` paging,
+    LAST/MARK price), tickers, trading pairs (precision/min volume),
+    funding rate + batch funding rates
+  - Account/positions/orders history, flash-close, close-all, per-symbol
+    trading settings (margin mode + leverage synced before live orders)
+  - Chat commands: `status balance positions orders trades_history pnl funding
+    scan once report ...`
   - WebSocket on `wss://fstream.bitunix.com/ws` — app-level ping every 5s, 250ms send
     pump (4 msg/s), reconnect with backoff, resubscribe on reconnect
 - **Trading logic** — 21 strategies (trend, reversion, breakout, reversal, risk filters),
   15m+1h consensus gate, TP/SL plan: stop at 50% toward liquidation, partial TP ladder
   (1R–4R @ 25%), breakeven at 10% ROI, trailing stop at 15% ROI
 - **Safety** — paper mode by default; live mode requires real keys + explicit toggle;
-  live orders are clamped to each symbol's max leverage and min volume
+  live orders are clamped to each symbol's max leverage; quantities below the
+  exchange minimum are skipped, never upsized
+- **Tests** — 31 JVM unit tests cover the Bitunix signature (vectors computed
+  independently), provider URL normalization, qty/price formatting and funding
+  reports; CI runs them on every release build
 
 ## Quick start (in the app)
 

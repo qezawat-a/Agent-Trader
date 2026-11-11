@@ -163,26 +163,39 @@ class TraderEngine(private val rest: BitunixRest) {
         return null
     }
 
+    /** Test hook: seeds the pair cache without network. */
+    internal fun seedPairInfo(symbol: String, info: PairInfo) {
+        pairs[symbol] = info
+    }
+
     /** Formats qty to the symbol's base precision, floored, never below minTradeVolume. */
-    fun formatQty(symbol: String, raw: Double): String? {
-        val info = pairInfo(symbol) ?: return "%.6f".format(raw)
-        val factor = Math.pow(10.0, info.basePrecision.toDouble())
-        var qty = floor(raw * factor) / factor
-        if (info.minTradeVolume > 0 && qty < info.minTradeVolume) qty = info.minTradeVolume
+    fun formatQty(symbol: String, raw: Double): String? = formatQty(symbol, raw, pairInfo(symbol))
+
+    internal fun formatQty(symbol: String, raw: Double, info: PairInfo?): String? {
+        if (info == null) return "%.6f".format(raw)
+        // valueOf() uses the canonical decimal string, avoiding the BigDecimal(double)
+        // binary artifact that made 0.123 floor to 0.122 at 3 decimals.
+        val qty = java.math.BigDecimal.valueOf(raw)
+            .setScale(info.basePrecision, java.math.RoundingMode.FLOOR)
+            .toDouble()
+        // Skip instead of clamping up: an order floored to zero or below the min
+        // volume must never be silently upsized beyond the intended risk.
         if (qty <= 0) return null
+        if (info.minTradeVolume > 0 && qty < info.minTradeVolume) return null
         return BigDecimalFormat.format(qty, info.basePrecision)
     }
 
     /** Formats a price to the symbol's quote precision. */
-    fun formatPrice(symbol: String, price: Double): String {
-        val info = pairInfo(symbol)
-        val p = info?.quotePrecision ?: 1
-        return BigDecimalFormat.format(price, p)
-    }
+    fun formatPrice(symbol: String, price: Double): String =
+        formatPrice(symbol, price, pairInfo(symbol)?.quotePrecision)
+
+    internal fun formatPrice(symbol: String, price: Double, quotePrecision: Int?): String =
+        BigDecimalFormat.format(price, quotePrecision ?: 1)
 
     /** Effective leverage, clamped to the symbol's max. */
-    fun effectiveLeverage(symbol: String): Int =
-        minOf(leverage, pairInfo(symbol)?.maxLeverage ?: leverage)
+    fun effectiveLeverage(symbol: String): Int = effectiveLeverage(leverage, pairInfo(symbol)?.maxLeverage)
+
+    internal fun effectiveLeverage(base: Int, max: Int?): Int = minOf(base, max ?: base)
 
     /** Ranks the scanner universe by quote volume and returns the top symbols. */
     fun rankUniverse(top: Int = 10): List<String> {
@@ -229,8 +242,23 @@ class TraderEngine(private val rest: BitunixRest) {
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
         val tradeSide = if (positionMode == "HEDGE") "OPEN" else null
+        // Sync account leverage/margin mode with this order's needs — only when they
+        // differ, using the account's ACTUAL settings (trading_settings endpoint).
+        runCatching {
+            val s = rest.tradingSettings(symbol)
+            if (s.length() > 0) {
+                val o = s.getJSONObject(0)
+                val curMode = o.optString("marginMode")
+                val curLev = if (positionMode == "HEDGE")
+                    o.optInt("longLeverage", o.optInt("leverage", 0))
+                else o.optInt("leverage", 0)
+                if (curMode.isNotBlank() && curMode != marginMode) {
+                    rest.changeMarginMode(symbol, mode = marginMode)
+                }
+                if (curLev > 0 && curLev != lev) rest.changeLeverage(symbol, leverage = lev)
+            }
+        }
         try {
-            if (lev != leverage) rest.changeLeverage(symbol, leverage = lev)
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
                 tpPrice = formatPrice(symbol, plan.ladder.first().first),
@@ -262,11 +290,15 @@ class TraderEngine(private val rest: BitunixRest) {
         return "PENDING"
     }
 
-    /** Live account snapshot: balance, open positions, pending orders. */
+    /** Live account snapshot: balance, open positions, per-symbol settings, pending orders. */
     fun liveStatus(): String = try {
         val bal = rest.account()
         val positions = rest.pendingPositions()
         val orders = rest.pendingOrders(limit = 5)
+        val syms = (0 until positions.length())
+            .map { positions.getJSONObject(it).optString("symbol") }
+            .filter { it.isNotBlank() }
+            .distinct()
         buildString {
             appendLine("Account: available ${bal.optString("available")} USDT, margin ${bal.optString("margin")}")
             appendLine("Open positions: ${positions.length()}")
@@ -274,6 +306,15 @@ class TraderEngine(private val rest: BitunixRest) {
                 val p = positions.getJSONObject(i)
                 appendLine("  ${p.optString("symbol")} ${p.optString("side")} qty ${p.optString("holdQty")} " +
                     "entry ${p.optString("entryPrice")} liq ${p.optString("liqPrice")}")
+            }
+            if (syms.isNotEmpty()) {
+                runCatching { rest.tradingSettings(syms.joinToString(",")) }.onSuccess { settings ->
+                    for (j in 0 until settings.length()) {
+                        val s = settings.getJSONObject(j)
+                        appendLine("  settings ${s.optString("symbol")}: ${s.optString("marginMode")} " +
+                            "lev ${s.optInt("leverage")} (long ${s.optInt("longLeverage")}/short ${s.optInt("shortLeverage")})")
+                    }
+                }
             }
             appendLine("Pending orders: ${orders.length()}")
         }
@@ -323,6 +364,32 @@ class TraderEngine(private val rest: BitunixRest) {
 
     fun tradesHistory(): String = if (broker.history.isEmpty()) "No trades yet."
     else broker.history.takeLast(20).joinToString("\n")
+
+    /**
+     * Funding-rate snapshot, most extreme rates first (crowding signal).
+     * Positive rate = longs pay shorts (crowded longs); negative = shorts pay longs.
+     * Pure so it can be tested against the documented response shape.
+     */
+    internal fun fundingSummary(arr: org.json.JSONArray, top: Int = 8): String {
+        val rows = (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            val rate = o.optString("fundingRate").toDoubleOrNull() ?: return@mapNotNull null
+            Triple(o.optString("symbol"), rate, o.optLong("nextFundingTime"))
+        }
+        if (rows.isEmpty()) return "No funding data."
+        val fmtTime = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+        val body = rows.sortedByDescending { kotlin.math.abs(it.second) }.take(top)
+            .joinToString("\n") { (sym, rate, next) ->
+                "%-10s %s %.4f%%  %s  next %s".format(
+                    sym,
+                    if (rate >= 0) "▲" else "▼",
+                    rate * 100,
+                    if (rate >= 0) "longs pay shorts" else "shorts pay longs",
+                    if (next > 0) fmtTime.format(java.util.Date(next)) else "?",
+                )
+            }
+        return body + "\nExtreme positive funding = crowded longs; extreme negative = crowded shorts."
+    }
 
     /** Starts the autonomous loop: scan + manage every [intervalSec] while trading is on. */
     fun startLoop(intervalSec: Long, onEvent: (String) -> Unit) {
@@ -416,6 +483,11 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("tpsl_history") -> "TP/SL plan: stop at ${"%.0f".format(TpSlPlanner.STOP_FRACTION_OF_LIQ * 100)}% toward liquidation, " +
                 "ladder 1R..4R each 25%, breakeven at 10% ROI, trail at 15% ROI."
             t.startsWith("pnl") -> pnl()
+            t.startsWith("funding") -> try {
+                fundingSummary(rest.fundingRateBatch())
+            } catch (e: Exception) {
+                "Funding failed: ${e.message}"
+            }
             t.startsWith("report on") -> { reportOn = true; "Periodic reports on (every $reportIntervalMin min)." }
             t.startsWith("report off") -> { reportOn = false; "Periodic reports off." }
             t.startsWith("report interval") -> {
@@ -446,7 +518,7 @@ class TraderEngine(private val rest: BitunixRest) {
 
 /** Fixed-point formatting without scientific notation. */
 object BigDecimalFormat {
-    fun format(value: Double, decimals: Int): String = java.math.BigDecimal(value)
+    fun format(value: Double, decimals: Int): String = java.math.BigDecimal.valueOf(value)
         .setScale(decimals, java.math.RoundingMode.FLOOR)
         .stripTrailingZeros()
         .toPlainString()

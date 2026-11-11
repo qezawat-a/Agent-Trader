@@ -68,4 +68,6 @@ dependencies {
     implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.compose.ui:ui-tooling-preview:1.11.2")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    testImplementation(kotlin("test"))
+    testImplementation("org.json:json:20240303")
 }
