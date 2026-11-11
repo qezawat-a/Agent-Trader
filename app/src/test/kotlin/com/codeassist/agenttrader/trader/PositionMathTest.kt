@@ -69,4 +69,53 @@ class PositionMathTest {
             .put("positionList", JSONArray("""[{"symbol":"X"}]"""))
         assertEquals("BTCUSDT", rest.dataArray(json).getJSONObject(0).optString("symbol"))
     }
+
+    // ---- get_pending_positions (doc sample) ----
+
+    private val docPosition = org.json.JSONObject(
+        """{"positionId":"12345678","symbol":"BTCUSDT","qty":"0.5","entryValue":"30000",
+           "side":"LONG","positionMode":"HEDGE","marginMode":"ISOLATION","leverage":100,
+           "fee":"0.1","funding":"-0.2","realizedPNL":"102.9","margin":"300",
+           "unrealizedPNL":"1.5","liqPrice":"22209","marginRate":"0.01",
+           "avgOpenPrice":"1.0","ctime":1691382137448,"mtime":1691382137448}""",
+    )
+
+    @Test
+    fun pending_position_uses_documented_field_names() {
+        assertEquals("0.5", posQty(docPosition))
+        assertEquals("1.0", posEntry(docPosition))
+        assertEquals("22209", liqText(docPosition.optString("liqPrice")))
+    }
+
+    @Test
+    fun legacy_field_names_are_accepted_as_fallbacks() {
+        val legacy = org.json.JSONObject("""{"holdQty":"2","entryPrice":"10"}""")
+        assertEquals("2", posQty(legacy))
+        assertEquals("10", posEntry(legacy))
+    }
+
+    @Test
+    fun non_positive_liq_price_means_low_risk() {
+        assertEquals("— (low risk)", liqText("0"))
+        assertEquals("— (low risk)", liqText("-12.5"))
+        assertEquals("—", liqText(""))
+    }
+
+    // ---- get_position_tiers (doc sample) ----
+
+    private val docTiers = JSONArray(
+        """[{"symbol":"BTCUSDT","level":1,"startValue":"0","endValue":"50000","leverage":125,"maintenanceMarginRate":"0.004"},
+            {"symbol":"BTCUSDT","level":2,"startValue":"50000","endValue":"200000","leverage":100,"maintenanceMarginRate":"0.005"}]""",
+    )
+
+    @Test
+    fun doc_tier_table_bounds_are_half_open() {
+        assertEquals(1, tierFor(docTiers, 0.0)?.optInt("level"))
+        assertEquals(1, tierFor(docTiers, 49_999.0)?.optInt("level"))
+        assertEquals(2, tierFor(docTiers, 50_000.0)?.optInt("level"))
+        assertEquals(2, tierFor(docTiers, 199_999.0)?.optInt("level"))
+        assertNull(tierFor(docTiers, 200_000.0))
+        assertEquals(125, tierFor(docTiers, 1000.0)?.optInt("leverage"))
+        assertEquals("0.004", tierFor(docTiers, 1000.0)?.optString("maintenanceMarginRate"))
+    }
 }

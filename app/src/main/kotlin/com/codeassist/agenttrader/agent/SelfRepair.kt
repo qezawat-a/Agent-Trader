@@ -48,6 +48,8 @@ object SelfRepair {
         val bitunixKeysPresent: Boolean,
         val openPositions: Int,
         val leverage: Int,
+        /** Highest leverage the exchange lists for any contract (200 for BTCUSDT/ETHUSDT). */
+        val leverageCeiling: Int = 200,
     )
 
     /**
@@ -87,8 +89,13 @@ object SelfRepair {
         if (engine.live && !engine.feedConnected && engine.bitunixKeysPresent) {
             f += Finding("WARN", "Live mode without the WebSocket feed.", "Reconnect the private feed (balance/position/order/tpsl)", true)
         }
-        if (engine.leverage > 125) {
-            f += Finding("WARN", "Leverage ${engine.leverage}x is above the exchange maximum.", "Clamp leverage to 125x", true)
+        if (engine.leverage > engine.leverageCeiling) {
+            f += Finding(
+                "WARN",
+                "Leverage ${engine.leverage}x is above the exchange maximum (${engine.leverageCeiling}x).",
+                "Clamp leverage to ${engine.leverageCeiling}x",
+                true,
+            )
         }
         if (engine.live && engine.openPositions > 0 && !engine.feedConnected) {
             f += Finding("WARN", "Open live positions but no feed — changes may be missed.", "Reconnect the feed before managing positions", true)

@@ -227,7 +227,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     basePrecision = o.optInt("basePrecision", 4),
                     quotePrecision = o.optInt("quotePrecision", 1),
                     minTradeVolume = o.optString("minTradeVolume").toDoubleOrNull() ?: 0.0,
-                    maxLeverage = o.optInt("maxLeverage", 125),
+                    maxLeverage = o.optInt("maxLeverage", MAX_LEVERAGE),
                 )
                 return pairs[symbol]
             }
@@ -265,6 +265,14 @@ class TraderEngine(private val rest: BitunixRest) {
 
     internal fun formatPrice(symbol: String, price: Double, quotePrecision: Int?): String =
         BigDecimalFormat.format(price, quotePrecision ?: 1)
+
+    /**
+     * Highest leverage the slider may offer. Bitunix does not publish a single
+     * account-wide maximum in the docs — the authority is the per-symbol
+     * maxLeverage from trading_pairs (verified live: BTCUSDT/ETHUSDT = 200x,
+     * most other contracts 20-125x). Each order is clamped to its own symbol.
+     */
+    fun leverageCeiling(): Int = MAX_LEVERAGE
 
     /** Effective leverage, clamped to the symbol's max. */
     fun effectiveLeverage(symbol: String): Int = effectiveLeverage(leverage, pairInfo(symbol)?.maxLeverage)
@@ -488,8 +496,11 @@ class TraderEngine(private val rest: BitunixRest) {
             appendLine("Open positions: ${positions.length()}")
             for (i in 0 until positions.length()) {
                 val p = positions.getJSONObject(i)
-                appendLine("  ${p.optString("symbol")} ${p.optString("side")} qty ${p.optString("holdQty")} " +
-                    "entry ${p.optString("entryPrice")} liq ${p.optString("liqPrice")}")
+                appendLine(
+                    "  ${p.optString("symbol")} ${p.optString("side")} qty ${posQty(p)} " +
+                        "entry ${posEntry(p)} liq ${liqText(p.optString("liqPrice"))} " +
+                        "upnl ${p.optString("unrealizedPNL")}",
+                )
             }
             if (syms.isNotEmpty()) {
                 runCatching { rest.tradingSettings(syms.joinToString(",")) }.onSuccess { settings ->
@@ -502,8 +513,8 @@ class TraderEngine(private val rest: BitunixRest) {
                 // Risk tier per open position (bounded to keep the call count low).
                 for (sym in syms.take(3)) {
                     val p = bySymbol[sym] ?: continue
-                    val qty = p.optString("holdQty").toDoubleOrNull() ?: continue
-                    val entry = p.optString("entryPrice").toDoubleOrNull() ?: continue
+                    val qty = posQty(p).toDoubleOrNull() ?: continue
+                    val entry = posEntry(p).toDoubleOrNull() ?: continue
                     val notional = qty * entry
                     val tier = runCatching { tierFor(rest.positionTiers(sym), notional) }.getOrNull()
                     if (tier != null) {
@@ -773,7 +784,7 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             t.startsWith("set leverage") -> {
                 val v = t.removePrefix("set leverage").trim().toIntOrNull()
-                if (v == null || v !in 1..125) "Usage: set leverage <1-125>"
+                if (v == null || v !in 1..MAX_LEVERAGE) "Usage: set leverage <1-$MAX_LEVERAGE>"
                 else {
                     leverage = v
                     "Leverage set to $v x."
@@ -794,6 +805,16 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             else -> "Not supported yet: $text"
         }
+    }
+
+    companion object {
+        /**
+         * Upper bound for the leverage slider and the `set leverage` command.
+         * Bitunix publishes no account-wide maximum in the docs; the authority is
+         * the per-symbol maxLeverage from trading_pairs, whose highest listing
+         * (verified live, 2026-11) is 200x for BTCUSDT and ETHUSDT.
+         */
+        const val MAX_LEVERAGE = 200
     }
 }
 
@@ -838,6 +859,26 @@ internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): Strin
  * Risk tier covering a notional value, or null when the value falls outside the
  * tier table. Tiers: level, startValue, endValue, leverage, maintenanceMarginRate.
  */
+/**
+ * Position quantity. The REST docs name it `qty`; `holdQty` is accepted as a
+ * fallback because some order payloads use it.
+ */
+internal fun posQty(p: org.json.JSONObject): String =
+    p.optString("qty").ifBlank { p.optString("holdQty") }
+
+/** Average entry price: `avgOpenPrice` per the REST docs, `entryPrice` as fallback. */
+internal fun posEntry(p: org.json.JSONObject): String =
+    p.optString("avgOpenPrice").ifBlank { p.optString("entryPrice") }
+
+/**
+ * Liquidation price display. Per the docs, liqPrice <= 0 means the position is
+ * at low risk and no liquidation price exists at that moment.
+ */
+internal fun liqText(raw: String): String {
+    val v = raw.toDoubleOrNull() ?: return raw.ifBlank { "—" }
+    return if (v <= 0.0) "— (low risk)" else raw
+}
+
 internal fun tierFor(tiers: org.json.JSONArray, notional: Double): org.json.JSONObject? {
     for (i in 0 until tiers.length()) {
         val t = tiers.optJSONObject(i) ?: continue

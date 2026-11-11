@@ -278,8 +278,21 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     // ---- Positions (signed) ----
 
-    fun pendingPositions(symbol: String = ""): JSONArray {
-        val q = if (symbol.isBlank()) emptyMap() else mapOf("symbol" to symbol)
+    /**
+     * Open positions. All filters are optional: `symbol`, `positionId`, and
+     * sub-account scope (docs: without subAccountId, main + accessible subs are
+     * returned; includeSubAccounts toggles the sub-account query).
+     */
+    fun pendingPositions(
+        symbol: String = "",
+        positionId: String = "",
+        includeSubAccounts: Boolean? = null,
+    ): JSONArray {
+        val q = buildMap {
+            if (symbol.isNotBlank()) put("symbol", symbol)
+            if (positionId.isNotBlank()) put("positionId", positionId)
+            if (includeSubAccounts != null) put("includeSubAccounts", includeSubAccounts.toString())
+        }
         return dataArray(signedGet("/api/v1/futures/position/get_pending_positions", q))
     }
 

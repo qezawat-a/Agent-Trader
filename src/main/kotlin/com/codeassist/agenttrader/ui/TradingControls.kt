@@ -221,13 +221,17 @@ fun ControlScreen(
                 Column(Modifier.padding(14.dp)) {
                     Text("Risk sliders", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
 
-                    Text("Leverage — ${leverage.toInt()}x", style = MaterialTheme.typography.bodyMedium)
+                    val ceiling = engine.leverageCeiling()
+                    Text(
+                        "Leverage — ${leverage.toInt()}x  (max ${ceiling}x, each symbol clamps to its own limit)",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
                     Slider(
-                        value = leverage,
+                        value = leverage.coerceIn(1f, ceiling.toFloat()),
                         onValueChange = { leverage = it },
                         onValueChangeFinished = { onAction("set leverage ${leverage.toInt()}") },
-                        valueRange = 1f..125f,
-                        steps = 23,
+                        valueRange = 1f..ceiling.toFloat(),
+                        steps = 39,
                         colors = SliderDefaults.colors(
                             thumbColor = scheme.primary,
                             activeTrackColor = scheme.primary,

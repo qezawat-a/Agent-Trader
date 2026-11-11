@@ -57,8 +57,15 @@ class SelfRepairTest {
 
     @Test
     fun leverage_above_the_exchange_max_is_flagged() {
-        val d = SelfRepair.diagnose(provider(), engine(leverage = 200))
+        val d = SelfRepair.diagnose(provider(), engine(leverage = 250))
         assertTrue(d.findings.any { it.issue.contains("Leverage") })
+    }
+
+    @Test
+    fun leverage_at_the_listed_maximum_is_accepted() {
+        // BTCUSDT/ETHUSDT list 200x, so 200 must not be flagged.
+        val d = SelfRepair.diagnose(provider(), engine(leverage = 200))
+        assertTrue(d.findings.none { it.issue.contains("Leverage") }, d.summary())
     }
 
     @Test

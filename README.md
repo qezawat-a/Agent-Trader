@@ -30,7 +30,7 @@ private WebSocket feed that streams balance, position, order and TP/SL updates i
 |---|---|
 | **Chat** | The brain. Ask anything or type a slash command. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
-| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–125x), margin per trade (1–100%), report interval — plus scan / funding / tiers / close-all / cancel-all / diagnose / repair. |
+| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. |
 
 Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
@@ -99,7 +99,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `balance` · `positions` · `positions history` · `orders` · `history orders` ·
 `cancel orders` · `close position <SYMBOL>` · `close all` · `pnl` · `trades_history` ·
 `funding` · `tiers` · `tpsl` · `mid management` · `report on|off|interval <min>` ·
-`set leverage <1-125>` · `set risk <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
+`set leverage <1-200>` · `set risk <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
 
 ## How the brain works
 
@@ -150,6 +150,7 @@ Verified against the live API and the official docs (2026-11):
 | `realizedPNL` excludes fees and funding | Net result is `realizedPNL − fee + funding` |
 | Quantities below the exchange minimum | Skipped, never silently upsized |
 | Kline returns closed candles only | The forming candle is excluded by design |
+| Leverage has no single account-wide max | The authority is each symbol's `maxLeverage` (up to 200x) |
 
 ## Trading logic
 
@@ -157,7 +158,8 @@ Verified against the live API and the official docs (2026-11):
 - 15m + 1h consensus gate before a signal counts.
 - TP/SL plan: stop at 50% of the way to liquidation, partial TP ladder 1R–4R at 25% each,
   breakeven at 10% ROI, trailing stop at 15% ROI.
-- Leverage clamped to each symbol's maximum from `trading_pairs`; quantities floored to the
+- Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to
+  200x for BTCUSDT/ETHUSDT, 20–125x for most other contracts); quantities floored to the
   symbol's base precision and skipped when below the minimum volume.
 
 ## Development
