@@ -136,8 +136,10 @@ Verified against the live API and the official docs (2026-11):
 - **Positions & orders** — pending/history positions, pending/history orders, order detail,
   flash close, close-all, cancel one / cancel all, batch orders, modify order.
 - **TP/SL** — position-level and partial TP/SL (place, modify, cancel, pending, history).
-- **WebSocket** — `wss://fstream.bitunix.com/ws` (one endpoint serves public and private),
-  app-level ping every 3s, 250ms send pump (4 msg/s), reconnect with backoff and resubscribe.
+- **WebSocket** — `wss://fapi.bitunix.com/public/` for market channels and
+  `wss://fapi.bitunix.com/private/` for account channels, app-level ping (Unix seconds)
+  every 3s, 250ms send pump (4 msg/s under the 5 msg/s cap), reconnect with backoff and
+  resubscribe.
   In LIVE mode the app subscribes to `balance`, `position`, `order` and `tpsl` in a single frame.
 
 ### Quirks worth knowing (found by testing, not by reading)

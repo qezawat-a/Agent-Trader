@@ -16,13 +16,15 @@ import java.util.concurrent.TimeUnit
 /**
  * Bitunix futures WebSocket client.
  *
- * Official WS URL for futures: wss://fstream.bitunix.com/ws (one endpoint serves both the
- * public market channels and the private ones — the private connection just logs in first).
+ * Official WS endpoints (docs "WebSocket" page, verified live):
+ *   public  market channels : wss://fapi.bitunix.com/public/
+ *   private account channels: wss://fapi.bitunix.com/private/
+ * The old single fstream.bitunix.com/ws host no longer resolves.
  *
  * Limits from the docs: at most 5 messages per second per connection (ping and subscribe
- * count), and at most 300 channel subscriptions per connection. The server drops silent
- * sessions (~26s), so we send an application-level ping every 5s and pump all outgoing
- * frames through a 250ms queue (4 msg/s).
+ * count; exceeding it disconnects and can block the IP), at most 300 channel
+ * subscriptions per connection. All outgoing frames go through a 250ms pump (4 msg/s);
+ * an application-level ping with a Unix-seconds timestamp goes out every 3s.
  */
 class BitunixWs(
     private val apiKey: String,
@@ -77,7 +79,7 @@ class BitunixWs(
         state.ready.set(false)
         state.socket.set(
             client.newWebSocket(
-                Request.Builder().url(WS_URL).build(),
+                Request.Builder().url(if (state.privateChannel) WS_PRIVATE_URL else WS_PUBLIC_URL).build(),
                 socketListener(state),
             )
         )
@@ -106,7 +108,7 @@ class BitunixWs(
             for (state in listOf(public, private)) {
                 val ws = state.socket.get()
                 if (ws != null && state.ready.get()) {
-                    ws.send(JSONObject().put("op", "ping").put("ping", System.currentTimeMillis()).toString())
+                    ws.send(pingFrame(System.currentTimeMillis()))
                 }
             }
         }, 3L, 3L, TimeUnit.SECONDS)
@@ -201,8 +203,9 @@ class BitunixWs(
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             state.ready.set(false)
-            listener.onError(t.message ?: t.javaClass.simpleName)
-            listener.onClosed(state.privateChannel, "failure")
+            listener.onError(wsErrorText(t.message ?: t.javaClass.simpleName))
+            // onClosed is NOT emitted here: the error line already tells the user what
+            // happened, and a second "closed: failure" line only doubles the noise.
             if (!state.manualClose.get()) scheduleReconnect(state)
         }
 
@@ -243,10 +246,36 @@ class BitunixWs(
     }
 
     companion object {
-        const val WS_URL = "wss://fstream.bitunix.com/ws"
+        /** Docs: "Main Domain, Public channel". */
+        const val WS_PUBLIC_URL = "wss://fapi.bitunix.com/public/"
+
+        /** Docs: "Main Domain, Private channel" (login required). */
+        const val WS_PRIVATE_URL = "wss://fapi.bitunix.com/private/"
+
+        /** Docs: ping carries a Unix timestamp in SECONDS (not milliseconds). */
+        fun pingFrame(nowMs: Long): String =
+            JSONObject().put("op", "ping").put("ping", nowMs / 1000).toString()
 
         fun sha256Hex(input: String): String =
             MessageDigest.getInstance("SHA-256").digest(input.toByteArray(Charsets.UTF_8))
                 .joinToString("") { "%02x".format(it) }
+    }
+}
+
+/**
+ * Turns a low-level socket error into a short line the user can act on.
+ * "Unable to resolve host ..." is what Android reports when the WS domain cannot
+ * be reached at all — historically also the symptom of a wrong host.
+ */
+internal fun wsErrorText(raw: String?): String {
+    val m = raw?.trim().orEmpty()
+    return when {
+        m.contains("Unable to resolve host", ignoreCase = true) ||
+            m.contains("No address associated with hostname", ignoreCase = true) ->
+            "WS unreachable (DNS) — check this device's internet connection"
+        m.contains("timeout", ignoreCase = true) || m.contains("timed out", ignoreCase = true) ->
+            "WS timeout — reconnecting"
+        m.isEmpty() -> "WS connection failed"
+        else -> m
     }
 }

@@ -155,6 +155,7 @@ class TraderEngine(private val rest: BitunixRest) {
     // ---- Live WebSocket feed (private channels) ----
     private var ws: BitunixWs? = null
     private val wsBalance = java.util.concurrent.atomic.AtomicReference<Double?>(null)
+    private var lastWsError: String? = null
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
 
     /**
@@ -167,6 +168,7 @@ class TraderEngine(private val rest: BitunixRest) {
         lateinit var client: BitunixWs
         client = BitunixWs(apiKey, secretKey, object : BitunixWs.Listener {
             override fun onOpen(privateChannel: Boolean) {
+                lastWsError = null
                 if (privateChannel) client.subscribePrivateAll(listOf("balance", "position", "order", "tpsl"))
             }
 
@@ -186,7 +188,10 @@ class TraderEngine(private val rest: BitunixRest) {
             }
 
             override fun onError(message: String) {
-                onEvent?.invoke("WS error: $message")
+                // Reconnects repeat the same failure; surface it once until it changes.
+                if (message == lastWsError) return
+                lastWsError = message
+                onEvent?.invoke("WS: $message")
             }
 
             override fun onClosed(privateChannel: Boolean, reason: String) {
