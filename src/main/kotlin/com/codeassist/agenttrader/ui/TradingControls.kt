@@ -74,11 +74,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.trader.MarketMood
+import com.codeassist.agenttrader.trader.SignalRow
 import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.trader.fmt
 
 /** Where the app is right now — the top-level navigation. */
-enum class AppScreen { CHAT, CONTROL, TRADE, SETTINGS }
+enum class AppScreen { CHAT, TRADE, SIGNALS, CONTROL, SETTINGS }
 
 /** Compact status pill used in the top bar. */
 @Composable
@@ -303,6 +304,137 @@ private fun ActionButton(
         Icon(icon, null, Modifier.size(18.dp), tint = tint)
         Spacer(Modifier.width(6.dp))
         Text(label, fontSize = 13.sp)
+    }
+}
+
+/**
+ * The signal board: what the 21 strategies say right now, how confident they are,
+ * and — when a symbol does not qualify — exactly which gate blocked it.
+ */
+@Composable
+fun SignalsScreen(
+    rows: List<SignalRow>,
+    loading: Boolean,
+    onRefresh: () -> Unit,
+    onTrade: (String, Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    var expanded by remember { mutableStateOf<String?>(null) }
+
+    LazyColumn(
+        modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+    ) {
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
+                Column(Modifier.padding(14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Signals", Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                        OutlinedButton(onClick = onRefresh, enabled = !loading) {
+                            Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text(if (loading) "Scanning…" else "Refresh", fontSize = 12.sp)
+                        }
+                    }
+                    Text(
+                        "15m and 1h must agree · each timeframe needs ≥3 strategies at ≥60% · " +
+                            "combined confidence must be ≥70%",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        if (rows.isEmpty()) {
+            item {
+                Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
+                    Text(
+                        if (loading) "Evaluating the universe…" else "No evaluation yet — tap Refresh.",
+                        Modifier.padding(14.dp),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        items(rows, key = { it.symbol }) { r ->
+            val color = when {
+                r.dir > 0 -> scheme.tertiary
+                r.dir < 0 -> scheme.error
+                else -> scheme.outline
+            }
+            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
+                Column(Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(r.symbol, Modifier.weight(1f), fontWeight = FontWeight.Bold)
+                        StatusPill(r.status, color)
+                    }
+                    Text(
+                        "price ${fmt(r.price)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    r.timeframes.forEach { e ->
+                        val side = when (e.dir) {
+                            1 -> "LONG"
+                            -1 -> "SHORT"
+                            else -> "—"
+                        }
+                        Text(
+                            "${e.timeframe}: $side · ${e.agreeing} votes · ${"%.0f".format(e.confidence)}%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (e.dir == 0) scheme.onSurfaceVariant else color,
+                        )
+                    }
+                    if (r.dir == 0) {
+                        r.reasons.take(2).forEach { why ->
+                            Text("why: $why", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AssistChip(
+                            onClick = { expanded = if (expanded == r.symbol) null else r.symbol },
+                            label = { Text(if (expanded == r.symbol) "Hide votes" else "Strategy votes", fontSize = 11.sp) },
+                        )
+                        if (r.dir != 0) {
+                            AssistChip(
+                                onClick = { onTrade(r.symbol, r.dir) },
+                                label = { Text(if (r.dir > 0) "Go LONG" else "Go SHORT", fontSize = 11.sp, fontWeight = FontWeight.Bold) },
+                                leadingIcon = {
+                                    Icon(
+                                        if (r.dir > 0) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                                        null,
+                                        Modifier.size(14.dp),
+                                    )
+                                },
+                            )
+                        }
+                    }
+                    if (expanded == r.symbol) {
+                        Spacer(Modifier.height(4.dp))
+                        val top = r.timeframes.flatMap { it.votes }.filter { it.dir != 0 }
+                            .sortedByDescending { it.confidence }.take(8)
+                        if (top.isEmpty()) {
+                            Text("No strategy has a side right now.", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant)
+                        } else {
+                            top.forEach { v ->
+                                Text(
+                                    "· ${v.name} (${v.group}): ${if (v.dir > 0) "long" else "short"} ${v.confidence}%",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

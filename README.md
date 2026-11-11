@@ -28,9 +28,10 @@ private WebSocket feed that streams balance, position, order and TP/SL updates i
 
 | Screen | What it does |
 |---|---|
-| **Chat** | The brain. Ask anything or type a slash command. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
+| **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
-| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / funding / tiers / close-all / cancel-all / diagnose / repair. |
+| **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 21 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
+| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. |
 
 Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
@@ -98,7 +99,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `engine on|off` · `start trading` · `stop trading` · `scan on|off|once` · `status` ·
 `balance` · `positions` · `positions history` · `orders` · `history orders` ·
 `cancel orders` · `close position <SYMBOL>` · `close all` · `pnl` · `trades_history` ·
-`funding` · `tiers` · `tpsl` · `mid management` · `report on|off|interval <min>` ·
+`funding` · `tiers` · `signals` · `tpsl` · `mid management` · `report on|off|interval <min>` ·
 `set leverage <1-200>` · `set risk <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
 
 ## How the brain works
@@ -157,7 +158,11 @@ Verified against the live API and the official docs (2026-11):
 ## Trading logic
 
 - 21 strategies: trend, reversion, breakout, reversal and risk filters.
-- 15m + 1h consensus gate before a signal counts.
+- A **signal** is the 15m + 1h verdict: each timeframe needs at least **3 strategies
+  agreeing at ≥60%**, both timeframes must point the same way, and their combined
+  confidence must be **≥70%**. Anything less is reported as *no trade*, with the failing
+  gate named (both in chat and on the Signals screen).
+- The periodic report includes the top signals, not just balance and P&L.
 - TP/SL plan: stop at 50% of the way to liquidation, partial TP ladder 1R–4R at 25% each,
   breakeven at 10% ROI, trailing stop at 15% ROI.
 - Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to

@@ -42,7 +42,7 @@ object CommandRouter {
         "engine on", "engine off", "start trading", "stop trading",
         "status", "balance", "positions history", "positions", "orders",
         "pnl", "trades_history", "tpsl_history", "tpsl", "funding",
-        "tiers", "history orders", "cancel orders",
+        "tiers", "signals", "history orders", "cancel orders",
         "report on", "report off", "report interval",
         "settings trade", "scan on", "scan off", "scan once",
         "close position", "close all", "manual entry", "set leverage", "set risk",

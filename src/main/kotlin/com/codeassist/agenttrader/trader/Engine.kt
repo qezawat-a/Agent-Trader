@@ -156,6 +156,10 @@ class TraderEngine(private val rest: BitunixRest) {
     private var ws: BitunixWs? = null
     private val wsBalance = java.util.concurrent.atomic.AtomicReference<Double?>(null)
     private var lastWsError: String? = null
+
+    // ---- Signal board (shared by chat, report and the Signals screen) ----
+    private var signalCache: List<SignalRow> = emptyList()
+    private var signalCacheAt = 0L
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
 
     /**
@@ -292,6 +296,46 @@ class TraderEngine(private val rest: BitunixRest) {
             .sortedByDescending { it.optString("quoteVol").toDoubleOrNull() ?: 0.0 }
         return rows.take(top).map { it.getString("symbol") }
     }
+
+    /**
+     * Evaluates the universe and returns one explainable row per symbol.
+     * Cached for [maxAgeMs] because each row costs two kline requests.
+     */
+    @Synchronized
+    fun signalBoard(top: Int = 8, maxAgeMs: Long = 60_000): List<SignalRow> {
+        val now = System.currentTimeMillis()
+        if (signalCache.isNotEmpty() && now - signalCacheAt <= maxAgeMs) return signalCache
+        val symbols = runCatching {
+            if (scanOn) rankUniverse(top) else universe.toList()
+        }.getOrElse { universe.toList() }.take(top)
+        val rows = symbols.mapNotNull { sym ->
+            runCatching {
+                val byTf = SignalAggregator.TIMEFRAMES.associateWith { candles(sym, it) }
+                val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs) }
+                val price = byTf[SignalAggregator.TIMEFRAMES.first()]?.lastOrNull()?.close ?: 0.0
+                SignalAggregator.evaluate(sym, price, perTf)
+            }.getOrNull()
+        }
+        if (rows.isNotEmpty()) {
+            signalCache = rows
+            signalCacheAt = now
+        }
+        return rows
+    }
+
+    /** Full signal explanation for chat and the periodic report. */
+    fun signalsText(top: Int = 8): String = try {
+        val rows = signalBoard(top = top)
+        if (rows.isEmpty()) "No signals: could not load klines for any symbol."
+        else formatSignalBoard(rows)
+    } catch (e: Exception) {
+        "Signals unavailable: ${e.message ?: e.javaClass.simpleName}"
+    }
+
+    /** One-line summary for the chat context. */
+    fun signalsBrief(top: Int = 4): String = runCatching {
+        signalBoard(top = top).joinToString("; ") { "${it.symbol} ${it.status}" }
+    }.getOrElse { "" }
 
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
     fun scanOnce(): List<String> {
@@ -625,9 +669,12 @@ class TraderEngine(private val rest: BitunixRest) {
         reportTask = loopExecutor.scheduleWithFixedDelay({
             try {
                 if (!reportOn || !engineOn) return@scheduleWithFixedDelay
+                val signals = runCatching {
+                    formatSignalBoard(signalBoard(top = 3, maxAgeMs = 0))
+                }.getOrElse { "signals unavailable" }
                 onEvent?.invoke(
                     "Periodic report: balance ${fmt(broker.balance)} USDT, positions ${broker.positions.size}, " +
-                        "realized ${fmt(broker.realizedPnl)} USDT"
+                        "realized ${fmt(broker.realizedPnl)} USDT\n$signals"
                 )
             } catch (_: Exception) {
             }
@@ -803,6 +850,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Margin per trade set to ${v.toInt()}% of balance."
                 }
             }
+            t.startsWith("signals") -> signalsText()
             t.startsWith("scan once") -> {
                 val out = scanOnce()
                 if (out.isEmpty()) "Scan done: no qualifying signals."

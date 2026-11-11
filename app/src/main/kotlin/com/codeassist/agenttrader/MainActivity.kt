@@ -33,6 +33,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -78,7 +79,9 @@ import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.trader.fmt
 import com.codeassist.agenttrader.ui.AppScreen
 import com.codeassist.agenttrader.ui.ControlScreen
+import com.codeassist.agenttrader.trader.SignalRow
 import com.codeassist.agenttrader.ui.StatusPill
+import com.codeassist.agenttrader.ui.SignalsScreen
 import com.codeassist.agenttrader.ui.TradeScreen
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -131,7 +134,7 @@ private data class ChatMsg(val text: String, val isUser: Boolean, val time: Stri
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
 
@@ -178,6 +181,8 @@ fun AgentApp(
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
     var mood by remember { mutableStateOf<com.codeassist.agenttrader.trader.MarketMood?>(null) }
     var settingsMsg by remember { mutableStateOf("") }
+    var signalRows by remember { mutableStateOf<List<SignalRow>>(emptyList()) }
+    var signalsLoading by remember { mutableStateOf(false) }
     var lastKeys by remember { mutableStateOf(config.bitunixApiKey to config.bitunixSecret) }
     val listState = rememberLazyListState()
     val keyboard = LocalSoftwareKeyboardController.current
@@ -329,10 +334,37 @@ fun AgentApp(
         }.ifEmpty { "none" },
         moodLine = moodSnapshot?.summary() ?: "",
         fundingLine = engine.broker.positions.size.toString().let { "" },
+        extra = "Signals: " + engine.signalsBrief().ifBlank { "not evaluated yet" },
     )
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+    }
+
+    /** Loads the signal board on a background thread and publishes it to the UI. */
+    fun loadSignals(force: Boolean = false) {
+        signalsLoading = true
+        Thread {
+            val age = if (force) 0L else 60_000L
+            val rows = runCatching { engine.signalBoard(maxAgeMs = age) }.getOrDefault(emptyList())
+            post(object : Runnable {
+                override fun run() {
+                    signalRows = rows
+                    signalsLoading = false
+                }
+            })
+        }.start()
+    }
+
+    // While the Signals screen is open, refresh it every 30s (engine caches for 60s).
+    LaunchedEffect(screen) {
+        if (screen == AppScreen.SIGNALS) {
+            loadSignals()
+            while (true) {
+                kotlinx.coroutines.delay(30_000)
+                if (screen == AppScreen.SIGNALS) loadSignals()
+            }
+        }
     }
 
     // Refresh the market feeling every 30s (off the UI thread).
@@ -672,6 +704,7 @@ fun AgentApp(
                         AppScreen.CHAT -> "Agent Trader"
                         AppScreen.CONTROL -> "Control"
                         AppScreen.TRADE -> "Trade"
+                        AppScreen.SIGNALS -> "Signals"
                         AppScreen.SETTINGS -> "Settings"
                     },
                     Modifier.weight(1f),
@@ -718,6 +751,7 @@ fun AgentApp(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
                                 val actions = listOf(
+                                    "Signals" to "signals",
                                     "Scan" to "scan once",
                                     "Status" to "status",
                                     "Balance" to "balance",
@@ -772,6 +806,14 @@ fun AgentApp(
                         }
                     }
 
+                    AppScreen.SIGNALS -> SignalsScreen(
+                        rows = signalRows,
+                        loading = signalsLoading,
+                        onRefresh = { loadSignals(force = true) },
+                        onTrade = { sym, dir ->
+                            runAction("manual entry $sym ${if (dir > 0) "long" else "short"} ${(engine.riskFraction * 100).toInt()}")
+                        },
+                    )
                     AppScreen.CONTROL -> ControlScreen(
                         engine = engine,
                         mood = mood,
@@ -820,6 +862,12 @@ fun AgentApp(
                     onClick = { screen = AppScreen.TRADE },
                     icon = { Icon(Icons.Default.PlayArrow, null) },
                     label = { Text("Trade") },
+                )
+                NavigationBarItem(
+                    selected = screen == AppScreen.SIGNALS,
+                    onClick = { screen = AppScreen.SIGNALS },
+                    icon = { Icon(Icons.Default.List, null) },
+                    label = { Text("Signals") },
                 )
                 NavigationBarItem(
                     selected = screen == AppScreen.CONTROL,

@@ -19,7 +19,7 @@ object AgentBrain {
      */
     val TOOLS = listOf(
         // read-only
-        "status", "balance", "positions", "orders", "pnl", "funding", "tiers",
+        "status", "balance", "positions", "orders", "pnl", "funding", "tiers", "signals",
         "scan once", "trades_history", "tpsl", "history orders",
         // engine control
         "engine on", "engine off", "start trading", "stop trading",
@@ -107,6 +107,11 @@ object AgentBrain {
         appendLine("  Never claim you changed something you did not change; say what was actually done.")
         appendLine("- Money rule: never open or close a position unless the user explicitly asked for that")
         appendLine("  in this conversation. For everything else (settings, engine switches, scans) just do it.")
+        appendLine("- SIGNALS: a signal is the 15m and 1h verdict of 21 strategies. Each timeframe must")
+        appendLine("  have >=3 strategies agreeing at >=60% confidence, both timeframes must point the same")
+        appendLine("  way, and the combined confidence must be >=70%; otherwise there is no trade. When the")
+        appendLine("  user asks about signals, confidence or why nothing trades, call <tool>signals</tool> and")
+        appendLine("  quote the actual rows and the gate that blocked the symbol.")
         appendLine("- When something breaks, diagnose it, then repair it if the repair is safe, and report both.")
         appendLine("- Never reveal API keys, secrets or sign values.")
         appendLine()
