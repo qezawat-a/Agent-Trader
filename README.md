@@ -1,100 +1,215 @@
 # Agent Trader
 
-An agentic AI futures-trading app for Android (Kotlin + Jetpack Compose). It pairs an
-on-device chat agent (any OpenAI-compatible LLM) with a Bitunix USDT-M futures engine:
-21 trading strategies, multi-timeframe consensus, paper trading by default, and an
-explicitly-gated live order path.
+**An agentic AI futures-trading app for Android.**
+A chat brain (any OpenAI-compatible LLM) that talks like a human, feels the market, and can
+actually pull the trigger on a real Bitunix USDT-M futures account — paper trading by default,
+live trading behind an explicit, armed-only switch.
+
+[![Release](https://img.shields.io/github/v/release/qezawat-a/Agent-Trader?style=flat-square&label=release)](https://github.com/qezawat-a/Agent-Trader/releases/latest)
+[![CI](https://github.com/qezawat-a/Agent-Trader/actions/workflows/release.yml/badge.svg)](https://github.com/qezawat-a/Agent-Trader/actions/workflows/release.yml)
+[![Kotlin](https://img.shields.io/badge/Kotlin-2.2.21-7F52FF?style=flat-square&logo=kotlin&logoColor=white)](https://kotlinlang.org)
+[![Android](https://img.shields.io/badge/Android-23%2B-3DDC84?style=flat-square&logo=android&logoColor=white)](https://developer.android.com)
+[![Bitunix](https://img.shields.io/badge/Bitunix-USD%E2%80%93M%20futures-F7931E?style=flat-square)](https://www.bitunix.com/api-docs/futures/)
+
+---
+
+## What it is
+
+Agent Trader is a self-contained Android app (Kotlin + Jetpack Compose) that puts an LLM in
+front of a real futures engine. You talk to it; it answers with numbers, notices when you are
+stressed, and — when you ask — it inspects the account, runs the engine's tools and comes back
+with what actually happened.
+
+The trading side is not a toy: 21 strategies, a 15m + 1h consensus gate, a TP/SL plan built
+around liquidation distance, signed REST calls verified against the live Bitunix API, and a
+private WebSocket feed that streams balance, position, order and TP/SL updates into the chat.
+
+## The four screens
+
+| Screen | What it does |
+|---|---|
+| **Chat** | The brain. Ask anything or type a slash command. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
+| **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
+| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–125x), margin per trade (1–100%), report interval — plus scan / funding / tiers / close-all / cancel-all / diagnose / repair. |
+| **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. |
+
+Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
+start menu is never more than one tap away.
+
+## What makes it different
+
+1. **It acts, it doesn't just answer.** The model can call the engine with
+   `<tool>status</tool>`, `<tool>funding</tool>`, `<tool>scan once</tool>` and friends. The
+   app runs the command, feeds the real output back, and the model answers with facts.
+2. **It has a sense of the market's stress.** Volatility, distance from the recent high,
+   funding crowding and your own unrealized P&L are combined into a stress score
+   (CALM → WATCH → STRESSED → PANIC) with plain-language drivers.
+3. **It reads you.** Anxious, angry, exhausted, discouraged, euphoric, confused or focused
+   — it acknowledges it once, briefly and honestly, then gets precise. No fake cheerleading.
+4. **It repairs itself.** `/diagnose` ranks what is broken; `/repair` applies only the safe
+   fixes (re-pick a working model, restart the trading loop, reconnect the feed, clamp
+   leverage) and reports exactly what it changed.
+5. **It was built against the real API.** Every endpoint was re-checked against the official
+   Bitunix docs and the live exchange — which is how the app knows that `tickers` silently
+   ignores symbol filters and that `mark_price` is not served at all.
 
 ## Install
 
-Grab the APK from the [Releases](https://github.com/qezawat-a/Agent-Trader/releases) page:
+Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/releases) page:
 
-- `Agent-Trader-debug.apk` — installable debug build (recommended)
-- `Agent-Trader-release.apk` — signed release build
-- `SHA256SUMS.txt` — checksums
+| Asset | What it is |
+|---|---|
+| `Agent-Trader-debug.apk` | Installable debug build (recommended for sideloading) |
+| `Agent-Trader-release.apk` | Signed release build |
+| `SHA256SUMS.txt` | Checksums — verify with `sha256sum -c SHA256SUMS.txt` |
 
-## Features
+## Quick start
 
-- **Four screens, always one tap away** — bottom nav (Chat / Trade / Control / Settings),
-  a back arrow in the top bar, and the Android back button returns to the chat.
-  Settings and every list scroll properly; the keyboard never covers the input.
-- **Control panel** — engine, trading, scanner and report toggles, plus sliders for
-  leverage (1–125x), margin per trade (1–100%) and report interval. One-tap actions for
-  scan, funding, tiers, close-all, cancel-all, diagnose and repair.
-- **Fast trading** — pick a symbol, tap LONG or SHORT, set the size with a slider, go.
-  Paper by default; LIVE is a deliberate toggle that refuses to arm without Bitunix keys.
-- **Agentic brain** — the LLM receives the live account state, the market's mood and the
-  user's emotional state, and can act on the engine with tool calls (`<tool>status</tool>`)
-  followed by a second pass with the results. It acknowledges stress once, briefly, then
-  stays precise; it refuses to open or close positions without an explicit request.
-- **Self-repair** — `/diagnose` inspects provider, engine, feed and risk state; `/repair`
-  applies only the safe fixes (re-pick a working model, restart the trading loop,
-  reconnect the WebSocket feed, clamp leverage) and reports exactly what it changed.
-- **Market mood** — volatility, distance from the high, funding crowding and your own
-  unrealized P&L are turned into a stress score (CALM → PANIC) with human-readable drivers.
+1. **Settings → provider** — paste your LLM base URL and API key, then *Test provider*.
+2. `/models` — the app probes the provider and picks a working model automatically
+   (or `/set_model <name>`).
+3. **Control → Engine on, Trading on** — paper mode. Watch the loop scan every 30s.
+4. Optional: save your Bitunix API key + secret in Settings, then try
+   `status`, `positions`, `funding`, `tiers`.
+5. Only when you are confident: the **LIVE** switch. It refuses to arm without keys, and no
+   live order is ever sent without it.
 
-- **Agentic chat** — talk to an LLM (OpenAI, OpenRouter, DeepSeek, Gemini-compat, ...)
-  with multi-turn memory, a configurable persona ("soul"), and slash commands:
-  `/help /models /set_model /connect_provider /check_ai /price /clear /code_review
-  /bug_fix /simplify /verify /diagnose /autopsy /think /add_skill /skill /add_mcp /mcp ...`
-- **Bitunix futures engine** (verified against the live API, 2026-11)
-  - Signed REST: `digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)`,
-    `sign = SHA256(digest + secretKey)`; 8 req/s throttle; retries on 10001/10005/10006/40007
-  - `place_order` always sends the required `marginCoin`; `side` names the POSITION
-    (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with `MARK_PRICE`
-  - Market data: kline (`15m`/`1h`, closed candles only, `endTime` paging,
-    LAST/MARK price), tickers, trading pairs (precision/min volume),
-    funding rate + batch funding rates
-  - Account/positions/orders history, flash-close, close-all, per-symbol
-    trading settings (margin mode + leverage synced before live orders)
-  - Chat commands: `status balance positions orders trades_history pnl funding
-    scan once report ...`
-  - WebSocket on `wss://fstream.bitunix.com/ws` — app-level ping every 3s, 250ms send
-    pump (4 msg/s), reconnect with backoff, resubscribe on reconnect
-  - **Live private feed**: in LIVE mode the app logs in over WebSocket and subscribes
-    to `balance`, `position`, `order` and `tpsl` in one frame — position/order/TP-SL
-    updates stream into the chat
-- **Trading logic** — 21 strategies (trend, reversion, breakout, reversal, risk filters),
-  15m+1h consensus gate, TP/SL plan: stop at 50% toward liquidation, partial TP ladder
-  (1R–4R @ 25%), breakeven at 10% ROI, trailing stop at 15% ROI
-- **Safety** — paper mode by default; live mode requires real keys + explicit toggle;
-  live orders are clamped to each symbol's max leverage; quantities below the
-  exchange minimum are skipped, never upsized
-- **Tests** — 44 JVM unit tests cover the Bitunix signature (vectors computed
-  independently), provider URL normalization, qty/price formatting, funding
-  reports, net P&L and the live-feed event format; CI runs them on every release build
+## Commands
 
-## Quick start (in the app)
+**Agent (slash) commands**
 
-1. **Settings → provider**: paste your LLM base URL + API key → *Test provider*
-2. `/models` → picks a working model automatically (or `/set_model <name>`)
-3. Chat: *engine on → start trading* (paper mode) and watch the loop run every 30s
-4. Optional: save Bitunix API keys, then `status`, `positions`, `trades_history`
-5. Only when confident: Settings → LIVE switch (real orders!)
+| Command | Purpose |
+|---|---|
+| `/help` | Full command list |
+| `/models` | List and auto-pick a working model |
+| `/set_model <name>` | Choose the model |
+| `/connect_provider <url> <key>` | Point the app at a provider |
+| `/check_ai` | Provider reachability + model round-trip |
+| `/price <symbol>` | Live Bitunix last price |
+| `/soul`, `/add_soul <text>` | Show / set the persona |
+| `/diagnose`, `/repair` | Self-diagnosis and safe auto-repair |
+| `/autopsy`, `/verify` | Last failure analysis, engine health |
+| `/code_review`, `/bug_fix`, `/simplify` | LLM-assisted engineering help |
+| `/add_skill`, `/skill`, `/add_mcp`, `/mcp` | Skills and MCP servers |
+| `/think`, `/memory`, `/clear` | Plan, notes, reset |
 
-## Build
+**Trader commands** (type them in chat, or use the Control/Trade screens)
 
-The repo builds with standard Gradle (no wrapper; CI installs Gradle 8.14.3):
+`engine on|off` · `start trading` · `stop trading` · `scan on|off|once` · `status` ·
+`balance` · `positions` · `positions history` · `orders` · `history orders` ·
+`cancel orders` · `close position <SYMBOL>` · `close all` · `pnl` · `trades_history` ·
+`funding` · `tiers` · `tpsl` · `mid management` · `report on|off|interval <min>` ·
+`set leverage <1-125>` · `set risk <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
 
-```bash
-gradle :app:assembleDebug    # app/build/outputs/apk/debug/app-debug.apk
-gradle :app:assembleRelease  # signed when KEYSTORE_* env/secrets are set
+## How the brain works
+
+```
+user message
+   ├─ mood detection (anxious / angry / exhausted / ...)
+   ├─ live context: mode, balance, positions, market mood
+   └─ system prompt = persona + context + capabilities + tool protocol
+            ↓
+        LLM reply ─── contains <tool>…</tool>? ──► engine runs the command
+            ↑                                                 │
+            └──────────── second pass with the results ───────┘
 ```
 
-Versions: AGP 8.13.2 · Kotlin 2.2.21 · Compose 1.11.2 · Material3 1.4.0 · compileSdk 36 · minSdk 23
+The second pass is what makes it agentic: the model does not guess the balance or the open
+positions, it asks the engine.
 
-Release signing uses repo secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
-`KEY_PASSWORD`. Pushing a tag `v*` (or running the *Release APK* workflow) builds and
-publishes a GitHub release with the APKs.
+## Bitunix integration
 
-## CodeAssist layout note
+Verified against the live API and the official docs (2026-11):
 
-The repo carries the project twice, intentionally: the canonical module lives in
-`app/` (Gradle/CI), and `src/` at the root mirrors it byte-for-byte for on-device
-CodeAssist builds (`module.toml` at the root points there). Keep both in sync when
-editing; `app/` is what CI builds.
+- **Signed REST** — `digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)`,
+  `sign = SHA256(digest + secretKey)`; 8 req/s throttle; retries on 10001 / 10005 / 10006 /
+  40007; keys never logged.
+- **Orders** — `place_order` always sends the required `marginCoin`; `side` names the
+  *position* (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with
+  `MARK_PRICE` triggers.
+- **Market data** — kline (closed candles only, `endTime`/`startTime` paging, LAST/MARK
+  price), tickers, trading pairs (precision, min volume, max leverage), funding rate and
+  batch funding rates, depth.
+- **Account & risk** — account, available balance, per-symbol trading settings (margin mode
+  and leverage are synced to the account before a live order), position tiers (risk bands),
+  isolated-margin adjustment, leverage/margin/position mode.
+- **Positions & orders** — pending/history positions, pending/history orders, order detail,
+  flash close, close-all, cancel one / cancel all, batch orders, modify order.
+- **TP/SL** — position-level and partial TP/SL (place, modify, cancel, pending, history).
+- **WebSocket** — `wss://fstream.bitunix.com/ws` (one endpoint serves public and private),
+  app-level ping every 3s, 250ms send pump (4 msg/s), reconnect with backoff and resubscribe.
+  In LIVE mode the app subscribes to `balance`, `position`, `order` and `tpsl` in a single frame.
+
+### Quirks worth knowing (found by testing, not by reading)
+
+| Quirk | Consequence |
+|---|---|
+| `tickers` ignores the `symbols` filter | Results are filtered client-side, otherwise `/price BTCUSDT` returns another symbol's price |
+| `mark_price` / `index_price` are not served (404) | Mark and index price come from the single-symbol funding endpoint |
+| History positions return `{positionList:[…]}` | The array reader falls back to `positionList` / `list` |
+| `realizedPNL` excludes fees and funding | Net result is `realizedPNL − fee + funding` |
+| Quantities below the exchange minimum | Skipped, never silently upsized |
+| Kline returns closed candles only | The forming candle is excluded by design |
+
+## Trading logic
+
+- 21 strategies: trend, reversion, breakout, reversal and risk filters.
+- 15m + 1h consensus gate before a signal counts.
+- TP/SL plan: stop at 50% of the way to liquidation, partial TP ladder 1R–4R at 25% each,
+  breakeven at 10% ROI, trailing stop at 15% ROI.
+- Leverage clamped to each symbol's maximum from `trading_pairs`; quantities floored to the
+  symbol's base precision and skipped when below the minimum volume.
+
+## Development
+
+The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
+
+```bash
+gradle :app:testDebugUnitTest   # 75 JVM unit tests
+gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
+gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
+```
+
+Versions: AGP 8.13.2 · Kotlin 2.2.21 · Compose 1.11.2 · Material3 1.4.0 · compileSdk 36 ·
+minSdk 23 · JDK 17.
+
+Release signing uses repository secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
+`KEY_PASSWORD`. Pushing a tag `v*` (or running the *Release APK* workflow) builds the APKs,
+runs the unit tests and publishes a GitHub release with checksums.
+
+## Project layout
+
+```
+app/src/main/kotlin/com/codeassist/agenttrader/
+├── agent/      AgentBrain (prompt, mood, tools) · SelfRepair · ModelClient · CommandRouter
+├── bitunix/    BitunixRest (signed REST) · BitunixWs (public + private feed)
+├── trader/     Engine (paper/live) · Signals (21 strategies) · MarketMood
+├── ui/         Control + Trade surfaces
+└── MainActivity.kt
+```
+
+The project is carried twice on purpose: the canonical module lives in `app/` (what Gradle and
+CI build), and the root `src/` mirrors it byte-for-byte for on-device CodeAssist builds
+(`module.toml` points there). Keep both in sync when editing.
+
+## Safety
+
+- Paper mode is the default; LIVE requires real Bitunix keys **and** an explicit toggle.
+- The LIVE switch refuses to arm without credentials.
+- No live order is sent without the LIVE toggle, and the brain is instructed never to open or
+  close a position that the user did not explicitly ask for.
+- Quantities below the exchange minimum are skipped, never upsized.
+- API keys are never printed, logged or written into the chat.
+
+## Roadmap
+
+- Place the 1R–4R ladder as real partial TP/SL orders after a live fill.
+- Public market channels on the WebSocket feed (kline, ticker, depth) to cut REST polling.
+- Strategy backtesting harness over the paged kline history.
+- Optional on-device code editing: the brain proposes a patch, the app applies it and runs
+  the build + tests before accepting it.
 
 ## Disclaimer
 
-Trading futures is risky. This is an experiment, not financial advice. The paper
-engine is the default and no live order is ever sent without the LIVE toggle.
+Trading futures is risky. This is an experiment, not financial advice, and it comes with no
+warranty of any kind. Verify every endpoint and parameter yourself before sending real orders.
