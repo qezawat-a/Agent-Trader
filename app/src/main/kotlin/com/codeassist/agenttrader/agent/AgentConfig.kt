@@ -52,6 +52,29 @@ class AgentConfig(context: Context) {
         get() = prefs.getBoolean("live", false)
         set(value) = prefs.edit().putBoolean("live", value).apply()
 
+    // ---- Engine settings that survive restarts ----
+
+    /** Margin per trade as a percent of balance (1..100). */
+    var riskPct: Int
+        get() = prefs.getInt("risk_pct", 10)
+        set(value) = prefs.edit().putInt("risk_pct", value).apply()
+
+    var engineOn: Boolean
+        get() = prefs.getBoolean("engine_on", false)
+        set(value) = prefs.edit().putBoolean("engine_on", value).apply()
+
+    var scanOn: Boolean
+        get() = prefs.getBoolean("scan_on", false)
+        set(value) = prefs.edit().putBoolean("scan_on", value).apply()
+
+    var reportOn: Boolean
+        get() = prefs.getBoolean("report_on", false)
+        set(value) = prefs.edit().putBoolean("report_on", value).apply()
+
+    var reportIntervalMin: Long
+        get() = prefs.getLong("report_interval_min", 15L)
+        set(value) = prefs.edit().putLong("report_interval_min", value).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }

@@ -150,6 +150,12 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             marginMode = config.marginMode
             positionMode = config.positionMode
             live = config.live
+            riskFraction = config.riskPct / 100.0
+            engineOn = config.engineOn
+            scanOn = config.scanOn
+            reportOn = config.reportOn
+            reportIntervalMin = config.reportIntervalMin
+            trading = false // the trading loop never auto-resumes on launch (safety)
         }
     }
     AgentApp(
@@ -187,9 +193,23 @@ fun AgentApp(
     val listState = rememberLazyListState()
     val keyboard = LocalSoftwareKeyboardController.current
 
+    /** Copies the engine's current settings into [AgentConfig] so they survive restarts. */
+    fun persistEngine() {
+        config.leverage = engine.leverage
+        config.riskPct = (engine.riskFraction * 100).toInt().coerceIn(1, 100)
+        config.engineOn = engine.engineOn
+        config.scanOn = engine.scanOn
+        config.reportOn = engine.reportOn
+        config.reportIntervalMin = engine.reportIntervalMin
+        config.marginMode = engine.marginMode
+        config.positionMode = engine.positionMode
+        config.live = engine.live
+    }
+
     fun say(text: String) {
         post(object : Runnable {
             override fun run() {
+                runCatching { persistEngine() }
                 messages.add(ChatMsg(text, false, now()))
             }
         })
@@ -289,8 +309,9 @@ fun AgentApp(
                 "pick_model" -> runCatching {
                     val models = ModelClient(config.baseUrl, config.apiKey).listModels()
                     if (models.isEmpty()) "could not list models" else {
-                        config.model = models.first()
-                        "model set to ${models.first()}"
+                        val chosen = ModelClient.pickModel(models)
+                        config.model = chosen
+                        "model set to $chosen"
                     }
                 }.getOrElse { "model probe failed: ${it.message}" }
                 "probe_provider" -> runCatching {
@@ -494,7 +515,9 @@ fun AgentApp(
                         if (models.isEmpty()) {
                             "Provider reachable but /models returned nothing. Endpoint tried: ${client.url("models")}"
                         } else if (config.model.isBlank()) {
-                            "Provider OK: ${models.size} models. Set one with /set_model <name>."
+                            val chosen = ModelClient.pickModel(models)
+                            config.model = chosen
+                            "Provider OK: ${models.size} models. Auto-picked model '$chosen' — try a chat now."
                         } else {
                             try {
                                 val reply = client.chat(config.model, listOf("user" to "Say OK."), maxTokens = 16)
@@ -831,6 +854,7 @@ fun AgentApp(
                             runAction("manual entry $sym ${if (dir > 0) "long" else "short"} ${(frac * 100).toInt()}")
                         },
                         onClose = { sym -> runAction("close position $sym") },
+                        post = post,
                         modifier = Modifier.padding(horizontal = 10.dp),
                     )
 
@@ -955,6 +979,7 @@ fun SettingsScreen(
     onDone: (String, Boolean) -> Unit,
 ) {
     val insets = WindowInsets.systemBars.asPaddingValues()
+    val scheme = MaterialTheme.colorScheme
     var baseUrl by remember { mutableStateOf(config.baseUrl) }
     var apiKey by remember { mutableStateOf(config.apiKey) }
     var model by remember { mutableStateOf(config.model) }
@@ -995,10 +1020,33 @@ fun SettingsScreen(
         // Probe the values currently in the fields without saving them.
         val probe = ModelClient(baseUrl, apiKey)
         onDone("Testing ${probe.url("models")} ...", false)
-        runAsync(post, { result -> onDone(result, false) }) {
+        runAsync(post, { result -> onDone(result, false); model = config.model }) {
             val models = probe.listModels()
-            if (models.isEmpty()) "No models returned. Check the URL and key."
-            else "Provider OK: ${models.size} models. First: ${models.first()}"
+            if (models.isEmpty()) {
+                "No models returned. Check the URL and key."
+            } else if (model.isBlank()) {
+                // AutoSetModelByKey: no model chosen yet — pick a sensible default now.
+                val chosen = ModelClient.pickModel(models)
+                config.model = chosen
+                "Provider OK: ${models.size} models. Auto-picked model: $chosen"
+            } else {
+                "Provider OK: ${models.size} models. Using ${config.model}."
+            }
+        }
+    }
+
+    /** AutoSetModelByKey: fetch what this key can see and choose a default model. */
+    fun autoPickModel() {
+        val client = ModelClient(baseUrl, apiKey)
+        runAsync(post, { result -> onDone(result, false); model = config.model }) {
+            val models = runCatching { client.listModels() }.getOrElse { emptyList() }
+            if (models.isEmpty()) {
+                "No models returned. Check the URL and key, then retry."
+            } else {
+                val chosen = ModelClient.pickModel(models)
+                config.model = chosen
+                "Model auto-picked: $chosen (from ${models.size} available)."
+            }
         }
     }
 
@@ -1021,6 +1069,10 @@ fun SettingsScreen(
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = { testProvider() }) { Text("Test provider") }
             OutlinedButton(onClick = { saveProvider() }) { Text("Save provider only") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedButton(onClick = { autoPickModel() }) { Text("Auto pick model") }
+            Text("fetches the models for this key and picks a default", style = MaterialTheme.typography.labelSmall, color = scheme.onSurfaceVariant, modifier = Modifier.weight(1f))
         }
         OutlinedTextField(model, { model = it }, label = { Text("Model (optional)") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(soul, { soul = it }, label = { Text("Soul / Persona") }, minLines = 2, modifier = Modifier.fillMaxWidth())

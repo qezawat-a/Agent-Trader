@@ -33,6 +33,28 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
         return ids.distinct()
     }
 
+    /**
+     * AutoSetModelByKey: pick a usable default model from whatever the key can see.
+     * Cheap fast models first — this app chats a lot — then bigger names, then
+     * just the first entry the provider lists.
+     */
+    companion object {
+        private val PREFERRED = listOf(
+            Regex("gpt-4o-mini"), Regex("gpt-4\\.1-(mini|nano)"), Regex("gpt-5-mini"),
+            Regex("gpt-5"), Regex("o4-mini"), Regex("gpt-4o"),
+            Regex("claude-[0-9.]*haiku"), Regex("claude-[0-9.]*sonnet"), Regex("claude"),
+            Regex("gemini-[0-9.]*flash"), Regex("gemini"),
+            Regex("deepseek"), Regex("qwen"), Regex("glm-[45]"), Regex("llama"),
+        )
+
+        fun pickModel(models: List<String>): String {
+            for (pattern in PREFERRED) {
+                models.firstOrNull { pattern.containsMatchIn(it) }?.let { return it }
+            }
+            return models.firstOrNull() ?: ""
+        }
+    }
+
     /** Tries each model with a tiny request and returns every model with its result. */
     fun autoSetModels(candidates: List<String>): List<Probe> = candidates.map { model ->
         try {

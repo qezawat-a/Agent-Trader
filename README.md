@@ -32,7 +32,7 @@ private WebSocket feed that streams balance, position, order and TP/SL updates i
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
 | **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 21 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
-| **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. |
+| **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default; every setting persists across restarts. |
 
 Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
 start menu is never more than one tap away.
@@ -66,7 +66,8 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 
 ## Quick start
 
-1. **Settings → provider** — paste your LLM base URL and API key, then *Test provider*.
+1. **Settings → provider** — paste your LLM base URL and API key, then *Test provider*
+   (it auto-picks a model the first time) or *Auto pick model* any time.
 2. `/models` — the app probes the provider and picks a working model automatically
    (or `/set_model <name>`).
 3. **Control → Engine on, Trading on** — paper mode. Watch the loop scan every 30s.
@@ -209,6 +210,13 @@ CI build), and the root `src/` mirrors it byte-for-byte for on-device CodeAssist
   close a position that the user did not explicitly ask for.
 - Quantities below the exchange minimum are skipped, never upsized.
 - API keys are never printed, logged or written into the chat.
+
+## Persistence
+
+Your setup survives restarts: provider URL/key, model, soul, Bitunix keys, PAPER/LIVE,
+leverage, margin per trade, engine/scanner/report switches and the report interval are
+stored in the app's private SharedPreferences. The only thing that is deliberately NOT
+restored is the trading loop — after a restart you tap *Trading* to start trading again.
 
 ## Roadmap
 

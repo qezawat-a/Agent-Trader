@@ -446,6 +446,7 @@ fun TradeScreen(
     engine: TraderEngine,
     onExecute: (String, Int, Double) -> Unit,
     onClose: (String) -> Unit,
+    post: (Runnable) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var symbol by remember { mutableStateOf("BTCUSDT") }
@@ -473,7 +474,17 @@ fun TradeScreen(
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = { price = engine.symbolPrice(symbol.trim().uppercase()) }) {
+                        OutlinedButton(onClick = {
+                            // symbolPrice hits the network — it must never run on the UI thread
+                            // (NetworkOnMainThreadException crashed the app here).
+                            val sym = symbol.trim().uppercase()
+                            Thread {
+                                val p = engine.symbolPrice(sym)
+                                post(object : Runnable {
+                                    override fun run() { price = p }
+                                })
+                            }.start()
+                        }) {
                             Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
                             Text(if (price > 0) "%.2f".format(price) else "Price")
