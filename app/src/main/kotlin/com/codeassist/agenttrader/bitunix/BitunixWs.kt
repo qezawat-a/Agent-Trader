@@ -100,7 +100,8 @@ class BitunixWs(
                 }
             }
         }, 250L, 250L, TimeUnit.MILLISECONDS)
-        // Application-level ping every 5s: the server drops silent sessions (~26s).
+        // Application-level ping every 3s (official client heartbeat): the server
+        // drops silent sessions.
         pump.scheduleWithFixedDelay({
             for (state in listOf(public, private)) {
                 val ws = state.socket.get()
@@ -108,7 +109,7 @@ class BitunixWs(
                     ws.send(JSONObject().put("op", "ping").put("ping", System.currentTimeMillis()).toString())
                 }
             }
-        }, 5L, 5L, TimeUnit.SECONDS)
+        }, 3L, 3L, TimeUnit.SECONDS)
     }
 
     /** Subscribe a public market channel, e.g. ("market_kline_15min", "BTCUSDT"). */
@@ -126,6 +127,18 @@ class BitunixWs(
     fun subscribePrivate(ch: String) {
         private.channels.add(ch to null)
         send(private, "subscribe", ch, null)
+    }
+
+    /**
+     * Subscribes to several private channels in ONE frame, the way the official
+     * client does ("balance", "position", "order", "tpsl").
+     */
+    fun subscribePrivateAll(channels: List<String>) {
+        if (channels.isEmpty()) return
+        channels.forEach { private.channels.add(it to null) }
+        val args = JSONArray()
+        channels.forEach { args.put(JSONObject().put("ch", it)) }
+        private.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
     }
 
     fun close() {

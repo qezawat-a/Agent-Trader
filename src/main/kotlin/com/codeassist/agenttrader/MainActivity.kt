@@ -172,6 +172,24 @@ fun AgentApp(
         onDispose { engine.stopLoop() }
     }
 
+    // One event sink for the engine (loop, reports, live WebSocket feed).
+    LaunchedEffect(engineVersion) {
+        engine.setEventSink { msg -> say(msg) }
+    }
+
+    // Private WebSocket feed: live in LIVE mode with keys set, closed otherwise.
+    LaunchedEffect(engineVersion, config.live, config.bitunixApiKey, config.bitunixSecret) {
+        if (config.live && config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()) {
+            engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+        } else {
+            engine.stopLiveFeed()
+        }
+    }
+
+    DisposableEffect(engine) {
+        onDispose { engine.stopLiveFeed() }
+    }
+
     fun handle(line: String) {
         post(object : Runnable {
             override fun run() {

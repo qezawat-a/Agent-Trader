@@ -2,7 +2,9 @@ package com.codeassist.agenttrader.trader
 
 import com.codeassist.agenttrader.bitunix.BitunixApiException
 import com.codeassist.agenttrader.bitunix.BitunixRest
+import com.codeassist.agenttrader.bitunix.BitunixWs
 import com.codeassist.agenttrader.bitunix.Candle
+import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -139,6 +141,68 @@ class TraderEngine(private val rest: BitunixRest) {
     private var loopTask: ScheduledFuture<*>? = null
     private var reportTask: ScheduledFuture<*>? = null
     private var onEvent: ((String) -> Unit)? = null
+
+    // ---- Live WebSocket feed (private channels) ----
+    private var ws: BitunixWs? = null
+    private val wsBalance = java.util.concurrent.atomic.AtomicReference<Double?>(null)
+    private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
+
+    /**
+     * Opens the private WebSocket feed (balance, position, order, tpsl) and pushes
+     * updates through the same event sink the trading loop uses.
+     */
+    fun startLiveFeed(apiKey: String, secretKey: String): String {
+        if (apiKey.isBlank() || secretKey.isBlank()) return "Live feed needs Bitunix API keys."
+        stopLiveFeed()
+        lateinit var client: BitunixWs
+        client = BitunixWs(apiKey, secretKey, object : BitunixWs.Listener {
+            override fun onOpen(privateChannel: Boolean) {
+                if (privateChannel) client.subscribePrivateAll(listOf("balance", "position", "order", "tpsl"))
+            }
+
+            override fun onChannel(ch: String, symbol: String?, data: JSONObject) {
+                when (ch) {
+                    "balance" -> wsBalance.set(data.optString("available").toDoubleOrNull())
+                    "position" -> {
+                        val sym = data.optString("symbol").ifBlank { symbol ?: "" }
+                        val qty = data.optString("qty").toDoubleOrNull() ?: 0.0
+                        if (sym.isNotBlank()) {
+                            if (qty == 0.0) wsPositions.remove(sym) else wsPositions[sym] = data
+                        }
+                    }
+                }
+                val line = feedEventLine(ch, data, symbol)
+                if (line.isNotEmpty()) onEvent?.invoke(line)
+            }
+
+            override fun onError(message: String) {
+                onEvent?.invoke("WS error: $message")
+            }
+
+            override fun onClosed(privateChannel: Boolean, reason: String) {
+                onEvent?.invoke("WS closed: $reason")
+            }
+        })
+        ws = client
+        client.connectPrivate()
+        return "Live feed connecting (balance/position/order/tpsl)."
+    }
+
+    fun stopLiveFeed() {
+        ws?.close()
+        ws = null
+        wsBalance.set(null)
+        wsPositions.clear()
+    }
+
+    /** True when the private WebSocket feed is connected. */
+    val liveFeedOn: Boolean get() = ws != null
+
+    /** Balance from the WebSocket feed when available, otherwise a REST call. */
+    fun liveBalance(): Double = wsBalance.get() ?: rest.availableUsdt()
+
+    /** Symbols the WebSocket feed currently reports as open. */
+    fun feedPositions(): List<String> = synchronized(wsPositions) { wsPositions.keys.toList() }
 
     private fun candles(symbol: String, tf: String): List<Candle> = rest.klines(symbol, tf, 200)
 
@@ -313,6 +377,8 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         buildString {
             appendLine("Account: available ${bal.optString("available")} USDT, margin ${bal.optString("margin")}")
+            val feed = feedPositions()
+            if (feed.isNotEmpty()) appendLine("Feed: live feed tracking ${feed.joinToString(", ")}")
             appendLine("Open positions: ${positions.length()}")
             for (i in 0 until positions.length()) {
                 val p = positions.getJSONObject(i)
@@ -451,7 +517,15 @@ class TraderEngine(private val rest: BitunixRest) {
         reportTask?.cancel(false)
         loopTask = null
         reportTask = null
-        onEvent = null
+    }
+
+    /**
+     * Event sink shared by the trading loop, the periodic report and the live
+     * WebSocket feed. Kept independent of [stopLoop] so feed updates still flow
+     * while trading is paused.
+     */
+    fun setEventSink(sink: ((String) -> Unit)?) {
+        onEvent = sink
     }
 
     val isLoopRunning: Boolean get() = loopTask != null && !loopTask!!.isDone
@@ -609,6 +683,26 @@ object BigDecimalFormat {
  */
 internal fun netPositionPnl(realized: Double, fee: Double, funding: Double): Double =
     realized - fee + funding
+
+/**
+ * Formats a private WebSocket update into a chat line. Field names follow the
+ * official Bitunix WS examples (balance, position, order and tpsl channels).
+ * Returns an empty string for unknown channels.
+ */
+internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): String = when (ch) {
+    "balance" -> "WS balance ${data.optString("coin")} available ${data.optString("available")} " +
+        "margin ${data.optString("margin")}"
+    "position" -> {
+        val sym = data.optString("symbol").ifBlank { symbol ?: "" }
+        "WS position $sym ${data.optString("side")} qty ${data.optString("qty")} " +
+            "pnl ${data.optString("unrealizedPNL")}"
+    }
+    "order" -> "WS order ${data.optString("symbol")} ${data.optString("type")} " +
+        "qty ${data.optString("qty")} id ${data.optString("orderId")}"
+    "tpsl" -> "WS tpsl ${data.optString("symbol")} sl ${data.optString("slPrice")} " +
+        "id ${data.optString("orderId")}"
+    else -> ""
+}
 
 /**
  * Risk tier covering a notional value, or null when the value falls outside the

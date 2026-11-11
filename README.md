@@ -31,17 +31,20 @@ Grab the APK from the [Releases](https://github.com/qezawat-a/Agent-Trader/relea
     trading settings (margin mode + leverage synced before live orders)
   - Chat commands: `status balance positions orders trades_history pnl funding
     scan once report ...`
-  - WebSocket on `wss://fstream.bitunix.com/ws` — app-level ping every 5s, 250ms send
+  - WebSocket on `wss://fstream.bitunix.com/ws` — app-level ping every 3s, 250ms send
     pump (4 msg/s), reconnect with backoff, resubscribe on reconnect
+  - **Live private feed**: in LIVE mode the app logs in over WebSocket and subscribes
+    to `balance`, `position`, `order` and `tpsl` in one frame — position/order/TP-SL
+    updates stream into the chat
 - **Trading logic** — 21 strategies (trend, reversion, breakout, reversal, risk filters),
   15m+1h consensus gate, TP/SL plan: stop at 50% toward liquidation, partial TP ladder
   (1R–4R @ 25%), breakeven at 10% ROI, trailing stop at 15% ROI
 - **Safety** — paper mode by default; live mode requires real keys + explicit toggle;
   live orders are clamped to each symbol's max leverage; quantities below the
   exchange minimum are skipped, never upsized
-- **Tests** — 31 JVM unit tests cover the Bitunix signature (vectors computed
-  independently), provider URL normalization, qty/price formatting and funding
-  reports; CI runs them on every release build
+- **Tests** — 44 JVM unit tests cover the Bitunix signature (vectors computed
+  independently), provider URL normalization, qty/price formatting, funding
+  reports, net P&L and the live-feed event format; CI runs them on every release build
 
 ## Quick start (in the app)
 
