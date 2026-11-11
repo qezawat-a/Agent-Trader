@@ -119,7 +119,11 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     fun dataObject(json: JSONObject): JSONObject = json.dataObj()
-    fun dataArray(json: JSONObject): JSONArray = json.optJSONArray("data") ?: JSONArray()
+    fun dataArray(json: JSONObject): JSONArray =
+        json.optJSONArray("data")
+            ?: json.optJSONArray("positionList")
+            ?: json.optJSONArray("list")
+            ?: JSONArray()
 
     // ---- Market data (public) ----
 
@@ -180,6 +184,35 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun fundingRateBatch(): JSONArray =
         dataArray(publicGet("/api/v1/futures/market/funding_rate/batch"))
 
+    /** Order book depth. limit: 1, 5, 15, 50 or max (default 15). */
+    fun depth(symbol: String, limit: Int = 15): JSONObject = dataObject(publicGet(
+        "/api/v1/futures/market/depth", mapOf("symbol" to symbol, "limit" to limit.toString())))
+
+    /** Mark price — TP/SL triggers use MARK_PRICE, so plan levels from this price. */
+    fun markPrice(symbol: String): JSONObject = dataObject(publicGet(
+        "/api/v1/futures/market/mark_price", mapOf("symbol" to symbol)))
+
+    /** Index price (the basis the mark price is derived from). */
+    fun indexPrice(symbol: String): JSONObject = dataObject(publicGet(
+        "/api/v1/futures/market/index_price", mapOf("symbol" to symbol)))
+
+    /** Funding settlement history (docs list two paths; the first one is canonical). */
+    fun fundingRateHistory(
+        symbol: String,
+        limit: Int = 100,
+        startTime: Long? = null,
+        endTime: Long? = null,
+    ): JSONArray {
+        val q = mutableMapOf("symbol" to symbol, "limit" to limit.toString())
+        if (startTime != null) q["startTime"] = startTime.toString()
+        if (endTime != null) q["endTime"] = endTime.toString()
+        return try {
+            dataArray(publicGet("/api/v1/futures/market/get_funding_rate_history", q))
+        } catch (_: BitunixApiException) {
+            dataArray(publicGet("/api/v1/futures/market/funding_rate/history", q))
+        }
+    }
+
     // ---- Account (signed) ----
 
     /** Futures balance for a margin coin. Fields include available/freeze/margin. */
@@ -205,6 +238,26 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun changePositionMode(mode: String): JSONObject =
         signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
 
+    /** Leverage + margin mode for one symbol. */
+    fun leverageMarginMode(symbol: String, marginCoin: String = "USDT"): JSONObject = dataObject(signedGet(
+        "/api/v1/futures/account/get_leverage_margin_mode",
+        mapOf("symbol" to symbol, "marginCoin" to marginCoin)))
+
+    /** Adds (positive) or removes (negative) isolated margin on a position. */
+    fun adjustPositionMargin(
+        symbol: String,
+        amount: String,
+        side: String? = null,
+        positionId: String? = null,
+        marginCoin: String = "USDT",
+    ): JSONObject {
+        val body = JSONObject()
+            .put("symbol", symbol).put("marginCoin", marginCoin).put("amount", amount)
+        if (side != null) body.put("side", side)
+        if (positionId != null) body.put("positionId", positionId)
+        return signedPost("/api/v1/futures/account/adjust_position_margin", body)
+    }
+
     /**
      * Per-symbol account trading settings: marginMode, leverage (one-way) and
      * long/short leverage (hedge). Pass comma-separated symbols (max 50) or all.
@@ -228,6 +281,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }
         return dataArray(signedGet("/api/v1/futures/position/get_history_positions", q))
     }
+
+    /**
+     * Risk tiers for a symbol: level, startValue, endValue, leverage,
+     * maintenanceMarginRate. Used to size positions against liquidation risk.
+     */
+    fun positionTiers(symbol: String): JSONArray =
+        dataArray(signedGet("/api/v1/futures/position/get_position_tiers", mapOf("symbol" to symbol)))
 
     // ---- Trade (signed) ----
 
@@ -276,6 +336,82 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             put("limit", limit.toString())
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_history_trades", q))
+    }
+
+    /** Historical orders (marginCoin must be sent in practice). */
+    fun historyOrders(symbol: String = "", limit: Int = 20, marginCoin: String = "USDT"): JSONArray {
+        val q = buildMap {
+            if (symbol.isNotBlank()) put("symbol", symbol)
+            put("marginCoin", marginCoin)
+            put("limit", limit.toString())
+        }
+        return dataArray(signedGet("/api/v1/futures/trade/get_history_orders", q))
+    }
+
+    /** Cancels specific orders (max 20 per call). */
+    fun cancelOrders(symbol: String, orderIds: List<String>, marginCoin: String = "USDT"): JSONObject {
+        val list = JSONArray()
+        orderIds.forEach { list.put(JSONObject().put("orderId", it)) }
+        return signedPost("/api/v1/futures/trade/cancel_orders", JSONObject()
+            .put("symbol", symbol).put("marginCoin", marginCoin).put("orderList", list))
+    }
+
+    /** Cancels all open orders (optionally limited to one symbol). */
+    fun cancelAllOrders(symbol: String = "", marginCoin: String = "USDT"): JSONObject =
+        signedPost("/api/v1/futures/trade/cancel_all_orders", JSONObject()
+            .put("symbol", symbol).put("marginCoin", marginCoin))
+
+    // ---- TP/SL ----
+
+    /** Position-level TP/SL: closes the whole position at market when triggered. */
+    fun placePositionTpSl(
+        symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
+        tpStopType: String = "MARK_PRICE", slStopType: String = "MARK_PRICE",
+    ): JSONObject = positionTpSlBody(
+        "/api/v1/futures/tpsl/position/place_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+
+    /** Modifies an existing position-level TP/SL. */
+    fun modifyPositionTpSl(
+        symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
+        tpStopType: String = "MARK_PRICE", slStopType: String = "MARK_PRICE",
+    ): JSONObject = positionTpSlBody(
+        "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+
+    private fun positionTpSlBody(
+        path: String, symbol: String, positionId: String,
+        tpPrice: String?, slPrice: String?, tpStopType: String, slStopType: String,
+    ): JSONObject {
+        val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
+        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
+        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
+        return signedPost(path, body)
+    }
+
+    /** Cancels a TP/SL order. */
+    fun cancelTpSl(symbol: String, orderId: String): JSONObject =
+        signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
+            .put("symbol", symbol).put("orderId", orderId))
+
+    /**
+     * Pending TP/SL orders. The API wants int32 for side/positionMode, so those
+     * filters are left out and applied client-side.
+     */
+    fun pendingTpSlOrders(symbol: String = "", positionId: String = "", limit: Int = 50): JSONArray {
+        val q = buildMap {
+            if (symbol.isNotBlank()) put("symbol", symbol)
+            if (positionId.isNotBlank()) put("positionId", positionId)
+            put("limit", limit.toString())
+        }
+        return dataArray(signedGet("/api/v1/futures/tpsl/get_pending_orders", q))
+    }
+
+    /** Historical TP/SL orders. */
+    fun historyTpSlOrders(symbol: String = "", limit: Int = 20): JSONArray {
+        val q = buildMap {
+            if (symbol.isNotBlank()) put("symbol", symbol)
+            put("limit", limit.toString())
+        }
+        return dataArray(signedGet("/api/v1/futures/tpsl/get_history_orders", q))
     }
 
     /** Market-closes one position by id. */

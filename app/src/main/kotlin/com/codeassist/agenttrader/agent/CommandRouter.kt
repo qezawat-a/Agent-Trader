@@ -41,7 +41,8 @@ object CommandRouter {
     private val traderPrefixes = listOf(
         "engine on", "engine off", "start trading", "stop trading",
         "status", "balance", "positions history", "positions", "orders",
-        "pnl", "trades_history", "tpsl_history", "funding",
+        "pnl", "trades_history", "tpsl_history", "tpsl", "funding",
+        "tiers", "history orders", "cancel orders",
         "report on", "report off", "report interval",
         "settings trade", "scan on", "scan off", "scan once",
         "close position", "mid management",

@@ -237,7 +237,13 @@ class TraderEngine(private val rest: BitunixRest) {
         val lev = effectiveLeverage(symbol)
         val available = rest.availableUsdt()
         val margin = available * PaperBroker.MARGIN_FRACTION
-        val plan = TpSlPlanner.plan(price, dir, lev)
+        // TP/SL triggers are MARK_PRICE, so plan the levels from the mark price
+        // when the exchange publishes one; fall back to the signal price.
+        val mark = runCatching {
+            rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
+        }.getOrNull()
+        val triggerBasis = mark ?: price
+        val plan = TpSlPlanner.plan(triggerBasis, dir, lev)
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
@@ -299,6 +305,12 @@ class TraderEngine(private val rest: BitunixRest) {
             .map { positions.getJSONObject(it).optString("symbol") }
             .filter { it.isNotBlank() }
             .distinct()
+        val bySymbol = HashMap<String, org.json.JSONObject>()
+        for (i in 0 until positions.length()) {
+            val p = positions.getJSONObject(i)
+            val sym = p.optString("symbol")
+            if (sym.isNotBlank()) bySymbol[sym] = p
+        }
         buildString {
             appendLine("Account: available ${bal.optString("available")} USDT, margin ${bal.optString("margin")}")
             appendLine("Open positions: ${positions.length()}")
@@ -313,6 +325,18 @@ class TraderEngine(private val rest: BitunixRest) {
                         val s = settings.getJSONObject(j)
                         appendLine("  settings ${s.optString("symbol")}: ${s.optString("marginMode")} " +
                             "lev ${s.optInt("leverage")} (long ${s.optInt("longLeverage")}/short ${s.optInt("shortLeverage")})")
+                    }
+                }
+                // Risk tier per open position (bounded to keep the call count low).
+                for (sym in syms.take(3)) {
+                    val p = bySymbol[sym] ?: continue
+                    val qty = p.optString("holdQty").toDoubleOrNull() ?: continue
+                    val entry = p.optString("entryPrice").toDoubleOrNull() ?: continue
+                    val notional = qty * entry
+                    val tier = runCatching { tierFor(rest.positionTiers(sym), notional) }.getOrNull()
+                    if (tier != null) {
+                        appendLine("  tier $sym: notional ${fmt(notional)} lev ${tier.optInt("leverage")} " +
+                            "mmr ${tier.optString("maintenanceMarginRate")}")
                     }
                 }
             }
@@ -456,7 +480,11 @@ class TraderEngine(private val rest: BitunixRest) {
                     if (arr.length() == 0) "No closed positions yet."
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val p = arr.getJSONObject(i)
-                        "${p.optString("symbol")} ${p.optString("side")} pnl ${p.optString("realizedPNL")} fee ${p.optString("fee")}"
+                        val realized = p.optString("realizedPNL").toDoubleOrNull() ?: 0.0
+                        val fee = p.optString("fee").toDoubleOrNull() ?: 0.0
+                        val funding = p.optString("funding").toDoubleOrNull() ?: 0.0
+                        "${p.optString("symbol")} ${p.optString("side")} net ${fmt(netPositionPnl(realized, fee, funding))} " +
+                            "(realized ${fmt(realized)} fee ${fmt(fee)} funding ${fmt(funding)})"
                     }
                 } catch (e: Exception) {
                     "History failed: ${e.message}"
@@ -482,6 +510,55 @@ class TraderEngine(private val rest: BitunixRest) {
             } else "Paper mode: orders are simulated instantly."
             t.startsWith("tpsl_history") -> "TP/SL plan: stop at ${"%.0f".format(TpSlPlanner.STOP_FRACTION_OF_LIQ * 100)}% toward liquidation, " +
                 "ladder 1R..4R each 25%, breakeven at 10% ROI, trail at 15% ROI."
+            t.startsWith("tiers") -> {
+                val sym = t.removePrefix("tiers").trim().uppercase().ifEmpty { "BTCUSDT" }
+                try {
+                    val arr = rest.positionTiers(sym)
+                    if (arr.length() == 0) "No risk tiers for $sym."
+                    else (0 until arr.length()).joinToString("\n") { i ->
+                        val o = arr.getJSONObject(i)
+                        "level ${o.optInt("level")} ${o.optString("startValue")}-${o.optString("endValue")} " +
+                            "lev ${o.optInt("leverage")} mmr ${o.optString("maintenanceMarginRate")}"
+                    }
+                } catch (e: Exception) {
+                    "Tiers failed: ${e.message}"
+                }
+            }
+            t.startsWith("tpsl") -> if (live) {
+                try {
+                    val arr = rest.pendingTpSlOrders(limit = 10)
+                    if (arr.length() == 0) "No pending TP/SL orders."
+                    else (0 until arr.length()).joinToString("\n") { i ->
+                        val o = arr.getJSONObject(i)
+                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
+                            "qty ${o.optString("qty")} ${o.optString("status")}"
+                    }
+                } catch (e: Exception) {
+                    "TP/SL failed: ${e.message}"
+                }
+            } else "Paper mode: TP/SL orders are simulated."
+            t.startsWith("history orders") -> if (live) {
+                try {
+                    val arr = rest.historyOrders(limit = 10)
+                    if (arr.length() == 0) "No order history."
+                    else (0 until arr.length()).joinToString("\n") { i ->
+                        val o = arr.getJSONObject(i)
+                        "${o.optString("symbol")} ${o.optString("side")} ${o.optString("orderType")} " +
+                            "qty ${o.optString("qty")} ${o.optString("status")}"
+                    }
+                } catch (e: Exception) {
+                    "Order history failed: ${e.message}"
+                }
+            } else "Paper mode: order history is local."
+            t.startsWith("cancel orders") -> if (live) {
+                val sym = t.removePrefix("cancel orders").trim().uppercase()
+                try {
+                    rest.cancelAllOrders(sym)
+                    "Cancel-all-orders sent${if (sym.isNotBlank()) " for $sym" else ""}."
+                } catch (e: Exception) {
+                    "Cancel failed: ${e.message}"
+                }
+            } else "Paper mode: nothing to cancel."
             t.startsWith("pnl") -> pnl()
             t.startsWith("funding") -> try {
                 fundingSummary(rest.fundingRateBatch())
@@ -524,3 +601,26 @@ object BigDecimalFormat {
         .toPlainString()
         .ifEmpty { "0" }
 }
+
+/**
+ * Net result of a closed position. Per the Bitunix docs, realizedPNL EXCLUDES
+ * both the transaction fee and the funding fee, and the fee is a cost:
+ *   net = realizedPNL - fee + funding
+ */
+internal fun netPositionPnl(realized: Double, fee: Double, funding: Double): Double =
+    realized - fee + funding
+
+/**
+ * Risk tier covering a notional value, or null when the value falls outside the
+ * tier table. Tiers: level, startValue, endValue, leverage, maintenanceMarginRate.
+ */
+internal fun tierFor(tiers: org.json.JSONArray, notional: Double): org.json.JSONObject? {
+    for (i in 0 until tiers.length()) {
+        val t = tiers.optJSONObject(i) ?: continue
+        val start = t.optString("startValue").toDoubleOrNull() ?: continue
+        val end = t.optString("endValue").toDoubleOrNull() ?: Double.MAX_VALUE
+        if (notional >= start && notional < end) return t
+    }
+    return null
+}
+
