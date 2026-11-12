@@ -224,11 +224,12 @@ internal fun formatSignalBoard(
 }.trim()
 
 /**
- * Kline intervals exactly as the official docs list them for
- * GET /api/v1/futures/market/kline: 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M.
- * Case matters: "1m" is one MINUTE, "1M" is one MONTH.
+ * Kline intervals for GET /api/v1/futures/market/kline. The official docs list
+ * 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M — plus "3m", which is NOT in the
+ * docs but the endpoint accepts it (verified live, 2026-11, code:0) and the user
+ * asked for it. Case matters: "1m" is one MINUTE, "1M" is one MONTH.
  */
-val KLINE_INTERVALS = listOf("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
+val KLINE_INTERVALS = listOf("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 
 /** Parses "BTCUSDT, ethusdt ;SOLUSDT" into clean uppercase symbols; null when none are valid. */
 internal fun parseSymbolsCsv(raw: String): List<String>? {

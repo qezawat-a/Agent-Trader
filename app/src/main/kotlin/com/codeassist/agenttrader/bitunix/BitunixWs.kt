@@ -270,7 +270,7 @@ class BitunixWs(
         fun klineChannel(interval: String, markPrice: Boolean = false): String {
             val kind = if (markPrice) "mark_kline" else "market_kline"
             val suffix = when (interval) {
-                "1m" -> "1min"; "5m" -> "5min"; "15m" -> "15min"; "30m" -> "30min"
+                "1m" -> "1min"; "3m" -> "3min"; "5m" -> "5min"; "15m" -> "15min"; "30m" -> "30min"
                 "1h" -> "60min"; "2h" -> "2h"; "4h" -> "4h"; "6h" -> "6h"; "8h" -> "8h"; "12h" -> "12h"
                 "1d" -> "1day"; "3d" -> "3day"; "1w" -> "1week"; "1M" -> "1month"
                 else -> interval

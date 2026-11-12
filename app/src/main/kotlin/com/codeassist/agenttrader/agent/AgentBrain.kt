@@ -112,7 +112,7 @@ object AgentBrain {
         appendLine("- SETTINGS: nothing about the engine is hard-capped. When the user asks what the")
         appendLine("  settings are, call <tool>settings trade</tool> and summarize the dump. On request you")
         appendLine("  can change: universe <tool>set universe BTCUSDT,ETHUSDT</tool>, timeframes")
-        appendLine("  <tool>set timeframes 15m,1h</tool> (1m..1w, max 5), scan depth <tool>set scan top 10</tool>,")
+        appendLine("  <tool>set timeframes 15m,1h</tool> (1m,3m,5m..1w,1M — max 5), scan depth <tool>set scan top 10</tool>,")
         appendLine("  signal gates <tool>set min agree 3</tool> / <tool>set min tf 60</tool> / <tool>set min conf 70</tool>,")
         appendLine("  plus leverage, risk and report interval. Report what actually changed.")
         appendLine("- SIGNALS: a signal is the verdict of 21 strategies over the configured timeframes (default 15m and 1h). Each timeframe must")

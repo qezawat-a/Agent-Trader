@@ -177,7 +177,8 @@ Verified against the live API and the official docs (2026-11):
 - 21 strategies: trend, reversion, breakout, reversal and risk filters.
 - Nothing is hard-capped: the scanner universe, the timeframes (the official docs
   list exactly 1m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w/1M — max 5, case-sensitive:
-  `1M` is one MONTH), the scan depth and all three
+  `1M` is one MONTH — plus `3m`, undocumented but verified live on the endpoint),
+  the scan depth and all three
   signal gates are yours to change — in chat (`set …`), on the Control screen, or by
   asking the agent (it can read the config with `settings trade` and edit it for you).
   Everything persists across restarts.

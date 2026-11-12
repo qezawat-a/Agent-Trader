@@ -17,6 +17,7 @@ class WsChannelsTest {
     fun kline_channel_names_follow_the_docs() {
         // market_kline_1min ... market_kline_60min ... market_kline_1day / 3day / 1week / 1month
         assertEquals("market_kline_1min", BitunixWs.klineChannel("1m"))
+        assertEquals("market_kline_3min", BitunixWs.klineChannel("3m"))
         assertEquals("market_kline_5min", BitunixWs.klineChannel("5m"))
         assertEquals("market_kline_15min", BitunixWs.klineChannel("15m"))
         assertEquals("market_kline_30min", BitunixWs.klineChannel("30m"))
