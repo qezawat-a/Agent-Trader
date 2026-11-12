@@ -273,7 +273,8 @@ fun ControlScreen(
                     Text("Scanner & signals", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
                         "Gates: ≥${engine.minAgreeing} strategies · ≥${engine.minTfConfidence.toInt()}% per timeframe · " +
-                            "≥${engine.minConfidence.toInt()}% combined (${engine.timeframes.joinToString("+")})",
+                            "≥${engine.minConfidence.toInt()}% combined (${engine.timeframes.joinToString("+")})" +
+                            if (engine.marketFeedOn()) " · WS live" else "",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
@@ -289,8 +290,8 @@ fun ControlScreen(
                     }
                     var tfText by remember { mutableStateOf(engine.timeframes.joinToString(",")) }
                     OutlinedTextField(
-                        tfText, { tfText = it.lowercase() },
-                        label = { Text("Timeframes (1m..1w, max 5)") },
+                        tfText, { tfText = it },
+                        label = { Text("Timeframes (1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M)") },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

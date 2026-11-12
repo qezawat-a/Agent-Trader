@@ -183,12 +183,20 @@ class SignalBoardTest {
     }
 
     @Test
-    fun timeframe_csv_parsing() {
+    fun timeframe_csv_parsing_matches_the_official_docs_list() {
+        // Official docs for GET /api/v1/futures/market/kline:
+        // 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
+        assertEquals(
+            listOf("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M"),
+            KLINE_INTERVALS,
+        )
         assertEquals(listOf("15m", "1h"), parseTimeframesCsv("15m,1h"))
-        assertEquals(listOf("1m", "3m", "5m"), parseTimeframesCsv(" 1m 3m 5m"))
+        assertEquals(listOf("15m", "1M"), parseTimeframesCsv("15m,1M"))
+        assertNull(parseTimeframesCsv("3m"), "3m is NOT in the official docs list")
+        assertEquals(listOf("1m"), parseTimeframesCsv("1m")) // lowercase 1m = one minute, valid
+        assertNull(parseTimeframesCsv("1month"), "not documented — the monthly interval is 1M")
         assertNull(parseTimeframesCsv("15m,2x"))
-        assertNull(parseTimeframesCsv("15m,1h,4h,1d,1w,1m")) // max 5
-        assertEquals(KLINE_INTERVALS.size, 13)
+        assertNull(parseTimeframesCsv("15m,1h,4h,1d,1w,1M")) // max 5
     }
 
     @Test

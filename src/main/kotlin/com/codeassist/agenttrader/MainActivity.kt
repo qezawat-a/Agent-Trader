@@ -436,6 +436,14 @@ fun AgentApp(
         engine.setEventSink { msg -> say(msg) }
     }
 
+    // Public WebSocket market feed (tickers + price): no keys needed, streams silently.
+    LaunchedEffect(engineVersion, engine.universe.size) {
+        engine.startMarketFeed()
+    }
+    DisposableEffect(engine) {
+        onDispose { engine.stopMarketFeed() }
+    }
+
     // Private WebSocket feed: live in LIVE mode with keys set, closed otherwise.
     LaunchedEffect(engineVersion, config.live, config.bitunixApiKey, config.bitunixSecret) {
         if (config.live && config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()) {

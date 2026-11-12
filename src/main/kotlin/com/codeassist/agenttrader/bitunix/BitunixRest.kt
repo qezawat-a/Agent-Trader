@@ -132,6 +132,10 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      * excluded; rows arrive newest first and we sort them ascending.
      * [endTime] (exclusive, ms) pages backward through history; [type] is
      * LAST_PRICE (default) or MARK_PRICE. limit is 100..200 per request.
+     *
+     * The official docs list only symbol/interval/limit/endTime/type as query
+     * params. [startTime] is NOT documented, but the endpoint accepts it
+     * (verified live, 2026-11, code:0) — kept for backward-paging use.
      */
     fun klines(
         symbol: String,

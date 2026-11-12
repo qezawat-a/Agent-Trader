@@ -171,10 +171,71 @@ class TraderEngine(private val rest: BitunixRest) {
     private var signalCacheAt = 0L
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
 
+    // Public WS market data (no keys needed): "tickers" last prices, "price" market/index/funding.
+    private var marketFeed: BitunixWs? = null
+    private val wsPrices = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Double>>() // symbol -> (ts, last)
+    private val wsMarket = java.util.concurrent.ConcurrentHashMap<String, org.json.JSONObject>() // symbol -> mp/ip/fr
+
     /**
      * Opens the private WebSocket feed (balance, position, order, tpsl) and pushes
      * updates through the same event sink the trading loop uses.
      */
+    /**
+     * Public WebSocket market feed for the universe: no API keys needed. Subscribes the
+     * documented "tickers" channel (24h stats incl. last price per symbol) and the "price"
+     * channel (market price, index price, funding rate). Updates are cached silently —
+     * public channels never spam the chat.
+     */
+    fun startMarketFeed(): String {
+        if (universe.isEmpty()) return "No universe to stream."
+        stopMarketFeed()
+        lateinit var client: BitunixWs
+        client = BitunixWs("", "", object : BitunixWs.Listener {
+            override fun onOpen(privateChannel: Boolean) {
+                if (privateChannel) return
+                val args = universe.map { "tickers" to it } + universe.map { "price" to it }
+                client.subscribePublicBatch(args)
+            }
+
+            override fun onChannel(ch: String, symbol: String?, data: JSONObject) {
+                when (ch) {
+                    "tickers", "ticker" -> {
+                        val sym = (data.optString("s").ifBlank { symbol ?: "" }).uppercase()
+                        val last = data.optString("la").toDoubleOrNull()
+                        if (sym.isNotBlank() && last != null) wsPrices[sym] = System.currentTimeMillis() to last
+                    }
+                    "price" -> {
+                        val sym = (symbol ?: "").uppercase()
+                        if (sym.isNotBlank()) wsMarket[sym] = data
+                    }
+                }
+            }
+
+            override fun onError(message: String) { /* public feed failures stay silent */ }
+
+            override fun onClosed(privateChannel: Boolean, reason: String) { }
+        })
+        marketFeed = client
+        client.connectPublic()
+        return "Market feed streaming ${universe.size} symbols (tickers + price)."
+    }
+
+    fun stopMarketFeed() {
+        marketFeed?.close()
+        marketFeed = null
+    }
+
+    fun marketFeedOn(): Boolean = marketFeed != null
+
+    /** Last price seen on the public WS feed, or null when stale (>15s). */
+    fun wsLivePrice(symbol: String): Double? {
+        val (ts, price) = wsPrices[symbol.uppercase()] ?: return null
+        return if (System.currentTimeMillis() - ts <= 15_000) price else null
+    }
+
+    /** Market/index price + funding rate from the "price" channel, or null offline. */
+    fun wsMarketData(symbol: String): org.json.JSONObject? = wsMarket[symbol.uppercase()]
+
     fun startLiveFeed(apiKey: String, secretKey: String): String {
         if (apiKey.isBlank() || secretKey.isBlank()) return "Live feed needs Bitunix API keys."
         stopLiveFeed()
@@ -446,6 +507,7 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** Last price for a symbol (exchange first, candles as fallback). */
     fun symbolPrice(symbol: String): Double {
+        wsLivePrice(symbol)?.let { return it }
         val live = runCatching { rest.lastPrice(symbol) }.getOrNull() ?: 0.0
         if (live > 0) return live
         return candles(symbol, "15m").lastOrNull()?.close ?: 0.0
@@ -981,6 +1043,8 @@ internal fun netPositionPnl(realized: Double, fee: Double, funding: Double): Dou
  * Returns an empty string for unknown channels.
  */
 internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): String = when (ch) {
+    // Public channels push every ~500ms — cached by the engine, never shown in chat.
+    "tickers", "ticker", "price", "trade", "depth_book1", "depth_book5", "depth_book15", "depth_books" -> ""
     "balance" -> "WS balance ${data.optString("coin")} available ${data.optString("available")} " +
         "margin ${data.optString("margin")}"
     "position" -> {
@@ -988,9 +1052,11 @@ internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): Strin
         "WS position $sym ${data.optString("side")} qty ${data.optString("qty")} " +
             "pnl ${data.optString("unrealizedPNL")}"
     }
-    "order" -> "WS order ${data.optString("symbol")} ${data.optString("type")} " +
-        "qty ${data.optString("qty")} id ${data.optString("orderId")}"
-    "tpsl" -> "WS tpsl ${data.optString("symbol")} sl ${data.optString("slPrice")} " +
+    "order" -> "WS order ${data.optString("symbol")} ${data.optString("event")} " +
+        "${data.optString("type")} qty ${data.optString("qty")} ${data.optString("orderStatus")} " +
+        "id ${data.optString("orderId")}"
+    "tpsl" -> "WS tpsl ${data.optString("symbol")} ${data.optString("event")} " +
+        "${data.optString("status")} sl ${data.optString("slPrice")} tp ${data.optString("tpPrice")} " +
         "id ${data.optString("orderId")}"
     else -> ""
 }

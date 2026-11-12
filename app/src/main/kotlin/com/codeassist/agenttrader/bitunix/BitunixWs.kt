@@ -120,6 +120,15 @@ class BitunixWs(
         send(public, "subscribe", ch, symbol)
     }
 
+    /** Subscribes several public channels in ONE frame (the docs allow an args list). */
+    fun subscribePublicBatch(items: List<Pair<String, String>>) {
+        if (items.isEmpty()) return
+        items.forEach { public.channels.add(it) }
+        val args = JSONArray()
+        items.forEach { (ch, sym) -> args.put(JSONObject().put("ch", ch).put("symbol", sym)) }
+        public.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
+    }
+
     fun unsubscribePublic(ch: String, symbol: String) {
         public.channels.remove(ch to symbol)
         send(public, "unsubscribe", ch, symbol)
@@ -189,13 +198,19 @@ class BitunixWs(
                     val ch = msg.optString("ch")
                     if (ch.isNotEmpty() && msg.has("data")) {
                         val data = msg.opt("data")
-                        // Kline docs say data is a list, but examples show an object. Accept both.
-                        val obj = when (data) {
-                            is JSONObject -> data
-                            is JSONArray -> if (data.length() > 0) data.optJSONObject(0) ?: JSONObject() else JSONObject()
-                            else -> JSONObject()
+                        when (data) {
+                            is JSONObject -> listener.onChannel(ch, msg.optString("symbol").ifEmpty { null }, data)
+                            is JSONArray -> {
+                                // "tickers" and "trade" push data as an ARRAY of objects; each
+                                // element carries its own symbol ("s"). Kline docs say the data is
+                                // a list but the examples show an object — deliver every element.
+                                for (i in 0 until data.length()) {
+                                    val obj = data.optJSONObject(i) ?: continue
+                                    val sym = obj.optString("s").ifBlank { msg.optString("symbol").ifEmpty { "" } }
+                                    listener.onChannel(ch, sym.ifBlank { null }, obj)
+                                }
+                            }
                         }
-                        listener.onChannel(ch, msg.optString("symbol").ifEmpty { null }, obj)
                     }
                 }
             }
@@ -246,6 +261,22 @@ class BitunixWs(
     }
 
     companion object {
+
+        /**
+         * WS kline channel name for a REST interval, per the docs:
+         * 1m->market_kline_1min, 1h->market_kline_60min, 1d->market_kline_1day,
+         * 1w->market_kline_1week, 1M->market_kline_1month; mark_kline_* for MARK_PRICE.
+         */
+        fun klineChannel(interval: String, markPrice: Boolean = false): String {
+            val kind = if (markPrice) "mark_kline" else "market_kline"
+            val suffix = when (interval) {
+                "1m" -> "1min"; "5m" -> "5min"; "15m" -> "15min"; "30m" -> "30min"
+                "1h" -> "60min"; "2h" -> "2h"; "4h" -> "4h"; "6h" -> "6h"; "8h" -> "8h"; "12h" -> "12h"
+                "1d" -> "1day"; "3d" -> "3day"; "1w" -> "1week"; "1M" -> "1month"
+                else -> interval
+            }
+            return "${kind}_$suffix"
+        }
         /** Docs: "Main Domain, Public channel". */
         const val WS_PUBLIC_URL = "wss://fapi.bitunix.com/public/"
 

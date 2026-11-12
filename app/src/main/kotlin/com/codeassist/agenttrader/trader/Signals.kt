@@ -223,8 +223,12 @@ internal fun formatSignalBoard(
     }
 }.trim()
 
-/** Kline intervals the Bitunix kline endpoint accepts (verified live, 2026-11). */
-val KLINE_INTERVALS = listOf("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "3d", "1w")
+/**
+ * Kline intervals exactly as the official docs list them for
+ * GET /api/v1/futures/market/kline: 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M.
+ * Case matters: "1m" is one MINUTE, "1M" is one MONTH.
+ */
+val KLINE_INTERVALS = listOf("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 
 /** Parses "BTCUSDT, ethusdt ;SOLUSDT" into clean uppercase symbols; null when none are valid. */
 internal fun parseSymbolsCsv(raw: String): List<String>? {
@@ -235,10 +239,11 @@ internal fun parseSymbolsCsv(raw: String): List<String>? {
     return out.ifEmpty { null }
 }
 
-/** Parses "15m,1h" into valid kline intervals (max 5); null when anything is invalid. */
+/** Parses "15m,1h,1M" into valid kline intervals (max 5); null when anything is invalid.
+ *  Case-sensitive: only "1M" (uppercase M) is the monthly interval per the docs. */
 internal fun parseTimeframesCsv(raw: String): List<String>? {
     val out = raw.split(",", " ", ";")
-        .map { it.trim().lowercase() }
+        .map { it.trim() }
         .filter { it.isNotBlank() }
         .distinct()
     if (out.isEmpty() || out.size > 5) return null

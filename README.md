@@ -22,7 +22,8 @@ with what actually happened.
 
 The trading side is not a toy: 21 strategies, a 15m + 1h consensus gate, a TP/SL plan built
 around liquidation distance, signed REST calls verified against the live Bitunix API, and a
-private WebSocket feed that streams balance, position, order and TP/SL updates into the chat.
+private WebSocket feed that streams balance, position, order and TP/SL updates into the chat,
+and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
 
 ## The four screens
 
@@ -146,6 +147,14 @@ Verified against the live API and the official docs (2026-11):
   every 3s, 250ms send pump (4 msg/s under the 5 msg/s cap), reconnect with backoff and
   resubscribe.
   In LIVE mode the app subscribes to `balance`, `position`, `order` and `tpsl` in a single frame.
+  The public market feed runs in every mode (no keys needed): `tickers` (24h stats, last
+  price) and `price` (market/index price + funding rate) for the whole universe, cached
+  silently — public channels never spam the chat, and the engine prefers WS prices over
+  REST quotes. All documented channel names are wired and ready:
+  `tickers` / `ticker` / `price` / `trade` / `depth_books|book1|book5|book15` on the public
+  socket, and klines as `market_kline_*` (e.g. `1m→market_kline_1min`, `1h→market_kline_60min`,
+  `1d→market_kline_1day`, `1w→market_kline_1week`, `1M→market_kline_1month`,
+  `mark_kline_*` for MARK_PRICE).
 
 ### Quirks worth knowing (found by testing, not by reading)
 
@@ -162,8 +171,9 @@ Verified against the live API and the official docs (2026-11):
 ## Trading logic
 
 - 21 strategies: trend, reversion, breakout, reversal and risk filters.
-- Nothing is hard-capped: the scanner universe, the timeframes (any of
-  1m/3m/5m/15m/30m/1h/2h/4h/6h/12h/1d/3d/1w, max 5), the scan depth and all three
+- Nothing is hard-capped: the scanner universe, the timeframes (the official docs
+  list exactly 1m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w/1M — max 5, case-sensitive:
+  `1M` is one MONTH), the scan depth and all three
   signal gates are yours to change — in chat (`set …`), on the Control screen, or by
   asking the agent (it can read the config with `settings trade` and edit it for you).
   Everything persists across restarts.
