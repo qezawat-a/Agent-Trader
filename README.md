@@ -175,6 +175,12 @@ Verified against the live API and the official docs (2026-11):
 ## Trading logic
 
 - 21 strategies: trend, reversion, breakout, reversal and risk filters.
+- Trader commands typed in chat (`set universe …`, `set timeframes …`, …) are routed
+  straight to the engine — they never depend on the LLM being alive. When the brain does
+  call a tool, the chat shows a receipt line (`⚙️ set universe … → Universe set (3): …`),
+  so a model can never fake a "Done".
+- With the scanner on, the universe you set **is** the candidate pool: it is ranked by
+  24h volume internally — exchange-wide top-volume names never leak into the board.
 - Nothing is hard-capped: the scanner universe, the timeframes (the official docs
   list exactly 1m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w/1M — max 5, case-sensitive:
   `1M` is one MONTH — plus `3m`, undocumented but verified live on the endpoint),

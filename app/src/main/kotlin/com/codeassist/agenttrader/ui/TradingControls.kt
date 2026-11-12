@@ -139,9 +139,11 @@ fun ControlScreen(
     onAction: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var leverage by remember { mutableStateOf(engine.leverage.toFloat()) }
-    var risk by remember { mutableStateOf((engine.riskFraction * 100).toFloat()) }
-    var reportMin by remember { mutableStateOf(engine.reportIntervalMin.toFloat()) }
+    // Keyed on configRev: when the universe/timeframes/gates change from the chat or
+    // the brain, these fields refresh instead of showing stale values.
+    var leverage by remember(engine.configRev) { mutableStateOf(engine.leverage.toFloat()) }
+    var risk by remember(engine.configRev) { mutableStateOf((engine.riskFraction * 100).toFloat()) }
+    var reportMin by remember(engine.configRev) { mutableStateOf(engine.reportIntervalMin.toFloat()) }
     val scheme = MaterialTheme.colorScheme
 
     LazyColumn(
@@ -284,7 +286,7 @@ fun ControlScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
-                    var uniText by remember { mutableStateOf(engine.universe.joinToString(",")) }
+                    var uniText by remember(engine.configRev) { mutableStateOf(engine.universe.joinToString(",")) }
                     OutlinedTextField(
                         uniText, { uniText = it.uppercase() },
                         label = { Text("Universe (comma-separated)") },
@@ -294,7 +296,7 @@ fun ControlScreen(
                         OutlinedButton(onClick = { onAction("set universe $uniText") }) { Text("Apply universe") }
                         OutlinedButton(onClick = { uniText = engine.universe.joinToString(",") }) { Text("Reset") }
                     }
-                    var tfText by remember { mutableStateOf(engine.timeframes.joinToString(",")) }
+                    var tfText by remember(engine.configRev) { mutableStateOf(engine.timeframes.joinToString(",")) }
                     OutlinedTextField(
                         tfText, { tfText = it },
                         label = { Text("Timeframes (1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M)") },
@@ -304,7 +306,7 @@ fun ControlScreen(
                         OutlinedButton(onClick = { onAction("set timeframes $tfText") }) { Text("Apply timeframes") }
                         OutlinedButton(onClick = { tfText = engine.timeframes.joinToString(",") }) { Text("Reset") }
                     }
-                    var topText by remember { mutableStateOf(engine.scanTop.toString()) }
+                    var topText by remember(engine.configRev) { mutableStateOf(engine.scanTop.toString()) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             topText, { topText = it.filter { ch -> ch.isDigit() }.take(2) },

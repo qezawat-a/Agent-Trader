@@ -47,6 +47,10 @@ object CommandRouter {
         "settings trade", "scan on", "scan off", "scan once",
         "close position", "close all", "manual entry", "set leverage", "set risk",
         "mid management",
+        // v1.1.1 scanner & gate commands — without these they fell through to the LLM,
+        // which happily answered "Set." while nothing ran on the engine.
+        "set universe", "set symbols", "set symbol", "set timeframes", "set scan top",
+        "set min agree", "set min tf", "set min conf",
     )
 
     fun parse(input: String): Parsed {

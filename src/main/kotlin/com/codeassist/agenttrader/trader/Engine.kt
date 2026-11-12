@@ -132,6 +132,13 @@ class TraderEngine(private val rest: BitunixRest) {
     var positionMode = "ONE_WAY"
     val universe = mutableListOf("BTCUSDT", "ETHUSDT", "SOLUSDT")
 
+    /**
+     * Bumped on every universe/timeframe/gate/leverage/risk change so UI fields
+     * bound to these values can reset themselves (Compose remember key).
+     */
+    var configRev: Int = 0
+        private set
+
     // Scanner & signal gates — all user-changeable (set universe / set timeframes / set min ...).
     var scanTop = 10
     var timeframes: List<String> = SignalAggregator.TIMEFRAMES
@@ -359,12 +366,22 @@ class TraderEngine(private val rest: BitunixRest) {
     internal fun effectiveLeverage(base: Int, max: Int?): Int = minOf(base, max ?: base)
 
     /** Ranks the scanner universe by quote volume and returns the top symbols. */
-    fun rankUniverse(top: Int = 10): List<String> {
-        val arr = rest.tickers()
-        val rows = (0 until arr.length()).map { arr.getJSONObject(it) }
-            .filter { it.optString("symbol").endsWith("USDT") }
-            .sortedByDescending { it.optString("quoteVol").toDoubleOrNull() ?: 0.0 }
-        return rows.take(top).map { it.getString("symbol") }
+    fun rankUniverse(top: Int = 10, tickersJson: org.json.JSONArray? = null): List<String> {
+        if (universe.isEmpty()) return emptyList()
+        val wanted = universe.map { it.uppercase() }.toSet()
+        return try {
+            // The tickers endpoint lists EVERY symbol on the exchange — keep only the
+            // universe's symbols, ranked by 24h quote volume. Symbols without ticker
+            // data keep their universe order behind the ranked ones.
+            val arr = tickersJson ?: rest.tickers()
+            val rows = (0 until arr.length()).map { arr.getJSONObject(it) }
+                .filter { it.optString("symbol").uppercase() in wanted }
+                .sortedByDescending { it.optString("quoteVol").toDoubleOrNull() ?: 0.0 }
+            val ranked = rows.map { it.getString("symbol") }
+            (ranked + universe).distinct().take(top)
+        } catch (_: Exception) {
+            universe.take(top)
+        }
     }
 
     /**
@@ -932,6 +949,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 if (v == null || v !in 1..MAX_LEVERAGE) "Usage: set leverage <1-$MAX_LEVERAGE>"
                 else {
                     leverage = v
+                    configRev++
                     "Leverage set to $v x."
                 }
             }
@@ -940,6 +958,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 if (v == null || v !in 1.0..100.0) "Usage: set risk <1-100> (percent of balance per trade)"
                 else {
                     riskFraction = v / 100.0
+                    configRev++
                     "Margin per trade set to ${v.toInt()}% of balance."
                 }
             }
@@ -953,6 +972,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     universe.clear(); universe.addAll(parsed)
                     signalCacheAt = 0
+                    configRev++
                     "Universe set (${parsed.size}): ${parsed.joinToString(", ")}"
                 }
             }
@@ -963,6 +983,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 } else {
                     timeframes = parsed
                     signalCacheAt = 0
+                    configRev++
                     "Timeframes set: ${parsed.joinToString(", ")}"
                 }
             }
@@ -972,6 +993,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     scanTop = v
                     signalCacheAt = 0
+                    configRev++
                     "Scanner picks the top $v symbols by volume."
                 }
             }
@@ -981,6 +1003,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     minAgreeing = v
                     signalCacheAt = 0
+                    configRev++
                     "Gate set: $v strategies must agree per timeframe."
                 }
             }
@@ -990,6 +1013,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     minTfConfidence = v
                     signalCacheAt = 0
+                    configRev++
                     "Gate set: each timeframe needs ${v.toInt()}% confidence."
                 }
             }
@@ -999,6 +1023,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     minConfidence = v
                     signalCacheAt = 0
+                    configRev++
                     "Gate set: combined confidence must be ${v.toInt()}%."
                 }
             }
