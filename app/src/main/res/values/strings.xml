@@ -1,4 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Agent Trader</string>
+
+    <!-- Screens -->
+    <string name="screen_chat">Chat</string>
+    <string name="screen_control">Control</string>
+    <string name="screen_trade">Trade</string>
+    <string name="screen_signals">Signals</string>
+    <string name="screen_settings">Settings</string>
+
+    <!-- Control panel labels -->
+    <string name="control_engine">Engine</string>
+    <string name="control_trading">Trading</string>
+    <string name="control_scanner">Scanner</string>
+    <string name="control_report">Periodic report</string>
+    <string name="control_notifications">Notifications</string>
+
+    <!-- Status pills -->
+    <string name="status_live">LIVE</string>
+    <string name="status_paper">PAPER</string>
+    <string name="status_trading">TRADING</string>
+    <string name="status_idle">IDLE</string>
+
+    <!-- Hint text -->
+    <string name="hint_engine_subtitle">scan + manage positions every 30s</string>
+    <string name="hint_trading_subtitle">place orders (paper or live)</string>
+    <string name="hint_scanner_subtitle">rank the universe by volume instead of the fixed list</string>
+    <string name="hint_report_subtitle">post a summary every %1$d min</string>
+    <string name="hint_notifications_subtitle">trade events, SL/TP moves and reports in the status bar</string>
+
+    <!-- Messages -->
+    <string name="msg_settings_saved">Settings saved (mode: %1$s).</string>
+    <string name="msg_provider_connected">Provider connected.</string>
+    <string name="msg_provider_tested">Provider OK: %1$d models. Using %2$s.</string>
+    <string name="msg_live_warning">LIVE mode — real orders (risky!)</string>
+    <string name="msg_paper_hint">PAPER mode — simulated (safe)</string>
+
+    <!-- Bitunix settings -->
+    <string name="section_bitunix">Bitunix Futures</string>
+    <string name="label_api_key">API Key</string>
+    <string name="label_secret_key">Secret Key</string>
+    <string name="label_leverage">Leverage (e.g. 5)</string>
+    <string name="label_margin_mode">Margin mode</string>
+    <string name="label_position_mode">Position mode</string>
+    <string name="margin_isolation">Isolation</string>
+    <string name="margin_cross">Cross</string>
+    <string name="position_one_way">One-way</string>
+    <string name="position_hedge">Hedge</string>
 </resources>
