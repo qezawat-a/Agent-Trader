@@ -32,7 +32,7 @@ and a keyless public WebSocket market feed (tickers + price) that keeps engine p
 | **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
 | **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 21 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
-| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
+| **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, **notifications**, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
 
 Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
@@ -142,6 +142,10 @@ Verified against the live API and the official docs (2026-11):
 - **Positions & orders** — pending/history positions, pending/history orders, order detail,
   flash close, close-all, cancel one / cancel all, batch orders, modify order.
 - **TP/SL** — position-level and partial TP/SL (place, modify, cancel, pending, history).
+- **Notifications** — autonomous events reach the status bar: positions opening/closing,
+  SL/TP moves, breakeven steps, order updates and the periodic report. The Control screen
+  has a toggle; Android 13+ asks for the permission at first launch (and again from the
+  toggle). WS balance pushes and connection noise stay silent.
 - **WebSocket** — `wss://fapi.bitunix.com/public/` for market channels and
   `wss://fapi.bitunix.com/private/` for account channels, app-level ping (Unix seconds)
   every 3s, 250ms send pump (4 msg/s under the 5 msg/s cap), reconnect with backoff and

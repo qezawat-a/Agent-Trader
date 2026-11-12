@@ -134,6 +134,8 @@ fun ControlScreen(
     onToggleTrading: (Boolean) -> Unit,
     onToggleScan: (Boolean) -> Unit,
     onToggleReport: (Boolean) -> Unit,
+    notificationsOn: Boolean,
+    onToggleNotifications: (Boolean) -> Unit,
     onAction: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -212,6 +214,10 @@ fun ControlScreen(
                     ToggleRow(
                         "Periodic report", Icons.Default.DateRange, engine.reportOn, onToggleReport,
                         "post a summary every ${engine.reportIntervalMin} min",
+                    )
+                    ToggleRow(
+                        "Notifications", Icons.Default.Notifications, notificationsOn, onToggleNotifications,
+                        "trade events, SL/TP moves and reports in the status bar",
                     )
                 }
             }

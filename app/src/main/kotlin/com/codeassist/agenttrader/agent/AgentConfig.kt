@@ -75,6 +75,11 @@ class AgentConfig(context: Context) {
         get() = prefs.getLong("report_interval_min", 15L)
         set(value) = prefs.edit().putLong("report_interval_min", value).apply()
 
+    /** Status-bar notifications for trade events and reports (Control screen toggle). */
+    var notifications: Boolean
+        get() = prefs.getBoolean("notifications", true)
+        set(value) = prefs.edit().putBoolean("notifications", value).apply()
+
     /** Scanner universe as comma-separated symbols, e.g. "BTCUSDT,ETHUSDT". */
     var universe: String
         get() = prefs.getString("universe", "") ?: ""

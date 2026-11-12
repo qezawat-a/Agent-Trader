@@ -1,5 +1,9 @@
 package com.codeassist.agenttrader
 
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -7,6 +11,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -79,6 +85,9 @@ import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.trader.fmt
 import com.codeassist.agenttrader.ui.AppScreen
 import com.codeassist.agenttrader.ui.ControlScreen
+import com.codeassist.agenttrader.notify.Notifier
+import com.codeassist.agenttrader.notify.notifiable
+import com.codeassist.agenttrader.notify.notificationTitle
 import com.codeassist.agenttrader.trader.SignalRow
 import com.codeassist.agenttrader.trader.parseSymbolsCsv
 import com.codeassist.agenttrader.trader.parseTimeframesCsv
@@ -189,6 +198,7 @@ fun AgentApp(
     onEngineRecreate: () -> Unit,
     onTradingChange: (Boolean) -> Unit,
 ) {
+    val appContext = LocalContext.current
     val messages = remember { mutableStateListOf(ChatMsg("Agent Trader ready. Tap a quick action or type /help.", false, now())) }
     // Rolling multi-turn memory for the LLM: (role, content), oldest first.
     val history = remember { mutableStateListOf<Pair<String, String>>() }
@@ -263,6 +273,24 @@ fun AgentApp(
     fun toggleReport(on: Boolean) {
         engine.reportOn = on
         say(if (on) "Periodic reports ON (every ${engine.reportIntervalMin} min)." else "Periodic reports OFF.")
+    }
+
+    fun toggleNotifications(on: Boolean) {
+        config.notifications = on
+        if (on && Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                appContext, Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001,
+            )
+            say("Notifications ON — accept the Android permission dialog so events can reach the status bar.")
+            return
+        }
+        say(
+            if (on) "Notifications ON — trade events, SL/TP moves and reports will show in the status bar."
+            else "Notifications OFF.",
+        )
     }
 
     fun toggleLive(on: Boolean) {
@@ -433,7 +461,24 @@ fun AgentApp(
 
     // One event sink for the engine (loop, reports, live WebSocket feed).
     LaunchedEffect(engineVersion) {
-        engine.setEventSink { msg -> say(msg) }
+        engine.setEventSink { msg ->
+            say(msg)
+            if (config.notifications && notifiable(msg)) {
+                Notifier.post(appContext, notificationTitle(msg), msg)
+            }
+        }
+    }
+
+    // Ask for the status-bar notification permission once (Android 13+).
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+                appContext, Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001,
+            )
+        }
     }
 
     // Public WebSocket market feed (tickers + price): no keys needed, streams silently.
@@ -868,6 +913,8 @@ fun AgentApp(
                         onToggleTrading = { v -> toggleTrading(v) },
                         onToggleScan = { v -> toggleScan(v) },
                         onToggleReport = { v -> toggleReport(v) },
+                        notificationsOn = config.notifications,
+                        onToggleNotifications = { v -> toggleNotifications(v) },
                         onAction = { runAction(it) },
                         modifier = Modifier.padding(horizontal = 10.dp),
                     )
