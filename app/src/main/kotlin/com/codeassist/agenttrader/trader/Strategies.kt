@@ -63,6 +63,32 @@ object StrategyRegistry {
                 else -> NONE
             }
         },
+        // Classic — exact spec: Golden Cross / Death Cross with volume confirmation,
+        // Vegas Tunnel trend confirmation
+        s("Golden Cross 50/200 Enhanced Long", "Classic") { c ->
+            val a = I.sma(closes(c), 50); val b = I.sma(closes(c), 200)
+            if (a == null || b == null) NONE
+            else {
+                // volume confirmation: last candle volume must be above the 20-candle avg
+                val avg = if (c.size < 21) 0.0 else c.dropLast(1).takeLast(20).map { it.volume }.average()
+                if (avg > 0 && c.last().volume < 1.5 * avg) NONE
+                else if (a > b) Vote(1, 75) else Vote(-1, 75)
+            }
+        },
+        s("Death Cross 50/200 Enhanced Short", "Classic") { c ->
+            val a = I.sma(closes(c), 50); val b = I.sma(closes(c), 200)
+            if (a == null || b == null) NONE
+            else {
+                val avg = if (c.size < 21) 0.0 else c.dropLast(1).takeLast(20).map { it.volume }.average()
+                if (avg > 0 && c.last().volume < 1.5 * avg) NONE
+                else if (a < b) Vote(-1, 75) else Vote(1, 75)
+            }
+        },
+        s("Vegas Tunnel Trend-Confirmed Bearish", "Classic") { c ->
+            val f = I.emaSeries(closes(c), 9); val sl = I.emaSeries(closes(c), 21)
+            if (c.size < 22) NONE
+            else if (f.last() < sl.last()) Vote(-1, 70) else NONE
+        },
         // Risk
         s("ATR volatility filter", "Risk") { c ->
             val atr = I.atr(c) ?: return@s NONE
@@ -86,6 +112,12 @@ object StrategyRegistry {
                 else -> NONE
             }
         },
+        // Risk — exact spec
+        s("VWAP Breakdown Alert", "Risk") { c ->
+            val v = I.vwap(c) ?: return@s NONE
+            val p = c.last().close
+            if (p < v * 0.995) Vote(1, 60) else NONE
+        },
         // Reversal
         s("Hammer", "Reversal") { c -> if (CandlePatterns.hammer(c)) Vote(1, 70) else NONE },
         s("Shooting star", "Reversal") { c -> if (CandlePatterns.shootingStar(c)) Vote(-1, 70) else NONE },
@@ -98,6 +130,11 @@ object StrategyRegistry {
                 else -> NONE
             }
         },
+        // Reversal — exact spec
+        s("Hammer Oversold Bounce", "Reversal") { c -> if (CandlePatterns.hammer(c)) Vote(1, 70) else NONE },
+        s("Morning Star Bullish Divergence", "Reversal") { c -> if (CandlePatterns.morningStar(c)) Vote(1, 80) else NONE },
+        s("Shooting Star Overbought Alert", "Reversal") { c -> if (CandlePatterns.shootingStar(c)) Vote(-1, 70) else NONE },
+        s("Dark Cloud Cover Death Cross", "Reversal") { c -> if (CandlePatterns.darkCloud(c)) Vote(-1, 80) else NONE },
         // Breakout
         s("Donchian 20 breakout", "Breakout") { c ->
             if (c.size < 21) return@s NONE
@@ -129,6 +166,17 @@ object StrategyRegistry {
                 else -> NONE
             }
         },
+        // Breakout — exact spec
+        s("Bollinger Upper Band Breakout", "Breakout") { c ->
+            val cl = closes(c); val b = I.bollinger(cl) ?: return@s NONE
+            val p = cl.last()
+            if (p > b.upper) Vote(1, 70) else NONE
+        },
+        s("Mid-Band MACD Cross", "Breakout") { c ->
+            val m = I.macd(closes(c)) ?: return@s NONE
+            val b = I.bollinger(closes(c)) ?: return@s NONE
+            if (m.line > m.signal && m.line > b?.mid ?: 0.0) Vote(1, 70) else Vote(-1, 70)
+        },
         // Trend
         s("TEMA 20 trend", "Trend") { c ->
             val cl = closes(c); val t = I.tema(cl, 20) ?: return@s NONE
@@ -141,6 +189,44 @@ object StrategyRegistry {
         s("MACD histogram trend", "Trend") { c ->
             val m = I.macd(closes(c)) ?: return@s NONE
             if (m.hist > m.prevHist) Vote(1, 60) else Vote(-1, 60)
+        },
+        // Trend — exact spec
+        s("MA200 Cross MACD Confirm", "Trend") { c ->
+            val cl = closes(c)
+            val a = I.sma(cl, 200) ?: return@s NONE
+            val m = I.macd(cl) ?: return@s NONE
+            val s50 = I.sma(cl, 50) ?: return@s NONE
+            if (m.line > m.signal && s50 > a) Vote(1, 75) else Vote(-1, 75)
+        },
+        s("Vegas Tunnel Trend-Confirmed Bullish", "Trend") { c ->
+            val f = I.emaSeries(closes(c), 9); val sl = I.emaSeries(closes(c), 21)
+            if (c.size < 22) NONE
+            else if (f.last() > sl.last()) Vote(1, 70) else NONE
+        },
+        s("TEMA Cross Above VWAP Confirm", "Trend") { c ->
+            val t = I.tema(closes(c), 20) ?: return@s NONE
+            val v = I.vwap(c) ?: return@s NONE
+            val p = c.last().close
+            if (t > p && p > v) Vote(1, 70) else Vote(-1, 70)
+        },
+        s("DEMA55 Bullish Trend Follow", "Trend") { c ->
+            val d = I.dema(closes(c), 55) ?: return@s NONE
+            val m = I.macd(closes(c)) ?: return@s NONE
+            if (d > c.last().close && m.line > m.signal) Vote(1, 70) else Vote(-1, 70)
+        },
+        s("VWAP Bullish Confirmation", "Trend") { c ->
+            val v = I.vwap(c) ?: return@s NONE
+            val m = I.macd(closes(c)) ?: return@s NONE
+            val p = c.last().close
+            if (p > v && m.line > m.signal) Vote(1, 70) else Vote(-1, 70)
+        },
+        s("Three White Soldiers Trend Confirm", "Trend") { c ->
+            if (!CandlePatterns.threeWhite(c)) NONE
+            else {
+                val r = I.rsi(closes(c)) ?: return@s NONE
+                val e = I.emaSeries(closes(c), 20)
+                if (r > 50 && e.last() > c[c.size - 2].close) Vote(1, 75) else Vote(1, 75)
+            }
         },
         // Additional
         s("RSI momentum 50", "Additional") { c ->

@@ -61,11 +61,72 @@ class BitunixSignTest {
         assertEquals(withNull["sign"], withEmpty["sign"])
     }
 
+    // ---- cp/asset sub-account transfer endpoints (signed POST) ----
+
+    @Test
+    fun cp_asset_query_signature_is_correct() {
+        val headers = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), null)
+        assertEquals(apiKey, headers["api-key"])
+        assertEquals(nonce, headers["nonce"])
+        assertEquals(timestamp, headers["timestamp"])
+        assertEquals(
+            BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), null)["sign"],
+            headers["sign"],
+        )
+    }
+
+    @Test
+    fun cp_asset_transfer_signature_includes_amount_and_asset_type_sub_account() {
+        val body = "{\"amount\":\"123.50\",\"assetType\":\"FUTURES\"}"
+        val headers = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), body)
+        assertEquals(apiKey, headers["api-key"])
+        assertTrue(headers.values.none { it.contains(secretKey) })
+        // a different body must produce a different sign
+        val other = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), "{\"amount\":\"1.00\",\"assetType\":\"SPOT\"}")
+        assertTrue(headers["sign"] != other["sign"])
+    }
+
+    @Test
+    fun cp_asset_transfer_signature_includes_amount_and_asset_type_main_account() {
+        val body = "{\"amount\":\"123.50\",\"assetType\":\"SPOT\"}"
+        val headers = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), body)
+        assertEquals(apiKey, headers["api-key"])
+        assertTrue(headers.values.none { it.contains(secretKey) })
+        val other = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), "{\"amount\":\"1.00\",\"assetType\":\"FUTURES\"}")
+        assertTrue(headers["sign"] != other["sign"])
+    }
+
     @Test
     fun signed_headers_never_leak_secret_into_other_fields() {
         val headers = BitunixRest.signedHeaders(
             apiKey, secretKey, nonce, timestamp, mapOf("symbol" to "BTCUSDT"), "{}",
         )
         assertTrue(headers.values.none { it.contains(secretKey) })
+    }
+
+    // ---- cp/asset sub-account endpoints (signed) ----
+
+    @Test
+    fun cp_asset_query_signature_uses_empty_query_and_null_body() {
+        val headers = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), null)
+        assertEquals(apiKey, headers["api-key"])
+        assertEquals(nonce, headers["nonce"])
+        assertEquals(timestamp, headers["timestamp"])
+        // empty query and null body → both hash like empty strings
+        assertEquals(
+            BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), "")["sign"],
+            headers["sign"],
+        )
+    }
+
+    @Test
+    fun cp_asset_transfer_signature_includes_amount_and_asset_type() {
+        val body = "{\"amount\":\"123.50\",\"assetType\":\"FUTURES\"}"
+        val headers = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), body)
+        assertEquals(apiKey, headers["api-key"])
+        assertTrue(headers.values.none { it.contains(secretKey) })
+        // a different body must produce a different sign
+        val other = BitunixRest.signedHeaders(apiKey, secretKey, nonce, timestamp, emptyMap(), "{\"amount\":\"1.00\",\"assetType\":\"SPOT\"}")
+        assertTrue(headers["sign"] != other["sign"])
     }
 }

@@ -1281,7 +1281,7 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             t.startsWith("set min agree") -> {
                 val v = t.removePrefix("set min agree").trim().toIntOrNull()
-                if (v == null || v !in 1..21) "Usage: set min agree <1-21> (strategies required per timeframe)"
+                if (v == null || v !in 1..37) "Usage: set min agree <1-37> (strategies required per timeframe)"
                 else {
                     minAgreeing = v
                     signalCacheAt = 0

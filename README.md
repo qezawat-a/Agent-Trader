@@ -20,9 +20,11 @@ front of a real futures engine. You talk to it; it answers with numbers, notices
 stressed, and — when you ask — it inspects the account, runs the engine's tools and comes back
 with what actually happened.
 
-The trading side is not a toy: 21 strategies, a 15m + 1h consensus gate, a TP/SL plan built
-around liquidation distance, signed REST calls verified against the live Bitunix API, and a
-private WebSocket feed that streams balance, position, order and TP/SL updates into the chat,
+The trading side is not a toy: 37 strategies across six groups (Classic, Risk, Reversal,
+Breakout, Trend, Additional) plus the exact-spec names from the strategy spec, a 15m + 1h
+consensus gate, a TP/SL plan built around liquidation distance, signed REST calls verified
+against the live Bitunix API, and a private WebSocket feed that streams balance, position,
+order and TP/SL updates into the chat,
 and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
 
 ## The four screens
@@ -31,7 +33,7 @@ and a keyless public WebSocket market feed (tickers + price) that keeps engine p
 |---|---|
 | **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
-| **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 21 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
+| **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 37 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, **notifications**, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
 
@@ -178,7 +180,7 @@ Verified against the live API and the official docs (2026-11):
 
 ## Trading logic
 
-- 21 strategies: trend, reversion, breakout, reversal and risk filters.
+- 37 strategies: trend, reversion, breakout, reversal, risk filters plus the exact-spec names — Golden Cross 50/200 Enhanced Long, Death Cross 50/200 Enhanced Short, Vegas Tunnel Trend-Confirmed Bearish/Bullish, VWAP Breakdown Alert, Hammer Oversold Bounce, Morning Star Bullish Divergence, Shooting Star Overbought Alert, Dark Cloud Cover Death Cross, Bollinger Upper Band Breakout, Mid-Band MACD Cross, MA200 Cross MACD Confirm, TEMA Cross Above VWAP Confirm, DEMA55 Bullish Trend Follow, VWAP Bullish Confirmation, Three White Soldiers Trend Confirm.
 - Trader commands typed in chat (`set universe …`, `set timeframes …`, …) are routed
   straight to the engine — they never depend on the LLM being alive. When the brain does
   call a tool, the chat shows a receipt line (`⚙️ set universe … → Universe set (3): …`),
@@ -192,7 +194,7 @@ Verified against the live API and the official docs (2026-11):
   signal gates are yours to change — in chat (`set …`), on the Control screen, or by
   asking the agent (it can read the config with `settings trade` and edit it for you).
   Everything persists across restarts.
-- A **signal** is the verdict of 21 strategies over your configured timeframes
+- A **signal** is the verdict of 37 strategies over your configured timeframes
   (default 15m + 1h): each timeframe needs at least **3 strategies
   agreeing at ≥60%**, both timeframes must point the same way, and their combined
   confidence must be **≥70%** (all three gates are configurable). Anything less is
@@ -254,7 +256,7 @@ runs the unit tests and publishes a GitHub release with checksums.
 app/src/main/kotlin/com/codeassist/agenttrader/
 ├── agent/      AgentBrain (prompt, mood, tools) · SelfRepair · ModelClient · CommandRouter
 ├── bitunix/    BitunixRest (signed REST) · BitunixWs (public + private feed)
-├── trader/     Engine (paper/live) · Signals (21 strategies) · MarketMood
+├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood
 ├── ui/         Control + Trade surfaces
 └── MainActivity.kt
 ```

@@ -280,6 +280,20 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         return dataArray(signedGet("/api/v1/futures/account/trading_settings", q))
     }
 
+    // ---- Copy trading / sub-account assets (signed) ---
+
+    /** Queries whether futures/spot assets are available and the maximum transferable amount. */
+    fun cpAssetQuery(): JSONObject = dataObject(signedGet("/api/v1/cp/asset/query"))
+
+    /** Transfers asset from the main account to a cp/asset sub-account (amount, assetType FUTURES/SPOT). */
+    fun cpAssetTransferToSubAccount(amount: String, assetType: String): JSONObject =
+        signedPost("/api/v1/cp/asset/transfer-to-sub-account", JSONObject()
+            .put("amount", amount).put("assetType", assetType))
+
+    /** Transfers asset from a cp/asset sub-account back to the main account (amount, assetType). */
+    fun cpAssetTransferToMainAccount(amount: String, assetType: String): JSONObject =
+        signedPost("/api/v1/cp/asset/transfer-to-main-account", JSONObject()
+            .put("amount", amount).put("assetType", assetType))
     // ---- Positions (signed) ----
 
     /**
