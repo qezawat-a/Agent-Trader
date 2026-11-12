@@ -169,11 +169,11 @@ object TpSlPlanner {
     const val TRAIL_ROI = 0.15
     const val STOP_FRACTION_OF_LIQ = 0.5
 
-    fun plan(entry: Double, dir: Int, leverage: Int): TpSlPlan {
+    fun plan(entry: Double, dir: Int, leverage: Int, stopFraction: Double = STOP_FRACTION_OF_LIQ): TpSlPlan {
         val liqDist = entry / leverage
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
-        val stop = if (dir > 0) entry - STOP_FRACTION_OF_LIQ * (entry - liq)
-        else entry + STOP_FRACTION_OF_LIQ * (liq - entry)
+        val stop = if (dir > 0) entry - stopFraction * (entry - liq)
+        else entry + stopFraction * (liq - entry)
         val r = abs(entry - stop)
         val ladder = LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
         return TpSlPlan(entry, stop, liq, ladder)
@@ -183,9 +183,9 @@ object TpSlPlanner {
     fun roi(entry: Double, price: Double, dir: Int, leverage: Int): Double =
         dir * (price - entry) / entry * leverage
 
-    /** Trailing stop price for the best price seen so far. */
-    fun trailStop(best: Double, dir: Int, leverage: Int): Double {
-        val dist = TRAIL_ROI / leverage
+    /** Trailing stop price for the best price seen so far, [trailRoi] distance behind it. */
+    fun trailStop(best: Double, dir: Int, leverage: Int, trailRoi: Double = TRAIL_ROI): Double {
+        val dist = trailRoi / leverage
         return if (dir > 0) best * (1 - dist) else best * (1 + dist)
     }
 }

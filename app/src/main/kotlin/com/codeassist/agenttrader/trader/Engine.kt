@@ -4,6 +4,7 @@ import com.codeassist.agenttrader.bitunix.BitunixApiException
 import com.codeassist.agenttrader.bitunix.BitunixRest
 import com.codeassist.agenttrader.bitunix.BitunixWs
 import com.codeassist.agenttrader.bitunix.Candle
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -26,6 +27,21 @@ data class Position(
 )
 
 /**
+ * Risk manager & exit rules — every value is user-changeable (chat or Control
+ * screen); the defaults keep the engine's long-standing behavior.
+ */
+data class RiskSettings(
+    /** Stop moves to entry once ROI reaches this % (0 = breakeven off). */
+    val breakevenRoiPct: Double = 10.0,
+    /** Trailing starts once ROI reaches this % — fires after breakeven (0 = off). */
+    val trailingTriggerRoiPct: Double = 15.0,
+    /** Trailing stop keeps this much ROI distance behind the best price. */
+    val trailDistanceRoiPct: Double = 15.0,
+    /** Initial stop sits this % of the way toward liquidation. */
+    val stopFractionOfLiqPct: Double = 50.0,
+)
+
+/**
  * Paper broker: simulated market fills and PnL. Default mode; no exchange calls.
  * Balance is in USDT. Each trade risks [MARGIN_FRACTION] of the balance as margin.
  */
@@ -34,23 +50,28 @@ class PaperBroker(var balance: Double = 1000.0) {
     var realizedPnl = 0.0
     val history = mutableListOf<String>()
 
-    fun open(symbol: String, dir: Int, price: Double, leverage: Int): Position? =
-        openSized(symbol, dir, price, leverage, MARGIN_FRACTION)
+    fun open(
+        symbol: String, dir: Int, price: Double, leverage: Int,
+        risk: RiskSettings = RiskSettings(),
+    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk)
 
     /** Opens a position committing [marginFraction] of the balance as margin. */
-    fun openSized(symbol: String, dir: Int, price: Double, leverage: Int, marginFraction: Double): Position? {
+    fun openSized(
+        symbol: String, dir: Int, price: Double, leverage: Int,
+        marginFraction: Double, risk: RiskSettings = RiskSettings(),
+    ): Position? {
         if (positions.containsKey(symbol)) return null
         val margin = balance * marginFraction.coerceIn(0.0001, 1.0)
         val qty = margin * leverage / price
-        val plan = TpSlPlanner.plan(price, dir, leverage)
+        val plan = TpSlPlanner.plan(price, dir, leverage, risk.stopFractionOfLiqPct / 100.0)
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
         positions[symbol] = pos
         history.add("OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol @ ${fmt(price)} qty ${fmt(qty)}")
         return pos
     }
 
-    /** Walks the ladder and trailing/breakeven rules with a new price. Returns closes done. */
-    fun manage(symbol: String, price: Double): List<String> {
+    /** Walks the ladder and the configured breakeven/trailing rules with a new price. */
+    fun manage(symbol: String, price: Double, risk: RiskSettings = RiskSettings()): List<String> {
         val p = positions[symbol] ?: return emptyList()
         val events = mutableListOf<String>()
         if (p.dir > 0) p.best = maxOf(p.best, price) else p.best = minOf(p.best, price)
@@ -64,15 +85,24 @@ class PaperBroker(var balance: Double = 1000.0) {
             events.add("TP${p.nextRung} $symbol @ ${fmt(target)}")
         }
         if (positions[symbol] == null) return events
-        // Breakeven once ROI reaches 10%
-        if (!p.breakeven && TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= TpSlPlanner.BREAKEVEN_ROI) {
+        // Breakeven: the stop moves to entry once ROI reaches the configured level.
+        if (!p.breakeven && risk.breakevenRoiPct > 0 &&
+            TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.breakevenRoiPct / 100.0
+        ) {
             p.breakeven = true
             p.stop = p.entry
+            events.add("Breakeven $symbol: SL moved to entry ${fmt(p.entry)}")
         }
-        // Trailing stop once in profit
-        if (p.breakeven) {
-            val trail = TpSlPlanner.trailStop(p.best, p.dir, p.leverage)
-            if (p.dir > 0) p.stop = maxOf(p.stop, trail) else p.stop = minOf(p.stop, trail)
+        // Trailing: fires at the configured trigger ROI (after breakeven) and only tightens.
+        if (risk.trailingTriggerRoiPct > 0 &&
+            TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.trailingTriggerRoiPct / 100.0
+        ) {
+            val trail = TpSlPlanner.trailStop(p.best, p.dir, p.leverage, risk.trailDistanceRoiPct / 100.0)
+            val improves = if (p.dir > 0) trail > p.stop else trail < p.stop
+            if (improves) {
+                p.stop = trail
+                events.add("Trailing $symbol: SL moved to ${fmt(trail)}")
+            }
         }
         val stopHit = if (p.dir > 0) price <= p.stop else price >= p.stop
         if (stopHit) {
@@ -117,6 +147,9 @@ data class PairInfo(
 
 fun fmt(v: Double): String = "%.4f".format(v)
 
+/** Percent display that shows "off" when the value is 0 (breakeven/trailing/caps). */
+internal fun offable(v: Double): String = if (v > 0) "${"%.0f".format(v)}%" else "off"
+
 /**
  * Trader engine: owns the broker, the scanner universe, and the on/off switches.
  * Live trading needs explicit enabling and API keys. Until then every order is paper.
@@ -147,6 +180,29 @@ class TraderEngine(private val rest: BitunixRest) {
     var minConfidence: Double = SignalAggregator.MIN_CONFIDENCE
 
     private fun gates() = SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence)
+
+    // ---- Risk manager & exits (v1.1.7) — every value user-changeable. ----
+
+    /** Breakeven / trailing / initial-stop configuration (RiskSettings defaults keep old behavior). */
+    var risk = RiskSettings()
+
+    /** Maximum simultaneously open paper positions (0 = unlimited). */
+    var maxOpenPositions = 3
+
+    /** Daily loss cap, % of the day's starting balance (0 = off). */
+    var maxDailyLossPct = 5.0
+
+    /** Minimum seconds between two entries (0 = off). */
+    var guardIntervalSec = 300L
+
+    internal var lastEntryAt = 0L
+    internal var dayStamp = ""
+    internal var dayStartBalance = 0.0
+
+    // Live-position mid-management state, keyed by symbol.
+    private val liveBest = java.util.concurrent.ConcurrentHashMap<String, Double>()
+    private val liveLastStop = java.util.concurrent.ConcurrentHashMap<String, Double>()
+    private val liveBreakevenDone = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /** Periodic report settings. */
     var reportOn = false
@@ -431,6 +487,60 @@ class TraderEngine(private val rest: BitunixRest) {
             "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%"
 
     /** Full settings dump the user and the agent can both read. */
+    /** Balance the risk manager reasons about: WS live value when connected, else paper. */
+    fun currentBalance(): Double = wsBalance.get() ?: broker.balance
+
+    /** UTC day stamp used to reset the daily-loss baseline at midnight UTC. */
+    internal fun todayStamp(): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
+            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        }.format(java.util.Date())
+
+    /**
+     * Risk-manager gate evaluated before EVERY new entry. Returns the blocking
+     * reason (also announced as an event) or null when a new entry is allowed.
+     * Order: guard interval → max open positions (paper) → daily loss cap.
+     */
+    internal fun riskBlock(): String? {
+        if (guardIntervalSec > 0 && lastEntryAt > 0) {
+            val leftMs = guardIntervalSec * 1000 - (System.currentTimeMillis() - lastEntryAt)
+            if (leftMs > 0) {
+                val reason = "Risk manager: guard interval — next entry allowed in ${"%.0f".format(leftMs / 1000.0)}s"
+                onEvent?.invoke(reason)
+                return reason
+            }
+        }
+        if (!live && maxOpenPositions > 0 && broker.positions.size >= maxOpenPositions) {
+            val reason = "Risk manager: max open positions ($maxOpenPositions) reached — close one or raise the cap"
+            onEvent?.invoke(reason)
+            return reason
+        }
+        // Daily loss cap: the baseline re-arms when the UTC day rolls over.
+        val today = todayStamp()
+        if (dayStamp != today) {
+            dayStamp = today
+            dayStartBalance = currentBalance()
+        }
+        if (maxDailyLossPct > 0 && dayStartBalance > 0) {
+            val drop = (dayStartBalance - currentBalance()) / dayStartBalance * 100.0
+            if (drop >= maxDailyLossPct) {
+                val reason = "Risk manager: daily loss cap hit (-${"%.2f".format(drop)}% >= ${"%.0f".format(maxDailyLossPct)}%) — new entries blocked until tomorrow"
+                onEvent?.invoke(reason)
+                return reason
+            }
+        }
+        return null
+    }
+
+    /** Records a successful entry: arms the guard interval and the daily-loss baseline. */
+    internal fun noteEntry() {
+        lastEntryAt = System.currentTimeMillis()
+        if (dayStamp.isEmpty()) {
+            dayStamp = todayStamp()
+            dayStartBalance = currentBalance()
+        }
+    }
+
     fun settingsTradeText(): String = buildString {
         appendLine(
             "Trader settings — ${if (live) "LIVE (real orders)" else "PAPER (simulated)"} · " +
@@ -441,9 +551,13 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
+        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${"%.0f".format(risk.trailDistanceRoiPct)}% behind best · initial SL ${"%.0f".format(risk.stopFractionOfLiqPct)}% toward liq")
+        appendLine("  risk manager: max open positions $maxOpenPositions · daily loss cap ${offable(maxDailyLossPct)} · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
-            "set min agree <n> · set min tf <pct> · set min conf <pct> · set leverage <n> · set risk <pct>")
+            "set min agree <n> · set min tf <pct> · set min conf <pct> · set leverage <n> · set risk <pct> · " +
+            "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set stop frac <pct> · " +
+            "set max positions <n> · set daily loss <pct> · set guard <sec>")
     }.trim()
 
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
@@ -451,6 +565,8 @@ class TraderEngine(private val rest: BitunixRest) {
         val out = mutableListOf<String>()
         val symbols = if (scanOn) rankUniverse(scanTop) else universe.toList()
         for (sym in symbols) {
+            // Risk manager: guard interval / max open positions / daily loss cap.
+            riskBlock()?.let { out.add(it); break }
             val perTf = timeframes.associateWith { SignalAggregator.timeframe(candles(sym, it)) }
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = candles(sym, SignalAggregator.TIMEFRAMES.first()).last().close
@@ -458,7 +574,8 @@ class TraderEngine(private val rest: BitunixRest) {
                 out.add(openLive(sym, sig.dir, price, sig.confidence) ?: continue)
             } else {
                 if (broker.positions.containsKey(sym)) continue
-                broker.open(sym, sig.dir, price, leverage)?.let {
+                broker.open(sym, sig.dir, price, leverage, risk)?.let {
+                    noteEntry()
                     out.add("OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${"%.0f".format(sig.confidence)}")
                 }
             }
@@ -475,13 +592,15 @@ class TraderEngine(private val rest: BitunixRest) {
      * [sizeFraction] is the share of the account margin committed (0.10 = 10%).
      */
     fun manualEntry(symbol: String, dir: Int, sizeFraction: Double): String {
+        riskBlock()?.let { return it }
         val sym = symbol.trim().uppercase().ifEmpty { "BTCUSDT" }
         if (!live) {
             val px = symbolPrice(sym)
             if (px <= 0) return "No price for $sym."
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
-            val pos = broker.openSized(sym, dir, px, leverage, sizeFraction)
+            val pos = broker.openSized(sym, dir, px, leverage, sizeFraction, risk)
                 ?: return "SKIP $sym: could not open."
+            noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
                 "stop ${fmt(pos.stop)} (paper)"
         }
@@ -564,6 +683,7 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
     ): String {
+        riskBlock()?.let { return it }
         val livePositions = rest.pendingPositions(symbol)
         for (i in 0 until livePositions.length()) {
             if (livePositions.getJSONObject(i).optString("symbol") == symbol) {
@@ -579,7 +699,7 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()
         val triggerBasis = mark ?: price
-        val plan = TpSlPlanner.plan(triggerBasis, dir, lev)
+        val plan = TpSlPlanner.plan(triggerBasis, dir, lev, risk.stopFractionOfLiqPct / 100.0)
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
@@ -610,6 +730,7 @@ class TraderEngine(private val rest: BitunixRest) {
             val orderId = order.optString("orderId")
             val status = waitForFill(orderId)
             val conf = if (confidence != null) " conf ${"%.0f".format(confidence)}" else ""
+            noteEntry()
             return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
                 "| order $orderId $status"
         } catch (e: BitunixApiException) {
@@ -693,9 +814,106 @@ class TraderEngine(private val rest: BitunixRest) {
         val events = mutableListOf<String>()
         for (sym in broker.positions.keys.toList()) {
             val price = candles(sym, "15m").lastOrNull()?.close ?: continue
-            events.addAll(broker.manage(sym, price))
+            events.addAll(broker.manage(sym, price, risk))
+        }
+        if (live) events.addAll(manageLiveStops())
+        return events
+    }
+
+    /**
+     * Live mid-management: walks the exchange's open positions with the mark price
+     * and moves the exchange SL when the risk manager's breakeven or trailing rules
+     * fire (modify_position_tpsl). A stop is NEVER widened — trailing only fires
+     * against a known baseline SL and only when it improves it.
+     */
+    private fun manageLiveStops(): List<String> {
+        val events = mutableListOf<String>()
+        val positions = try {
+            rest.pendingPositions()
+        } catch (_: Exception) {
+            return events // transient feed/API hiccup — retry on the next tick
+        }
+        val openSymbols = mutableSetOf<String>()
+        for (i in 0 until positions.length()) {
+            val p = positions.getJSONObject(i)
+            val sym = p.optString("symbol")
+            val positionId = p.optString("positionId")
+            if (sym.isBlank() || positionId.isBlank()) continue
+            openSymbols.add(sym)
+            val entry = posEntry(p).toDoubleOrNull() ?: continue
+            val dir = when (p.optString("side").uppercase()) {
+                "LONG", "BUY" -> 1
+                "SHORT", "SELL" -> -1
+                else -> continue
+            }
+            val lev = p.optString("leverage").toIntOrNull()?.takeIf { it > 0 } ?: effectiveLeverage(sym)
+            val mark = wsMarketData(sym)?.optDouble("mp")?.takeIf { it > 0 && !it.isNaN() }
+                ?: runCatching { rest.markPrice(sym).optString("markPrice").toDoubleOrNull() }
+                    .getOrNull()?.takeIf { it > 0 }
+                ?: continue
+            val prevBest = liveBest[sym]
+            val best = if (dir > 0) maxOf(mark, prevBest ?: mark) else minOf(mark, prevBest ?: mark)
+            liveBest[sym] = best
+            val roi = TpSlPlanner.roi(entry, mark, dir, lev)
+            // Current SL baseline: what this engine last set, else the exchange's pending SL.
+            var curStop = liveLastStop[sym]
+            if (curStop == null) {
+                curStop = runCatching {
+                    val sl = rest.pendingTpSlOrders(sym, positionId)
+                    var found: Double? = null
+                    for (j in 0 until sl.length()) {
+                        val v = sl.getJSONObject(j).optString("slPrice").toDoubleOrNull()
+                        if (v != null && v > 0) { found = v; break }
+                    }
+                    found
+                }.getOrNull()
+                if (curStop != null) liveLastStop[sym] = curStop
+            }
+            // Breakeven: SL to entry once ROI passes the level — always an improvement
+            // (the engine's own initial stop sits beyond entry by construction).
+            if (risk.breakevenRoiPct > 0 && roi >= risk.breakevenRoiPct / 100.0 &&
+                liveBreakevenDone[sym] != true
+            ) {
+                liveBreakevenDone[sym] = true
+                if (curStop != null && !improves(dir, entry, curStop)) continue
+                applyLiveSl(sym, positionId, entry, "Breakeven", roi, events)
+                continue
+            }
+            // Trailing: only after its trigger ROI and only with a known baseline —
+            // without one the engine could widen an SL it never saw.
+            if (risk.trailingTriggerRoiPct > 0 && roi >= risk.trailingTriggerRoiPct / 100.0) {
+                val trail = TpSlPlanner.trailStop(best, dir, lev, risk.trailDistanceRoiPct / 100.0)
+                if (curStop == null || !improves(dir, trail, curStop)) continue
+                applyLiveSl(sym, positionId, trail, "Trailing", roi, events)
+            }
+        }
+        // Forget state for positions that closed.
+        for (sym in liveBest.keys) {
+            if (sym !in openSymbols) {
+                liveBest.remove(sym)
+                liveLastStop.remove(sym)
+                liveBreakevenDone.remove(sym)
+            }
         }
         return events
+    }
+
+    /** A candidate stop only improves when it moves toward/beyond the current stop. */
+    private fun improves(dir: Int, candidate: Double, current: Double): Boolean =
+        if (dir > 0) candidate > current else candidate < current
+
+    /** Sends the new SL to the exchange and records it; failures surface as events. */
+    private fun applyLiveSl(
+        sym: String, positionId: String, sl: Double, reason: String, roi: Double,
+        events: MutableList<String>,
+    ) {
+        try {
+            rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
+            liveLastStop[sym] = sl
+            events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${"%.1f".format(roi * 100)}%)")
+        } catch (e: Exception) {
+            events.add("Risk manager: SL move on $sym failed — ${e.message ?: e.javaClass.simpleName}")
+        }
     }
 
     fun status(): String = buildString {
@@ -861,8 +1079,9 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Orders failed: ${e.message}"
                 }
             } else "Paper mode: orders are simulated instantly."
-            t.startsWith("tpsl_history") -> "TP/SL plan: stop at ${"%.0f".format(TpSlPlanner.STOP_FRACTION_OF_LIQ * 100)}% toward liquidation, " +
-                "ladder 1R..4R each 25%, breakeven at 10% ROI, trail at 15% ROI."
+            t.startsWith("tpsl_history") -> "TP/SL plan: initial stop ${"%.0f".format(risk.stopFractionOfLiqPct)}% toward liquidation, " +
+                "ladder 1R..4R each 25%, breakeven ${if (risk.breakevenRoiPct > 0) "at ${"%.0f".format(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${"%.0f".format(risk.trailingTriggerRoiPct)}% ROI, ${"%.0f".format(risk.trailDistanceRoiPct)}% behind" else "off"}."
             t.startsWith("tiers") -> {
                 val sym = t.removePrefix("tiers").trim().uppercase().ifEmpty { "BTCUSDT" }
                 try {
@@ -960,6 +1179,69 @@ class TraderEngine(private val rest: BitunixRest) {
                     riskFraction = v / 100.0
                     configRev++
                     "Margin per trade set to ${v.toInt()}% of balance."
+                }
+            }
+            t.startsWith("set breakeven") -> {
+                val v = t.removePrefix("set breakeven").trim().toDoubleOrNull()
+                if (v == null || v !in 0.0..1000.0) "Usage: set breakeven <pct> (0 = off)"
+                else {
+                    risk = risk.copy(breakevenRoiPct = v)
+                    configRev++
+                    "Breakeven ${if (v > 0) "at ${"%.0f".format(v)}% ROI — SL moves to entry" else "off"}."
+                }
+            }
+            t.startsWith("set trail trigger") -> {
+                val v = t.removePrefix("set trail trigger").trim().toDoubleOrNull()
+                if (v == null || v !in 0.0..1000.0) "Usage: set trail trigger <pct> (0 = off)"
+                else {
+                    risk = risk.copy(trailingTriggerRoiPct = v)
+                    configRev++
+                    "Trailing trigger ${if (v > 0) "at ${"%.0f".format(v)}% ROI" else "off"}."
+                }
+            }
+            t.startsWith("set trail distance") -> {
+                val v = t.removePrefix("set trail distance").trim().toDoubleOrNull()
+                if (v == null || v !in 0.1..1000.0) "Usage: set trail distance <pct> (ROI distance behind the best price)"
+                else {
+                    risk = risk.copy(trailDistanceRoiPct = v)
+                    configRev++
+                    "Trailing distance set to ${"%.0f".format(v)}% ROI behind the best price."
+                }
+            }
+            t.startsWith("set stop frac") -> {
+                val v = t.removePrefix("set stop fraction").removePrefix("set stop frac").trim().toDoubleOrNull()
+                if (v == null || v !in 1.0..95.0) "Usage: set stop frac <10-90> (percent of the way to liquidation)"
+                else {
+                    risk = risk.copy(stopFractionOfLiqPct = v)
+                    configRev++
+                    "Initial stop set to ${"%.0f".format(v)}% of the way to liquidation."
+                }
+            }
+            t.startsWith("set max positions") -> {
+                val v = t.removePrefix("set max positions").removePrefix("set maxpos").trim().toIntOrNull()
+                if (v == null || v !in 1..20) "Usage: set max positions <1-20>"
+                else {
+                    maxOpenPositions = v
+                    configRev++
+                    "Max open positions set to $v."
+                }
+            }
+            t.startsWith("set daily loss") -> {
+                val v = t.removePrefix("set daily loss").trim().toDoubleOrNull()
+                if (v == null || v !in 0.0..100.0) "Usage: set daily loss <pct> (0 = off)"
+                else {
+                    maxDailyLossPct = v
+                    configRev++
+                    "Daily loss cap ${if (v > 0) "set to ${"%.0f".format(v)}% — entries blocked beyond it" else "off"}."
+                }
+            }
+            t.startsWith("set guard") -> {
+                val v = t.removePrefix("set guard interval").removePrefix("set guard").trim().toDoubleOrNull()
+                if (v == null || v < 0.0) "Usage: set guard <seconds> (0 = off)"
+                else {
+                    guardIntervalSec = v.toLong()
+                    configRev++
+                    "Guard interval ${if (v > 0) "set to ${v.toLong()}s between entries" else "off"}."
                 }
             }
             t.startsWith("signals") -> signalsText()

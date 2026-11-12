@@ -51,6 +51,10 @@ object CommandRouter {
         // which happily answered "Set." while nothing ran on the engine.
         "set universe", "set symbols", "set symbol", "set timeframes", "set scan top",
         "set min agree", "set min tf", "set min conf",
+        // v1.1.7 risk manager & exits — same lesson: route to the engine, never the LLM
+        "set breakeven", "set trail trigger", "set trail distance",
+        "set stop frac", "set stop fraction",
+        "set max positions", "set maxpos", "set daily loss", "set guard",
     )
 
     fun parse(input: String): Parsed {

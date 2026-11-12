@@ -327,6 +327,64 @@ fun ControlScreen(
         item {
             Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
                 Column(Modifier.padding(14.dp)) {
+                    Text("Risk manager & exits", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Breakeven ${num(engine.risk.breakevenRoiPct)}% · trail trigger ${num(engine.risk.trailingTriggerRoiPct)}% · " +
+                            "SL ${num(engine.risk.stopFractionOfLiqPct)}% toward liq · max ${engine.maxOpenPositions} positions · " +
+                            "guard ${if (engine.guardIntervalSec > 0) "${engine.guardIntervalSec}s" else "off"}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    // Keyed on configRev: chat/agent changes refresh these fields too.
+                    var beText by remember(engine.configRev) { mutableStateOf(num(engine.risk.breakevenRoiPct)) }
+                    var ttText by remember(engine.configRev) { mutableStateOf(num(engine.risk.trailingTriggerRoiPct)) }
+                    var mpText by remember(engine.configRev) { mutableStateOf(engine.maxOpenPositions.toString()) }
+                    var guardText by remember(engine.configRev) { mutableStateOf(engine.guardIntervalSec.toString()) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            beText, { beText = it },
+                            label = { Text("Breakeven % (0 off)") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set breakeven $beText") }) { Text("Apply") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            ttText, { ttText = it },
+                            label = { Text("Trail trigger % (0 off)") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set trail trigger $ttText") }) { Text("Apply") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            mpText, { mpText = it.filter { ch -> ch.isDigit() }.take(2) },
+                            label = { Text("Max positions") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set max positions $mpText") }) { Text("Apply") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            guardText, { guardText = it.filter { ch -> ch.isDigit() }.take(5) },
+                            label = { Text("Guard sec (0 off)") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set guard $guardText") }) { Text("Apply") }
+                    }
+                    Text(
+                        "Also via chat: set trail distance 15 · set stop frac 50 · set daily loss 5 — or ask: settings trade",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
+                Column(Modifier.padding(14.dp)) {
                     Text("One-tap actions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -348,6 +406,10 @@ fun ControlScreen(
         }
     }
 }
+
+/** Number display without a trailing ".0" (7.0 → "7"). */
+private fun num(v: Double): String =
+    if (v == v.toLong().toDouble()) v.toLong().toString() else v.toString()
 
 @Composable
 private fun ActionButton(

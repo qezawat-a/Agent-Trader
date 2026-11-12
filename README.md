@@ -107,6 +107,10 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `set universe <BTCUSDT,ETHUSDT,…>` · `set timeframes <15m,1h,…>` (1m–1w, max 5) ·
 `set scan top <3-50>` · `set min agree <1-21>` · `set min tf <1-100>` · `set min conf <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
 
+**Risk manager & exits**
+
+`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set stop frac <10-90>` · `set max positions <1-20>` · `set daily loss <pct>` (0 = off) · `set guard <sec>` (0 = off)
+
 ## How the brain works
 
 ```
@@ -195,8 +199,34 @@ Verified against the live API and the official docs (2026-11):
   reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
-- TP/SL plan: stop at 50% of the way to liquidation, partial TP ladder 1R–4R at 25% each,
-  breakeven at 10% ROI, trailing stop at 15% ROI.
+- TP/SL plan: partial TP ladder 1R–4R at 25% each, plus a configurable risk manager (defaults
+  keep the old behavior): initial stop 50% of the way to liquidation, breakeven at 10% ROI
+  (SL moves to entry), trailing stop from 15% ROI keeping 15% ROI behind the best price.
+
+### Risk manager (v1.1.7)
+
+Every value is user-changeable — in chat, on the Control screen ("Risk manager & exits"),
+or by asking the agent:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `set breakeven <pct>` | 10% | Once ROI reaches it, the stop moves to entry (0 = off) |
+| `set trail trigger <pct>` | 15% | Trailing starts once ROI reaches it (0 = off) |
+| `set trail distance <pct>` | 15% | Trailing keeps this much ROI behind the best price |
+| `set stop frac <10-90>` | 50% | Initial stop sits this % of the way toward liquidation |
+| `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
+| `set daily loss <pct>` | 5% | Blocks new entries for the rest of the UTC day beyond it (0 = off) |
+| `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
+
+The risk manager gates **every** entry path: the scanner, manual entry and one-tap live
+orders. When a stop moves, it **only ever tightens** (paper and live), and both paper
+and live moves announce themselves in chat and in the status-bar notifications
+(`Breakeven BTCUSDT: SL moved to entry …`, `SL moved to 100.3060 — Trailing BTCUSDT (ROI 8.1%)`).
+Live positions are managed mid-trade every tick (`mid management`): the engine reads each
+position's mark price, applies breakeven/trailing, and updates the exchange stop with
+`modify_position_tpsl`. `riskBlock()` checks guard interval → max open positions → daily
+loss cap before any entry; `tpsl_history` and `settings trade` always show the current
+configured values.
 - Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to
   200x for BTCUSDT/ETHUSDT, 20–125x for most other contracts); quantities floored to the
   symbol's base precision and skipped when below the minimum volume.

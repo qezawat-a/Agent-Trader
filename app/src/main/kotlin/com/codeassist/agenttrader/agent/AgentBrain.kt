@@ -26,6 +26,9 @@ object AgentBrain {
         "scan on", "scan off", "report interval", "set leverage", "set risk",
         // scanner & signal configuration — nothing is hard-capped
         "set universe", "set timeframes", "set scan top", "set min agree", "set min tf", "set min conf",
+        // risk manager & exits — nothing is hard-capped
+        "set breakeven", "set trail trigger", "set trail distance", "set stop frac",
+        "set max positions", "set daily loss", "set guard",
         // money-moving — only with an explicit request from the user
         "close position", "diagnose", "repair",
     )
