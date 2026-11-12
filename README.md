@@ -33,7 +33,7 @@ and a keyless public WebSocket market feed (tickers + price) that keeps engine p
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
 | **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 21 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
-| **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default; every setting persists across restarts. |
+| **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
 
 Bottom navigation, a back arrow in the top bar, and the Android back button all work — the
 start menu is never more than one tap away.

@@ -944,8 +944,11 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("signals") -> signalsText()
-            t.startsWith("set universe") -> {
-                val parsed = parseSymbolsCsv(t.removePrefix("set universe"))
+            t.startsWith("set universe") || t.startsWith("set symbol") -> {
+                // "set universe", "set symbols" and "set symbol" all mean the same.
+                val parsed = parseSymbolsCsv(
+                    t.removePrefix("set universe").removePrefix("set symbols").removePrefix("set symbol"),
+                )
                 if (parsed == null) "Usage: set universe BTCUSDT,ETHUSDT,SOLUSDT"
                 else {
                     universe.clear(); universe.addAll(parsed)

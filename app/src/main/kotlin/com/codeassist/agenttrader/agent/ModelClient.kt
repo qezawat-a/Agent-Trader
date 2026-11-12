@@ -47,11 +47,33 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
             Regex("deepseek"), Regex("qwen"), Regex("glm-[45]"), Regex("llama"),
         )
 
+        /** Ids that are not chat models — never auto-picked. */
+        private val NOT_CHAT = Regex("embed|whisper|tts|dall-e|dalle|image|audio|moderation", RegexOption.IGNORE_CASE)
+
+        /**
+         * Picks a usable default model. Nothing is hard-capped — any id the provider
+         * lists is allowed. Preference: 1) a free-tier id (":free" suffix, e.g.
+         * OpenRouter — works with a zero-credit key), 2) known cheap/fast chat models,
+         * 3) the first non-embedding entry.
+         */
         fun pickModel(models: List<String>): String {
+            models.firstOrNull { it.endsWith(":free") }?.let { return it }
+            val chat = models.filter { !NOT_CHAT.containsMatchIn(it) }
+            val pool = chat.ifEmpty { models }
             for (pattern in PREFERRED) {
-                models.firstOrNull { pattern.containsMatchIn(it) }?.let { return it }
+                pool.firstOrNull { pattern.containsMatchIn(it) }?.let { return it }
             }
-            return models.firstOrNull() ?: ""
+            return pool.firstOrNull() ?: models.firstOrNull() ?: ""
+        }
+
+        /** A short human hint appended to provider errors the user can act on. */
+        internal fun friendlyHttpHint(code: Int, detail: String): String = when {
+            code == 402 || detail.contains("usage_limit") || detail.contains("credits") ->
+                " → your key has no credits. Pick a FREE model: Settings → Auto pick, " +
+                    "or type any id ending in ':free' (e.g. deepseek/deepseek-chat:free)."
+            code == 404 && detail.contains("model") ->
+                " → model id not found. Settings → 'List models' shows the ids your key can use."
+            else -> ""
         }
     }
 
@@ -141,7 +163,7 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
             val detail = "${text.take(300)}"
             if (detail.contains("max_completion_tokens")) throw RenamedMaxTokens(detail)
             if (code == 429 || code >= 500) throw RetryableHttp("HTTP $code: $detail")
-            throw IllegalStateException("HTTP $code: $detail")
+            throw IllegalStateException("HTTP $code: $detail${friendlyHttpHint(code, detail)}")
         }
         return text
     }
