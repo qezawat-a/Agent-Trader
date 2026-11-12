@@ -100,8 +100,11 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `engine on|off` · `start trading` · `stop trading` · `scan on|off|once` · `status` ·
 `balance` · `positions` · `positions history` · `orders` · `history orders` ·
 `cancel orders` · `close position <SYMBOL>` · `close all` · `pnl` · `trades_history` ·
-`funding` · `tiers` · `signals` · `tpsl` · `mid management` · `report on|off|interval <min>` ·
-`set leverage <1-200>` · `set risk <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
+`funding` · `tiers` · `signals` · `settings trade` · `tpsl` · `mid management` ·
+`report on|off|interval <min>` ·
+`set leverage <1-200>` · `set risk <1-100>` ·
+`set universe <BTCUSDT,ETHUSDT,…>` · `set timeframes <15m,1h,…>` (1m–1w, max 5) ·
+`set scan top <3-50>` · `set min agree <1-21>` · `set min tf <1-100>` · `set min conf <1-100>` · `manual entry <SYMBOL> <long|short> <pct>`
 
 ## How the brain works
 
@@ -159,9 +162,16 @@ Verified against the live API and the official docs (2026-11):
 ## Trading logic
 
 - 21 strategies: trend, reversion, breakout, reversal and risk filters.
-- A **signal** is the 15m + 1h verdict: each timeframe needs at least **3 strategies
+- Nothing is hard-capped: the scanner universe, the timeframes (any of
+  1m/3m/5m/15m/30m/1h/2h/4h/6h/12h/1d/3d/1w, max 5), the scan depth and all three
+  signal gates are yours to change — in chat (`set …`), on the Control screen, or by
+  asking the agent (it can read the config with `settings trade` and edit it for you).
+  Everything persists across restarts.
+- A **signal** is the verdict of 21 strategies over your configured timeframes
+  (default 15m + 1h): each timeframe needs at least **3 strategies
   agreeing at ≥60%**, both timeframes must point the same way, and their combined
-  confidence must be **≥70%**. Anything less is reported as *no trade*, with the failing
+  confidence must be **≥70%** (all three gates are configurable). Anything less is
+  reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
 - TP/SL plan: stop at 50% of the way to liquidation, partial TP ladder 1R–4R at 25% each,

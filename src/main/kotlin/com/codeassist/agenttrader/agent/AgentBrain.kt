@@ -20,10 +20,12 @@ object AgentBrain {
     val TOOLS = listOf(
         // read-only
         "status", "balance", "positions", "orders", "pnl", "funding", "tiers", "signals",
-        "scan once", "trades_history", "tpsl", "history orders",
+        "settings trade", "scan once", "trades_history", "tpsl", "history orders",
         // engine control
         "engine on", "engine off", "start trading", "stop trading",
         "scan on", "scan off", "report interval", "set leverage", "set risk",
+        // scanner & signal configuration — nothing is hard-capped
+        "set universe", "set timeframes", "set scan top", "set min agree", "set min tf", "set min conf",
         // money-moving — only with an explicit request from the user
         "close position", "diagnose", "repair",
     )
@@ -107,9 +109,16 @@ object AgentBrain {
         appendLine("  Never claim you changed something you did not change; say what was actually done.")
         appendLine("- Money rule: never open or close a position unless the user explicitly asked for that")
         appendLine("  in this conversation. For everything else (settings, engine switches, scans) just do it.")
-        appendLine("- SIGNALS: a signal is the 15m and 1h verdict of 21 strategies. Each timeframe must")
-        appendLine("  have >=3 strategies agreeing at >=60% confidence, both timeframes must point the same")
-        appendLine("  way, and the combined confidence must be >=70%; otherwise there is no trade. When the")
+        appendLine("- SETTINGS: nothing about the engine is hard-capped. When the user asks what the")
+        appendLine("  settings are, call <tool>settings trade</tool> and summarize the dump. On request you")
+        appendLine("  can change: universe <tool>set universe BTCUSDT,ETHUSDT</tool>, timeframes")
+        appendLine("  <tool>set timeframes 15m,1h</tool> (1m..1w, max 5), scan depth <tool>set scan top 10</tool>,")
+        appendLine("  signal gates <tool>set min agree 3</tool> / <tool>set min tf 60</tool> / <tool>set min conf 70</tool>,")
+        appendLine("  plus leverage, risk and report interval. Report what actually changed.")
+        appendLine("- SIGNALS: a signal is the verdict of 21 strategies over the configured timeframes (default 15m and 1h). Each timeframe must")
+        appendLine("  have at least the configured number of strategies agreeing at the configured confidence")
+        appendLine("  (defaults: 3 strategies, 60%), all timeframes must point the same way, and the combined")
+        appendLine("  confidence must pass the combined gate (default 70%); otherwise there is no trade. When the")
         appendLine("  user asks about signals, confidence or why nothing trades, call <tool>signals</tool> and")
         appendLine("  quote the actual rows and the gate that blocked the symbol.")
         appendLine("- When something breaks, diagnose it, then repair it if the repair is safe, and report both.")
@@ -142,7 +151,7 @@ object AgentBrain {
     /** Extracts tool calls the model emitted, in order, without duplicates. */
     fun extractToolCalls(reply: String): List<String> {
         val out = mutableListOf<String>()
-        val regex = Regex("<tool>\\s*([a-zA-Z0-9_ ]+?)\\s*</tool>")
+        val regex = Regex("<tool>\\s*([a-zA-Z0-9_, ]+?)\\s*</tool>")
         for (m in regex.findAll(reply)) {
             val cmd = m.groupValues[1].trim().lowercase()
             val allowed = TOOLS.any { cmd == it || cmd.startsWith("$it ") }

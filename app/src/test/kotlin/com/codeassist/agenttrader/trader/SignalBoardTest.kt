@@ -1,9 +1,11 @@
 package com.codeassist.agenttrader.trader
 
+import com.codeassist.agenttrader.bitunix.BitunixRest
 import com.codeassist.agenttrader.bitunix.Candle
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SignalBoardTest {
@@ -141,5 +143,85 @@ class SignalBoardTest {
         assertTrue(votes.any { it.name == "EMA 9/21 cross" })
         assertTrue(votes.all { it.group.isNotBlank() })
         assertTrue(votes.all { abs(it.confidence) in 0..100 })
+    }
+
+    // ---- configurable gates (nothing hard-capped) ----
+
+    @Test
+    fun gates_are_fully_configurable() {
+        val gates = SignalAggregator.Gates(
+            timeframes = listOf("5m", "1h"),
+            minAgreeing = 2,
+            minTfConfidence = 55.0,
+            minConfidence = 65.0,
+        )
+        val row = SignalAggregator.evaluate(
+            "BTCUSDT", 104_000.0,
+            mapOf("5m" to tf("5m", 1, 58.0), "1h" to tf("1h", 1, 78.0)),
+            gates,
+        )
+        assertEquals(1, row.dir)
+        assertEquals("LONG 68%", row.status)
+        assertTrue(row.reasons.first().contains("need 2 at >=55%"), row.reasons.first())
+    }
+
+    @Test
+    fun combine_honors_custom_timeframes() {
+        val sig = SignalAggregator.combine(
+            mapOf("4h" to TfSignal(1, 80.0, 5), "1d" to TfSignal(1, 82.0, 6)),
+            SignalAggregator.Gates(timeframes = listOf("4h", "1d"), minTfConfidence = 60.0, minConfidence = 70.0),
+        )
+        requireNotNull(sig)
+        assertEquals(listOf("4h", "1d"), sig.timeframes)
+    }
+
+    @Test
+    fun symbol_csv_parsing() {
+        assertEquals(listOf("BTCUSDT", "ETHUSDT", "SOLUSDT"), parseSymbolsCsv(" btcusdt, ETHUSDT ,SOLUSDT"))
+        assertNull(parseSymbolsCsv("   "))
+        assertNull(parseSymbolsCsv(",,"))
+    }
+
+    @Test
+    fun timeframe_csv_parsing() {
+        assertEquals(listOf("15m", "1h"), parseTimeframesCsv("15m,1h"))
+        assertEquals(listOf("1m", "3m", "5m"), parseTimeframesCsv(" 1m 3m 5m"))
+        assertNull(parseTimeframesCsv("15m,2x"))
+        assertNull(parseTimeframesCsv("15m,1h,4h,1d,1w,1m")) // max 5
+        assertEquals(KLINE_INTERVALS.size, 13)
+    }
+
+    @Test
+    fun board_header_reports_the_configured_gates() {
+        val text = formatSignalBoard(
+            emptyList(),
+            SignalAggregator.Gates(timeframes = listOf("5m", "1h"), minAgreeing = 4, minTfConfidence = 55.0, minConfidence = 65.0),
+        )
+        assertTrue(text.contains("5m+1h must agree"), text)
+        assertTrue(text.contains("4 strategies"), text)
+        assertTrue(text.contains(">=55%"), text)
+        assertTrue(text.contains(">=65%"), text)
+    }
+
+    @Test
+    fun settings_trade_dumps_everything_the_user_can_change() {
+        val engine = TraderEngine(BitunixRest("k", "s")).apply {
+            universe.clear(); universe.addAll(listOf("ADAUSDT", "XRPUSDT"))
+            timeframes = listOf("5m", "1h", "4h")
+            minAgreeing = 4
+            minTfConfidence = 55.0
+            minConfidence = 65.0
+            scanTop = 25
+            riskFraction = 0.12
+        }
+        val text = engine.settingsTradeText()
+        assertTrue(text.contains("ADAUSDT, XRPUSDT"), text)
+        assertTrue(text.contains("5m, 1h, 4h"), text)
+        assertTrue(text.contains(">=4 strategies"), text)
+        assertTrue(text.contains(">=55% per timeframe"), text)
+        assertTrue(text.contains(">=65% combined"), text)
+        assertTrue(text.contains("top 25"), text)
+        assertTrue(text.contains("margin per trade 12%"), text)
+        assertTrue(text.contains("set timeframes"), text)
     }
 }

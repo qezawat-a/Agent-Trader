@@ -79,15 +79,15 @@ object SignalAggregator {
      * Applies the same rules as [combine] but returns a [SignalRow] that explains
      * the outcome step by step, so "no trade" is never a silent mystery.
      */
-    fun evaluate(symbol: String, price: Double, perTf: Map<String, TfEvaluation>): SignalRow {
-        val rows = TIMEFRAMES.mapNotNull { perTf[it] }
+    fun evaluate(symbol: String, price: Double, perTf: Map<String, TfEvaluation>, gates: Gates = Gates()): SignalRow {
+        val rows = gates.timeframes.mapNotNull { perTf[it] }
         val detail = mutableListOf<String>()
         var verdict: String? = null
         var dir = 0
         var confidence = 0.0
 
-        if (rows.size < TIMEFRAMES.size) {
-            verdict = "missing kline data for " + TIMEFRAMES.filter { perTf[it] == null }.joinToString(", ")
+        if (rows.size < gates.timeframes.size) {
+            verdict = "missing kline data for " + gates.timeframes.filter { perTf[it] == null }.joinToString(", ")
         } else {
             rows.forEach { e ->
                 val sideVar = when (e.dir) {
@@ -96,20 +96,20 @@ object SignalAggregator {
                     else -> "no side"
                 }
                 detail += "${e.timeframe}: $sideVar, ${e.agreeing} strategies at ${"%.0f".format(e.confidence)}%" +
-                    " (need $MIN_AGREEING at >=${TIMEFRAME_CONFIDENCE.toInt()}%)"
+                    " (need ${gates.minAgreeing} at >=${gates.minTfConfidence.toInt()}%)"
             }
             val withSide = rows.filter { it.dir != 0 }
             verdict = when {
                 withSide.isEmpty() -> "no timeframe produced a side"
                 withSide.map { it.dir }.distinct().size > 1 -> "timeframes disagree"
                 else -> {
-                    val weak = withSide.filter { it.confidence < TIMEFRAME_CONFIDENCE }
+                    val weak = withSide.filter { it.confidence < gates.minTfConfidence }
                     if (weak.isNotEmpty()) {
-                        "${weak.joinToString { it.timeframe }} below the ${TIMEFRAME_CONFIDENCE.toInt()}% timeframe gate"
+                        "${weak.joinToString { it.timeframe }} below the ${gates.minTfConfidence.toInt()}% timeframe gate"
                     } else {
                         val avg = rows.map { it.confidence }.average()
-                        if (avg < MIN_CONFIDENCE) {
-                            "combined confidence ${"%.0f".format(avg)}% is below ${MIN_CONFIDENCE.toInt()}%"
+                        if (avg < gates.minConfidence) {
+                            "combined confidence ${"%.0f".format(avg)}% is below ${gates.minConfidence.toInt()}%"
                         } else {
                             dir = rows.first().dir
                             confidence = avg
@@ -124,15 +124,26 @@ object SignalAggregator {
         return SignalRow(symbol, price, rows, dir, confidence, statusText(dir, confidence), reasons)
     }
 
-    /** Combines the timeframes. Every timeframe must pass the timeframe gate and point the same way. */
-    fun combine(perTf: Map<String, TfSignal>): Signal? {
-        if (perTf.size < TIMEFRAMES.size) return null
-        val sigs = TIMEFRAMES.map { perTf[it] ?: return null }
-        if (sigs.any { it.dir == 0 || it.confidence < TIMEFRAME_CONFIDENCE }) return null
+    /**
+     * The signal gates as the user configured them. The constants are defaults;
+     * nothing is hard-capped — timeframes, vote counts and confidences all move.
+     */
+    data class Gates(
+        val timeframes: List<String> = TIMEFRAMES,
+        val minAgreeing: Int = MIN_AGREEING,
+        val minTfConfidence: Double = TIMEFRAME_CONFIDENCE,
+        val minConfidence: Double = MIN_CONFIDENCE,
+    )
+
+    /** Combines the configured timeframes; every one must pass its gate and agree in direction. */
+    fun combine(perTf: Map<String, TfSignal>, gates: Gates = Gates()): Signal? {
+        if (perTf.size < gates.timeframes.size) return null
+        val sigs = gates.timeframes.map { perTf[it] ?: return null }
+        if (sigs.any { it.dir == 0 || it.confidence < gates.minTfConfidence }) return null
         if (sigs.map { it.dir }.distinct().size != 1) return null
         val conf = sigs.map { it.confidence }.average()
-        if (conf < MIN_CONFIDENCE) return null
-        return Signal(sigs[0].dir, conf, TIMEFRAMES)
+        if (conf < gates.minConfidence) return null
+        return Signal(sigs[0].dir, conf, gates.timeframes)
     }
 }
 
@@ -183,12 +194,15 @@ object TpSlPlanner {
  * Human-readable signal board. [rows] is what the engine evaluated; the header
  * spells out the gates so "confidence" and "other settings" are never hidden.
  */
-internal fun formatSignalBoard(rows: List<SignalRow>): String = buildString {
+internal fun formatSignalBoard(
+    rows: List<SignalRow>,
+    gates: SignalAggregator.Gates = SignalAggregator.Gates(),
+): String = buildString {
     appendLine(
-        "Signal board — 15m+1h must agree; each timeframe needs " +
-            "${SignalAggregator.MIN_AGREEING} strategies at >=" +
-            "${SignalAggregator.TIMEFRAME_CONFIDENCE.toInt()}%; combined >=" +
-            "${SignalAggregator.MIN_CONFIDENCE.toInt()}%",
+        "Signal board — ${gates.timeframes.joinToString("+")} must agree; each timeframe needs " +
+            "${gates.minAgreeing} strategies at >=" +
+            "${gates.minTfConfidence.toInt()}%; combined >=" +
+            "${gates.minConfidence.toInt()}%",
     )
     if (rows.isEmpty()) {
         appendLine("  no symbols evaluated")
@@ -208,3 +222,25 @@ internal fun formatSignalBoard(rows: List<SignalRow>): String = buildString {
         appendLine("Best: ${best.symbol} ${best.status} — say \"open ${best.symbol.removeSuffix("USDT")} ${if (best.dir > 0) "long" else "short"}\" or tap it in Trade.")
     }
 }.trim()
+
+/** Kline intervals the Bitunix kline endpoint accepts (verified live, 2026-11). */
+val KLINE_INTERVALS = listOf("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "3d", "1w")
+
+/** Parses "BTCUSDT, ethusdt ;SOLUSDT" into clean uppercase symbols; null when none are valid. */
+internal fun parseSymbolsCsv(raw: String): List<String>? {
+    val out = raw.split(",", " ", ";")
+        .map { it.trim().uppercase() }
+        .filter { it.length in 4..16 && it.all { ch -> ch.isLetterOrDigit() } }
+        .distinct()
+    return out.ifEmpty { null }
+}
+
+/** Parses "15m,1h" into valid kline intervals (max 5); null when anything is invalid. */
+internal fun parseTimeframesCsv(raw: String): List<String>? {
+    val out = raw.split(",", " ", ";")
+        .map { it.trim().lowercase() }
+        .filter { it.isNotBlank() }
+        .distinct()
+    if (out.isEmpty() || out.size > 5) return null
+    return out.takeIf { out.all { tf -> tf in KLINE_INTERVALS } }
+}

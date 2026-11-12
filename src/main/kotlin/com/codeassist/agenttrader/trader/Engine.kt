@@ -132,6 +132,15 @@ class TraderEngine(private val rest: BitunixRest) {
     var positionMode = "ONE_WAY"
     val universe = mutableListOf("BTCUSDT", "ETHUSDT", "SOLUSDT")
 
+    // Scanner & signal gates — all user-changeable (set universe / set timeframes / set min ...).
+    var scanTop = 10
+    var timeframes: List<String> = SignalAggregator.TIMEFRAMES
+    var minAgreeing: Int = SignalAggregator.MIN_AGREEING
+    var minTfConfidence: Double = SignalAggregator.TIMEFRAME_CONFIDENCE
+    var minConfidence: Double = SignalAggregator.MIN_CONFIDENCE
+
+    private fun gates() = SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence)
+
     /** Periodic report settings. */
     var reportOn = false
     var reportIntervalMin = 15L
@@ -302,18 +311,18 @@ class TraderEngine(private val rest: BitunixRest) {
      * Cached for [maxAgeMs] because each row costs two kline requests.
      */
     @Synchronized
-    fun signalBoard(top: Int = 8, maxAgeMs: Long = 60_000): List<SignalRow> {
+    fun signalBoard(maxAgeMs: Long = 60_000): List<SignalRow> {
         val now = System.currentTimeMillis()
         if (signalCache.isNotEmpty() && now - signalCacheAt <= maxAgeMs) return signalCache
         val symbols = runCatching {
-            if (scanOn) rankUniverse(top) else universe.toList()
-        }.getOrElse { universe.toList() }.take(top)
+            if (scanOn) rankUniverse(scanTop) else universe.toList()
+        }.getOrElse { universe.toList() }
         val rows = symbols.mapNotNull { sym ->
             runCatching {
-                val byTf = SignalAggregator.TIMEFRAMES.associateWith { candles(sym, it) }
+                val byTf = timeframes.associateWith { candles(sym, it) }
                 val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs) }
-                val price = byTf[SignalAggregator.TIMEFRAMES.first()]?.lastOrNull()?.close ?: 0.0
-                SignalAggregator.evaluate(sym, price, perTf)
+                val price = byTf[timeframes.first()]?.lastOrNull()?.close ?: 0.0
+                SignalAggregator.evaluate(sym, price, perTf, gates())
             }.getOrNull()
         }
         if (rows.isNotEmpty()) {
@@ -324,26 +333,48 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /** Full signal explanation for chat and the periodic report. */
-    fun signalsText(top: Int = 8): String = try {
-        val rows = signalBoard(top = top)
+    fun signalsText(): String = try {
+        val rows = signalBoard()
         if (rows.isEmpty()) "No signals: could not load klines for any symbol."
-        else formatSignalBoard(rows)
+        else formatSignalBoard(rows, gates())
     } catch (e: Exception) {
         "Signals unavailable: ${e.message ?: e.javaClass.simpleName}"
     }
 
     /** One-line summary for the chat context. */
-    fun signalsBrief(top: Int = 4): String = runCatching {
-        signalBoard(top = top).joinToString("; ") { "${it.symbol} ${it.status}" }
+    fun signalsBrief(): String = runCatching {
+        signalBoard().take(4).joinToString("; ") { "${it.symbol} ${it.status}" }
     }.getOrElse { "" }
+
+    /** Compact settings line for the chat context. */
+    fun configLine(): String =
+        "${if (live) "LIVE" else "PAPER"} · lev ${leverage}x · risk ${(riskFraction * 100).toInt()}% · " +
+            "${timeframes.joinToString("+")} · universe ${universe.size} · " +
+            "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%"
+
+    /** Full settings dump the user and the agent can both read. */
+    fun settingsTradeText(): String = buildString {
+        appendLine(
+            "Trader settings — ${if (live) "LIVE (real orders)" else "PAPER (simulated)"} · " +
+                "engine ${if (engineOn) "on" else "off"} · trading ${if (trading) "on" else "off"} · " +
+                "loop ${if (isLoopRunning) "running" else "stopped"}",
+        )
+        appendLine("  universe (${universe.size}, scanner ${if (scanOn) "on" else "off"}, top $scanTop): ${universe.joinToString(", ")}")
+        appendLine("  timeframes: ${timeframes.joinToString(", ")}")
+        appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined")
+        appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
+        appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
+        append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
+            "set min agree <n> · set min tf <pct> · set min conf <pct> · set leverage <n> · set risk <pct>")
+    }.trim()
 
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
     fun scanOnce(): List<String> {
         val out = mutableListOf<String>()
-        val symbols = if (scanOn) rankUniverse() else universe.toList()
+        val symbols = if (scanOn) rankUniverse(scanTop) else universe.toList()
         for (sym in symbols) {
-            val perTf = SignalAggregator.TIMEFRAMES.associateWith { SignalAggregator.timeframe(candles(sym, it)) }
-            val sig = SignalAggregator.combine(perTf) ?: continue
+            val perTf = timeframes.associateWith { SignalAggregator.timeframe(candles(sym, it)) }
+            val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = candles(sym, SignalAggregator.TIMEFRAMES.first()).last().close
             if (live) {
                 out.add(openLive(sym, sig.dir, price, sig.confidence) ?: continue)
@@ -670,7 +701,7 @@ class TraderEngine(private val rest: BitunixRest) {
             try {
                 if (!reportOn || !engineOn) return@scheduleWithFixedDelay
                 val signals = runCatching {
-                    formatSignalBoard(signalBoard(top = 3, maxAgeMs = 0))
+                    formatSignalBoard(signalBoard(maxAgeMs = 0).take(3), gates())
                 }.getOrElse { "signals unavailable" }
                 onEvent?.invoke(
                     "Periodic report: balance ${fmt(broker.balance)} USDT, positions ${broker.positions.size}, " +
@@ -851,6 +882,62 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("signals") -> signalsText()
+            t.startsWith("set universe") -> {
+                val parsed = parseSymbolsCsv(t.removePrefix("set universe"))
+                if (parsed == null) "Usage: set universe BTCUSDT,ETHUSDT,SOLUSDT"
+                else {
+                    universe.clear(); universe.addAll(parsed)
+                    signalCacheAt = 0
+                    "Universe set (${parsed.size}): ${parsed.joinToString(", ")}"
+                }
+            }
+            t.startsWith("set timeframes") -> {
+                val parsed = parseTimeframesCsv(t.removePrefix("set timeframes"))
+                if (parsed == null) {
+                    "Usage: set timeframes 15m,1h — valid: ${KLINE_INTERVALS.joinToString(",")} (max 5)"
+                } else {
+                    timeframes = parsed
+                    signalCacheAt = 0
+                    "Timeframes set: ${parsed.joinToString(", ")}"
+                }
+            }
+            t.startsWith("set scan top") -> {
+                val v = t.removePrefix("set scan top").trim().toIntOrNull()
+                if (v == null || v !in 3..50) "Usage: set scan top <3-50>"
+                else {
+                    scanTop = v
+                    signalCacheAt = 0
+                    "Scanner picks the top $v symbols by volume."
+                }
+            }
+            t.startsWith("set min agree") -> {
+                val v = t.removePrefix("set min agree").trim().toIntOrNull()
+                if (v == null || v !in 1..21) "Usage: set min agree <1-21> (strategies required per timeframe)"
+                else {
+                    minAgreeing = v
+                    signalCacheAt = 0
+                    "Gate set: $v strategies must agree per timeframe."
+                }
+            }
+            t.startsWith("set min tf") -> {
+                val v = t.removePrefix("set min tf").trim().toDoubleOrNull()
+                if (v == null || v !in 1.0..100.0) "Usage: set min tf <1-100> (per-timeframe confidence gate)"
+                else {
+                    minTfConfidence = v
+                    signalCacheAt = 0
+                    "Gate set: each timeframe needs ${v.toInt()}% confidence."
+                }
+            }
+            t.startsWith("set min conf") -> {
+                val v = t.removePrefix("set min conf").trim().toDoubleOrNull()
+                if (v == null || v !in 1.0..100.0) "Usage: set min conf <1-100> (combined confidence gate)"
+                else {
+                    minConfidence = v
+                    signalCacheAt = 0
+                    "Gate set: combined confidence must be ${v.toInt()}%."
+                }
+            }
+            t.startsWith("settings trade") -> settingsTradeText()
             t.startsWith("scan once") -> {
                 val out = scanOnce()
                 if (out.isEmpty()) "Scan done: no qualifying signals."

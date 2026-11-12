@@ -75,6 +75,32 @@ class AgentConfig(context: Context) {
         get() = prefs.getLong("report_interval_min", 15L)
         set(value) = prefs.edit().putLong("report_interval_min", value).apply()
 
+    /** Scanner universe as comma-separated symbols, e.g. "BTCUSDT,ETHUSDT". */
+    var universe: String
+        get() = prefs.getString("universe", "") ?: ""
+        set(value) = prefs.edit().putString("universe", value).apply()
+
+    /** Signal timeframes as comma-separated kline intervals, e.g. "15m,1h". */
+    var timeframes: String
+        get() = prefs.getString("timeframes", "") ?: ""
+        set(value) = prefs.edit().putString("timeframes", value).apply()
+
+    var scanTop: Int
+        get() = prefs.getInt("scan_top", 10)
+        set(value) = prefs.edit().putInt("scan_top", value).apply()
+
+    var minAgreeing: Int
+        get() = prefs.getInt("min_agreeing", 3)
+        set(value) = prefs.edit().putInt("min_agreeing", value).apply()
+
+    var minTfConfidence: Int
+        get() = prefs.getInt("min_tf_conf", 60)
+        set(value) = prefs.edit().putInt("min_tf_conf", value).apply()
+
+    var minConfidence: Int
+        get() = prefs.getInt("min_conf", 70)
+        set(value) = prefs.edit().putInt("min_conf", value).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }

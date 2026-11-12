@@ -270,6 +270,54 @@ fun ControlScreen(
         item {
             Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
                 Column(Modifier.padding(14.dp)) {
+                    Text("Scanner & signals", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    Text(
+                        "Gates: ≥${engine.minAgreeing} strategies · ≥${engine.minTfConfidence.toInt()}% per timeframe · " +
+                            "≥${engine.minConfidence.toInt()}% combined (${engine.timeframes.joinToString("+")})",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    var uniText by remember { mutableStateOf(engine.universe.joinToString(",")) }
+                    OutlinedTextField(
+                        uniText, { uniText = it.uppercase() },
+                        label = { Text("Universe (comma-separated)") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { onAction("set universe $uniText") }) { Text("Apply universe") }
+                        OutlinedButton(onClick = { uniText = engine.universe.joinToString(",") }) { Text("Reset") }
+                    }
+                    var tfText by remember { mutableStateOf(engine.timeframes.joinToString(",")) }
+                    OutlinedTextField(
+                        tfText, { tfText = it.lowercase() },
+                        label = { Text("Timeframes (1m..1w, max 5)") },
+                        singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { onAction("set timeframes $tfText") }) { Text("Apply timeframes") }
+                        OutlinedButton(onClick = { tfText = engine.timeframes.joinToString(",") }) { Text("Reset") }
+                    }
+                    var topText by remember { mutableStateOf(engine.scanTop.toString()) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            topText, { topText = it.filter { ch -> ch.isDigit() }.take(2) },
+                            label = { Text("Scan top") }, singleLine = true,
+                            modifier = Modifier.width(110.dp),
+                        )
+                        OutlinedButton(onClick = { onAction("set scan top $topText") }) { Text("Apply") }
+                    }
+                    Text(
+                        "More via chat: set min agree 4 · set min tf 60 · set min conf 70 — or ask the agent for settings trade",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+
+        item {
+            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
+                Column(Modifier.padding(14.dp)) {
                     Text("One-tap actions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
