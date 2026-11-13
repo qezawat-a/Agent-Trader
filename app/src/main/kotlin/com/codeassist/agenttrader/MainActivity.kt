@@ -38,8 +38,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.filled.Build as ComposeBuild
-
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
@@ -761,7 +759,7 @@ fun AgentApp(
                     }
                 } else {
                     IconButton(onClick = { screen = AppScreen.CONTROL }) {
-                        Icon(ComposeBuild, "Control panel", tint = scheme.onSurface)
+                        Icon(Icons.Default.Build, "Control panel", tint = scheme.onSurface)
                     }
                 }
                 Text(
@@ -940,7 +938,7 @@ fun AgentApp(
                 NavigationBarItem(
                     selected = screen == AppScreen.CONTROL,
                     onClick = { screen = AppScreen.CONTROL },
-                    icon = { Icon(ComposeBuild, null) },
+                    icon = { Icon(Icons.Default.Build, null) },
                     label = { Text("Control") },
                 )
                 NavigationBarItem(
