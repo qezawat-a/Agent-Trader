@@ -1,11 +1,12 @@
 package com.codeassist.agenttrader.ui
 
+import android.content.res.Configuration
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.isSystemInDarkTheme
+import androidx.compose.ui.platform.LocalConfiguration
 
 /** Trading-floor color scheme shared by light and dark themes. */
 private val DarkColorScheme = darkColorScheme(
@@ -50,10 +51,9 @@ private val LightColorScheme = lightColorScheme(
 
 /** Compose theme for Agent Trader. Follows the system dark/light setting by default. */
 @Composable
-fun TraderTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit,
-) {
+fun TraderTheme(content: @Composable () -> Unit) {
+    val darkTheme = (LocalConfiguration.current.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+        Configuration.UI_MODE_NIGHT_YES
     MaterialTheme(
         colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
         content = content,

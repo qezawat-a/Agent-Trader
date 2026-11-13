@@ -696,8 +696,8 @@ class TraderEngine(private val rest: BitunixRest) {
         val lev = effectiveLeverage(symbol)
         val available = rest.availableUsdt()
         val margin = available * marginFraction.coerceIn(0.0001, 1.0)
-        // TP/SL triggers are MARK_PRICE, so plan the levels from the mark price
-        // when the exchange publishes one; fall back to the signal price.
+        // TP/SL triggers are LAST_PRICE per project rule, so plan the levels from
+        // the signal price; fall back to the mark price when the exchange publishes one.
         val mark = runCatching {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()

@@ -336,8 +336,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      *  - marginCoin is REQUIRED by the exchange even though docs list it as optional.
      *  - side names the POSITION: BUY opens long, SELL opens short.
      *  - tradeSide ("OPEN"/"CLOSE") is only sent in hedge mode; pass null in one-way mode.
-     *  - tpPrice/slPrice attach a position-level TP/SL on fill; stop types may be
-     *    MARK_PRICE or LAST_PRICE (default MARK_PRICE).
+     *  - tpPrice/slPrice attach a position-level TP/SL on fill; all TPSL orders use
+     *    LAST_PRICE stop type and MARKET order type per project rule.
      */
     fun placeMarketOrder(
         symbol: String, qty: String, side: String, tradeSide: String?,
@@ -350,8 +350,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         if (tradeSide != null) body.put("tradeSide", tradeSide)
         if (reduceOnly) body.put("reduceOnly", true)
         if (clientId.isNotBlank()) body.put("clientId", clientId)
-        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", "MARK_PRICE")
-        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", "MARK_PRICE")
+        if (tpPrice != null) {
+            body.put("tpPrice", tpPrice).put("tpStopType", "LAST_PRICE").put("tpOrderType", "MARKET")
+        }
+        if (slPrice != null) {
+            body.put("slPrice", slPrice).put("slStopType", "LAST_PRICE").put("slOrderType", "MARKET")
+        }
         val resp = signedPost("/api/v1/futures/trade/place_order", body)
         return dataObject(resp)
     }
@@ -454,14 +458,14 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     /** Position-level TP/SL: closes the whole position at market when triggered. */
     fun placePositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
-        tpStopType: String = "MARK_PRICE", slStopType: String = "MARK_PRICE",
+        tpStopType: String = "LAST_PRICE", slStopType: String = "LAST_PRICE",
     ): JSONObject = positionTpSlBody(
         "/api/v1/futures/tpsl/position/place_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
 
     /** Modifies an existing position-level TP/SL. */
     fun modifyPositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
-        tpStopType: String = "MARK_PRICE", slStopType: String = "MARK_PRICE",
+        tpStopType: String = "LAST_PRICE", slStopType: String = "LAST_PRICE",
     ): JSONObject = positionTpSlBody(
         "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
 
@@ -491,21 +495,25 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         slPrice: String? = null,
         tpQty: String? = null,
         slQty: String? = null,
-        tpStopType: String = "MARK_PRICE",
-        slStopType: String = "MARK_PRICE",
-        tpOrderType: String? = null,
+        tpStopType: String = "LAST_PRICE",
+        slStopType: String = "LAST_PRICE",
+        tpOrderType: String? = "MARKET",
         tpOrderPrice: String? = null,
-        slOrderType: String? = null,
+        slOrderType: String? = "MARKET",
         slOrderPrice: String? = null,
     ): JSONObject {
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
-        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
-        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
+        if (tpPrice != null) {
+            body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
+            if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+        }
+        if (slPrice != null) {
+            body.put("slPrice", slPrice).put("slStopType", slStopType)
+            if (slOrderType != null) body.put("slOrderType", slOrderType)
+        }
         if (tpQty != null) body.put("tpQty", tpQty)
         if (slQty != null) body.put("slQty", slQty)
-        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
         if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
-        if (slOrderType != null) body.put("slOrderType", slOrderType)
         if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
         return signedPost("/api/v1/futures/tpsl/place_order", body)
     }
@@ -517,21 +525,25 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         slPrice: String? = null,
         tpQty: String? = null,
         slQty: String? = null,
-        tpStopType: String = "MARK_PRICE",
-        slStopType: String = "MARK_PRICE",
-        tpOrderType: String? = null,
+        tpStopType: String = "LAST_PRICE",
+        slStopType: String = "LAST_PRICE",
+        tpOrderType: String? = "MARKET",
         tpOrderPrice: String? = null,
-        slOrderType: String? = null,
+        slOrderType: String? = "MARKET",
         slOrderPrice: String? = null,
     ): JSONObject {
         val body = JSONObject().put("orderId", orderId)
-        if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
-        if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
+        if (tpPrice != null) {
+            body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
+            if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+        }
+        if (slPrice != null) {
+            body.put("slPrice", slPrice).put("slStopType", slStopType)
+            if (slOrderType != null) body.put("slOrderType", slOrderType)
+        }
         if (tpQty != null) body.put("tpQty", tpQty)
         if (slQty != null) body.put("slQty", slQty)
-        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
         if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
-        if (slOrderType != null) body.put("slOrderType", slOrderType)
         if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
         return signedPost("/api/v1/futures/tpsl/modify_order", body)
     }

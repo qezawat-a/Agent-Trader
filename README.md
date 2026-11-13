@@ -138,7 +138,7 @@ Verified against the live API and the official docs (2026-11):
   40007; keys never logged.
 - **Orders** — `place_order` always sends the required `marginCoin`; `side` names the
   *position* (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with
-  `MARK_PRICE` triggers.
+  `LAST_PRICE` stop type and `MARKET` order type per project rule.
 - **Market data** — kline (closed candles only, `endTime`/`startTime` paging, LAST/MARK
   price), tickers, trading pairs (precision, min volume, max leverage), funding rate and
   batch funding rates, depth.

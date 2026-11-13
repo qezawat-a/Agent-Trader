@@ -1,4 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <color name="ic_launcher_background">#0F172A</color>
+    <!-- Semantic palette (dark defaults; light theme overrides in values/themes.xml via Theme.App) -->
+    <color name="surface">#101A2D</color>
+    <color name="onSurface">#E5EDF8</color>
+    <color name="surfaceVariant">#1B2A44</color>
+    <color name="onSurfaceVariant">#B9C7DD</color>
+    <color name="background">#0B1220</color>
+    <color name="onBackground">#E5EDF8</color>
+    <color name="primary">#34D399</color>
+    <color name="onPrimary">#06251A</color>
+    <color name="primaryContainer">#123A2B</color>
+    <color name="onPrimaryContainer">#D1FAE5</color>
+    <color name="secondary">#60A5FA</color>
+    <color name="onSecondary">#0A1B33</color>
+    <color name="tertiary">#FBBF24</color>
+    <color name="onTertiary">#2A1D00</color>
+    <color name="error">#F87171</color>
+    <color name="onError">#2A0505</color>
+    <color name="outline">#33415C</color>
 </resources>
