@@ -1,0 +1,74 @@
+version = 2
+
+[module]
+type = "android-app"
+name = "AGENT_TRADER"
+languageLevel = "JAVA_21"
+output = "build/classes"
+
+[sourceSets.androidTest]
+scope = "TEST_IMPLEMENTATION"
+java = ["src/androidTest/java", "src/androidTest/kotlin"]
+res = ["src/androidTest/res"]
+resources = ["src/androidTest/resources"]
+
+[sourceSets.composeResources]
+scope = "IMPLEMENTATION"
+java = ["build/compose-resources/java", "build/compose-resources/kotlin"]
+res = ["build/compose-resources/res"]
+resources = ["build/compose-resources/resources"]
+
+[sourceSets.debug]
+scope = "IMPLEMENTATION"
+aidl = ["src/debug/aidl"]
+assets = ["src/debug/assets"]
+java = ["src/debug/java", "src/debug/kotlin"]
+jniLibs = ["src/debug/jniLibs"]
+res = ["src/debug/res"]
+resources = ["src/debug/resources"]
+
+[sourceSets.main]
+scope = "IMPLEMENTATION"
+aidl = ["src/main/aidl"]
+assets = ["src/main/assets"]
+java = ["src/main/java", "src/main/kotlin"]
+jniLibs = ["src/main/jniLibs"]
+res = ["src/main/res"]
+resources = ["src/main/resources"]
+
+[sourceSets.release]
+scope = "IMPLEMENTATION"
+aidl = ["src/release/aidl"]
+assets = ["src/release/assets"]
+java = ["src/release/java", "src/release/kotlin"]
+jniLibs = ["src/release/jniLibs"]
+res = ["src/release/res"]
+resources = ["src/release/resources"]
+
+[sourceSets.test]
+scope = "TEST_IMPLEMENTATION"
+java = ["src/test/java", "src/test/kotlin"]
+res = ["src/test/res"]
+resources = ["src/test/resources"]
+
+[dependencies]
+implementation = ["org.jetbrains.compose.components:components-resources:1.11.1", { platform = "com.google.firebase:firebase-bom:33.7.0" }, "com.google.firebase:firebase-analytics:22.1.2", { module = "app" }, "androidx.activity:activity-compose:1.13.0", "androidx.compose.ui:ui:1.11.2", "androidx.compose.foundation:foundation:1.11.2", "androidx.compose.material3:material3:1.4.0", "androidx.compose.ui:ui-tooling-preview:1.11.2", "org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1", "kotlin-stdlib"]
+
+[android]
+namespace = "com.agent.trader"
+compileSdk = 36
+minSdk = 26
+targetSdk = 26
+manifest = "src/main/AgentTrader.xml"
+versionCode = 130
+versionName = "1.3.0"
+isApplication = true
+manifestPlaceholders = []
+buildConfigFields = []
+buildTypes = [{ name = "debug", debuggable = true, minifyEnabled = false, shrinkResources = false, signingConfig = "picked-972238ec-agent-trader" }, { name = "release", debuggable = true, minifyEnabled = false, shrinkResources = false, proguardFiles = ["proguard-android-optimize.txt", "proguard-rules.pro"], signingConfig = "picked-972238ec-agent-trader" }]
+compose = true
+serialization = true
+
+[composeResources]
+package = "com.aibt.agentTrader.generated.resources"
+roots = ["src/main/composeResources"]

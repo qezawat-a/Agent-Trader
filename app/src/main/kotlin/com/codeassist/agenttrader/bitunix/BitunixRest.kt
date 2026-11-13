@@ -46,7 +46,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         body: String?,
         signed: Boolean,
     ): JSONObject {
-        var lastError: Exception? = null
+        var lastError: Throwable? = null
         repeat(ATTEMPTS) { attempt ->
             throttle()
             try {
@@ -56,7 +56,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
                 if (attempt < ATTEMPTS - 1) Thread.sleep(BACKOFF_MS * (attempt + 1))
             }
         }
-        throw lastError ?: IllegalStateException("Request failed: $method $path")
+        throw lastError as? IllegalStateException ?: IllegalStateException("Request failed: $method $path")
     }
 
     private fun throttle() {

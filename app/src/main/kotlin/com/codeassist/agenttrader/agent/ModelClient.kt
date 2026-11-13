@@ -18,6 +18,9 @@ import java.net.URL
  */
 class ModelClient(private val baseUrl: String, private val apiKey: String) {
 
+    /** Redacts the API key from error messages so it never leaks to logs/UI. */
+    private fun String.redact(): String = if (apiKey.isBlank()) this else replace(apiKey, "***")
+
     data class Probe(val model: String, val ok: Boolean, val detail: String)
 
     fun listModels(): List<String> {
@@ -170,6 +173,4 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
 
     private class RetryableHttp(message: String) : RuntimeException(message)
 
-    private fun String.redact(): String = if (apiKey.isBlank()) this
-    else replace(apiKey, "***")
 }

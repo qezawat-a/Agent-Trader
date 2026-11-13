@@ -6,6 +6,9 @@ import com.codeassist.agenttrader.bitunix.BitunixWs
 import com.codeassist.agenttrader.bitunix.Candle
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -492,8 +495,8 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** UTC day stamp used to reset the daily-loss baseline at midnight UTC. */
     internal fun todayStamp(): String =
-        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
         }.format(java.util.Date())
 
     /**
