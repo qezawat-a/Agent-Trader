@@ -87,7 +87,70 @@ class SelfRepairTest {
             engine(engineOn = true, trading = true, loop = true, live = true, keys = true, feed = true),
         )
         assertTrue(d.findings.isEmpty(), d.summary())
-        assertTrue(d.summary().contains("No problems"))
+        // The old text ("No problems found. Everything looks healthy.") is exactly
+        // what the user complained about: it must never be the answer again.
+        assertFalse(d.summary().contains("No problems found"))
+        assertTrue(d.summary().contains("No rule fired"), d.summary())
+    }
+
+    @Test
+    fun complaint_is_echoed_even_when_every_rule_passes() {
+        val complaint = "verify says no issues but positions never open"
+        val d = SelfRepair.diagnose(provider(), engine(), complaint = complaint)
+        assertTrue(d.findings.isEmpty())
+        assertTrue(d.summary().startsWith("Your report:"), d.summary())
+        assertTrue(d.summary().contains(complaint))
+        assertTrue(d.summary().contains("does not mean your problem is gone"), d.summary())
+    }
+
+    @Test
+    fun a_failed_live_check_is_a_warning_even_with_no_rule() {
+        val checks = listOf(
+            SelfCheck.fail("market price", "no price for AKEUSDT — Bitunix unreachable"),
+            SelfCheck.pass("engine", "off — idle"),
+        )
+        val d = SelfRepair.diagnose(provider(), engine(), checks = checks)
+        assertTrue(d.findings.isEmpty())
+        assertEquals("WARN", d.worst)
+        assertTrue(d.summary().contains("1 failed"), d.summary())
+    }
+
+    @Test
+    fun checks_without_a_complaint_still_show_what_ran() {
+        val checks = listOf(SelfCheck.pass("provider HTTP", "GET /models → 12 models"))
+        val d = SelfRepair.diagnose(provider(), engine(), checks = checks)
+        assertTrue(d.summary().contains("provider HTTP"), d.summary())
+        assertTrue(d.summary().contains("1 passed"), d.summary())
+    }
+
+    @Test
+    fun the_exact_phrase_the_user_reported_triggers_the_diagnosis_path() {
+        val text = "ever hit code review or something like that verify simplify it tells me no problem find"
+        assertTrue(SelfRepair.asksForDiagnosis(text))
+    }
+
+    @Test
+    fun a_bug_report_triggers_the_diagnosis_path() {
+        assertTrue(SelfRepair.asksForDiagnosis("the app is not working, no issues found again"))
+        assertTrue(SelfRepair.asksForDiagnosis("باگ داره کار نمیکنه"))
+    }
+
+    @Test
+    fun a_feature_request_is_not_a_bug_report() {
+        assertFalse(SelfRepair.asksForDiagnosis("i want to add a new strategy"))
+        assertFalse(SelfRepair.asksForDiagnosis("please add a button"))
+    }
+
+    @Test
+    fun normal_chat_is_not_hijacked() {
+        assertFalse(SelfRepair.asksForDiagnosis("what is the btc price"))
+        assertFalse(SelfRepair.asksForDiagnosis("set leverage 10"))
+    }
+
+    @Test
+    fun health_questions_reach_the_checks() {
+        assertTrue(SelfRepair.asksForDiagnosis("is everything ok?"))
+        assertTrue(SelfRepair.asksForDiagnosis("is it working now"))
     }
 
     @Test

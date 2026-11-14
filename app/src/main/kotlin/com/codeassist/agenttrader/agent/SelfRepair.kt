@@ -19,16 +19,48 @@ object SelfRepair {
         val autoFixable: Boolean,
     )
 
-    data class Diagnosis(val findings: List<Finding>) {
-        val worst: String get() = findings.firstOrNull()?.severity ?: "OK"
+    data class Diagnosis(
+        val findings: List<Finding>,
+        /**
+         * Real probes that ran ([SelfCheck]). Empty when the caller only ran the
+         * rule list; the summary then says so instead of claiming health.
+         */
+        val checks: List<SelfCheck.Check> = emptyList(),
+        /** The user's own words, echoed back so a complaint can never be ignored. */
+        val complaint: String = "",
+    ) {
+        val worst: String
+            get() = findings.firstOrNull()?.severity
+                ?: if (checks.any { it.status == SelfCheck.Status.FAIL }) "WARN" else "OK"
 
-        fun summary(): String = if (findings.isEmpty()) {
-            "No problems found. Everything looks healthy."
-        } else {
+        /** Findings only — used as the rule section of the model evidence block. */
+        fun findingsText(): String = if (findings.isEmpty()) "none" else {
             findings.joinToString("\n") { f ->
                 "[${f.severity}] ${f.issue}\n    fix: ${f.fix}${if (f.autoFixable) "  (auto)" else ""}"
             }
         }
+
+        fun summary(): String = buildString {
+            if (complaint.isNotBlank()) appendLine("Your report: \"${complaint.trim()}\"")
+            if (findings.isEmpty()) {
+                // Never "No problems found": an empty rule list only means no
+                // known rule fired. Say exactly that and what was checked.
+                if (checks.isEmpty()) {
+                    appendLine("No rule fired — but no live check ran either, so this is not a clean bill of health.")
+                } else {
+                    appendLine("No rule fired. Ran ${checks.size} live checks; details below.")
+                }
+                if (complaint.isNotBlank()) {
+                    appendLine("That does not mean your problem is gone: the checks only cover what is listed below.")
+                }
+            } else {
+                appendLine(findingsText())
+            }
+            if (checks.isNotEmpty()) {
+                appendLine("Live checks: ${SelfCheck.counts(checks)}")
+                appendLine(SelfCheck.render(checks))
+            }
+        }.trim()
     }
 
     /** Snapshot of the provider layer. */
@@ -62,8 +94,17 @@ object SelfRepair {
     /**
      * Inspects both layers and returns ranked findings. Pure — the caller
      * decides which repairs to apply.
+     *
+     * [complaint] is the user's own description of what is wrong and is echoed
+     * in the summary; [checks] are the live probes that actually ran. Without
+     * them the diagnosis can only say which rules fired, never "all healthy".
      */
-    fun diagnose(provider: ProviderState, engine: EngineState): Diagnosis {
+    fun diagnose(
+        provider: ProviderState,
+        engine: EngineState,
+        complaint: String = "",
+        checks: List<SelfCheck.Check> = emptyList(),
+    ): Diagnosis {
         val f = mutableListOf<Finding>()
 
         if (provider.baseUrl.isBlank()) {
@@ -128,8 +169,44 @@ object SelfRepair {
         }
 
         val order = mapOf("CRITICAL" to 0, "WARN" to 1, "INFO" to 2)
-        return Diagnosis(f.sortedBy { order[it.severity] ?: 3 })
+        return Diagnosis(f.sortedBy { order[it.severity] ?: 3 }, checks, complaint)
     }
+
+    /**
+     * True when a free-text message is asking the agent to verify, review,
+     * simplify or debug something. Those messages must reach the real
+     * diagnostic path; previously they fell through to plain chat (or to
+     * "No model set") and the complaint was never investigated.
+     */
+    fun asksForDiagnosis(text: String): Boolean {
+        val t = text.lowercase()
+        if (DIAGNOSIS_ALWAYS.any { t.contains(it) }) return true
+        if (FEATURE_REQUEST.any { t.contains(it) }) return false
+        return DIAGNOSIS_COMPLAINT.any { t.contains(it) }
+    }
+
+    /** Explicit "check this" words — always run the probes. */
+    private val DIAGNOSIS_ALWAYS = listOf(
+        "verify", "code review", "review code", "review the code", "simplify", "diagnose",
+        "self-heal", "self heal", "debug", "audit", "no issues", "no problem", "nothing happens",
+        "is everything ok", "everything ok", "all good", "is it working", "check everything",
+        "any problems", "what's wrong", "whats wrong",
+    )
+
+    /** "It is broken" words — run the probes unless this is a feature request. */
+    private val DIAGNOSIS_COMPLAINT = listOf(
+        "bug", "broken", "not working", "doesn't work", "does not work", "not work",
+        "problem", "issue", "error", "crash", "stuck", "wrong", "failed", "fails",
+        "weird", "not showing",
+        // the user writes Finglish/Persian
+        "kharab", "خراب", "مشکل", "کار نمیکنه", "کار نمی‌کند", "باگ", "ارور",
+    )
+
+    /** Asking for new behaviour is a normal chat turn, not a bug report. */
+    private val FEATURE_REQUEST = listOf(
+        "i want", "i need you to add", "add a feature", "add feature", "implement",
+        "build me", "make a plan", "new feature", "can you add", "please add",
+    )
 
     /**
      * Applies the safe repairs and returns a report of what was done.

@@ -76,6 +76,7 @@ import com.codeassist.agenttrader.agent.AgentBrain
 import com.codeassist.agenttrader.agent.AgentConfig
 import com.codeassist.agenttrader.agent.CommandRouter
 import com.codeassist.agenttrader.agent.ModelClient
+import com.codeassist.agenttrader.agent.SelfCheck
 import com.codeassist.agenttrader.agent.SelfRepair
 import com.codeassist.agenttrader.bitunix.BitunixRest
 import com.codeassist.agenttrader.notify.Notifier
@@ -119,7 +120,8 @@ private data class ChatMsg(val text: String, val isUser: Boolean, val time: Stri
 /** What the app can do — injected into the brain so it can guide the user accurately. */
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
-Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn /ws on|off
+Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose <what is wrong> /repair /autopsy /verify /code_review (/review) /bug_fix /simplify /team_spawn /ws on|off
+Self-diagnosis: /verify runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
 Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
@@ -310,75 +312,261 @@ fun AgentApp(
         )
     }
 
-    /** Snapshot of the provider + engine for self-diagnosis. */
-    fun diagnoseReport(): String {
-        val d = SelfRepair.diagnose(
-            SelfRepair.ProviderState(
-                baseUrl = config.baseUrl,
-                apiKeyPresent = config.apiKey.isNotBlank(),
-                model = config.model,
-                modelsAvailable = 0,
-                lastError = AgentRuntimeError.last,
-            ),
-            SelfRepair.EngineState(
-                live = engine.live,
-                engineOn = engine.engineOn,
-                trading = engine.trading,
-                loopRunning = engine.isLoopRunning,
-                feedConnected = engine.liveFeedOn,
-                bitunixKeysPresent = config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
-                openPositions = if (engine.live) engine.feedPositions().size else engine.broker.positions.size,
-                leverage = engine.leverage,
-                lastError = EngineRuntimeError.last,
-            ),
-        )
+    /** Provider snapshot for self-diagnosis. */
+    fun providerState() = SelfRepair.ProviderState(
+        baseUrl = config.baseUrl,
+        apiKeyPresent = config.apiKey.isNotBlank(),
+        model = config.model,
+        modelsAvailable = 0,
+        lastError = AgentRuntimeError.last,
+    )
+
+    /** Engine snapshot for self-diagnosis. */
+    fun engineState() = SelfRepair.EngineState(
+        live = engine.live,
+        engineOn = engine.engineOn,
+        trading = engine.trading,
+        loopRunning = engine.isLoopRunning,
+        feedConnected = engine.liveFeedOn,
+        bitunixKeysPresent = config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
+        openPositions = if (engine.live) engine.feedPositions().size else engine.broker.positions.size,
+        leverage = engine.leverage,
+        lastError = EngineRuntimeError.last,
+    )
+
+    /**
+     * Runs the probes the diagnosis is allowed to talk about.
+     *
+     * [deep] adds the two network calls to the LLM provider. Without them the
+     * report still says which checks ran and which were skipped — it never
+     * claims a subsystem is healthy because it was not looked at.
+     */
+    fun selfChecks(deep: Boolean): List<SelfCheck.Check> {
+        val checks = mutableListOf<SelfCheck.Check>()
+        val providerReady = config.baseUrl.isNotBlank() && config.apiKey.isNotBlank()
+
+        checks += if (providerReady) {
+            SelfCheck.pass(
+                "provider config",
+                "${config.baseUrl.trim()} · model ${config.model.ifBlank { "(none yet — auto-picked on probe)" }}",
+            )
+        } else {
+            SelfCheck.fail("provider config", "no base URL or API key saved in Settings")
+        }
+
+        if (deep && providerReady) {
+            val client = ModelClient(config.baseUrl, config.apiKey)
+            checks += SelfCheck.guarded("provider HTTP") {
+                val models = client.listModels()
+                if (models.isNotEmpty()) SelfCheck.pass("provider HTTP", "GET /models → ${models.size} models")
+                else SelfCheck.fail("provider HTTP", "GET /models returned nothing (${client.url("models")})")
+            }
+            checks += SelfCheck.guarded("model reply") {
+                var model = config.model
+                if (model.isBlank()) {
+                    model = ModelClient.pickModel(client.listModels())
+                    if (model.isNotBlank()) config.model = model
+                }
+                if (model.isBlank()) {
+                    SelfCheck.fail("model reply", "no model id available from the provider")
+                } else {
+                    val reply = client.chat(model, listOf("user" to "Reply with the single word: OK"), maxTokens = 12)
+                    if (reply.isBlank()) SelfCheck.fail("model reply", "'$model' returned empty content")
+                    else SelfCheck.pass("model reply", "'$model' answered \"${reply.take(30)}\"")
+                }
+            }
+        } else {
+            val why = if (!providerReady) "needs a configured provider" else "quick check — deep probe skipped"
+            checks += SelfCheck.skip("provider HTTP", why)
+            checks += SelfCheck.skip("model reply", why)
+        }
+
+        checks += SelfCheck.guarded("market price") {
+            val symbol = engine.universe.firstOrNull() ?: "BTCUSDT"
+            val px = engine.symbolPrice(symbol)
+            if (px > 0) {
+                SelfCheck.pass("market price", "$symbol ${fmt(px)} (Bitunix reachable)")
+            } else {
+                // Distinguish "this symbol is bad" from "the exchange is down".
+                val btc = engine.symbolPrice("BTCUSDT")
+                if (btc > 0) {
+                    SelfCheck.fail("market price", "no price for $symbol, but BTCUSDT ${fmt(btc)} — check the symbol in the universe")
+                } else {
+                    SelfCheck.fail("market price", "no price for $symbol or BTCUSDT — Bitunix unreachable (DNS?)")
+                }
+            }
+        }
+
+        val keysReady = config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()
+        checks += when {
+            !engine.live -> SelfCheck.skip("private feed", "PAPER mode — feed not needed")
+            !keysReady -> SelfCheck.fail("private feed", "LIVE without Bitunix API key + secret")
+            engine.liveFeedOn -> SelfCheck.pass("private feed", "connected (balance/positions/orders/tpsl)")
+            else -> SelfCheck.fail("private feed", "LIVE but the private WebSocket is not connected")
+        }
+
+        checks += when {
+            !engine.live -> SelfCheck.pass("balance source", "${engine.balanceText()} — simulated, never mixed with the real one")
+            engine.liveBalanceSnapshot() == null ->
+                SelfCheck.fail("balance source", "LIVE but the exchange balance has not arrived yet")
+            else -> SelfCheck.pass(
+                "balance source",
+                "${engine.liveBalanceText()}, refreshed ${engine.liveBalanceAgeMs() / 1000}s ago",
+            )
+        }
+
+        checks += when {
+            !engine.engineOn -> SelfCheck.pass("engine", "off — idle")
+            engine.trading && !engine.isLoopRunning -> SelfCheck.fail("engine", "trading ON but the loop is not running")
+            engine.trading -> SelfCheck.pass("engine", "on, trading on, loop running")
+            else -> SelfCheck.pass("engine", "on, trading off (scan only)")
+        }
+
+        checks += if (engine.universe.isEmpty()) {
+            SelfCheck.fail("universe", "no symbols — the scanner cannot find anything")
+        } else {
+            SelfCheck.pass("universe", engine.universe.joinToString(",").take(80))
+        }
+
+        checks += if (engine.leverage > engine.leverageCeiling()) {
+            SelfCheck.fail("risk config", "leverage ${engine.leverage}x above the exchange max ${engine.leverageCeiling()}x")
+        } else {
+            SelfCheck.pass(
+                "risk config",
+                "leverage ${engine.leverage}x (max ${engine.leverageCeiling()}), stop ${engine.risk.stopFractionOfLiqPct.toInt()}% of liq, TP ${engine.tpR}R",
+            )
+        }
+
+        checks += if (AgentRuntimeError.last.isBlank()) {
+            SelfCheck.pass("last provider error", "none recorded")
+        } else {
+            SelfCheck.fail("last provider error", AgentRuntimeError.last.take(180))
+        }
+        checks += if (EngineRuntimeError.last.isBlank()) {
+            SelfCheck.pass("last engine error", "none recorded")
+        } else {
+            SelfCheck.fail("last engine error", EngineRuntimeError.last.take(180))
+        }
+
+        val canNotify = Build.VERSION.SDK_INT < 33 || ContextCompat.checkSelfPermission(
+            appContext, Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        checks += if (canNotify) {
+            SelfCheck.pass("notifications", "permission granted")
+        } else {
+            SelfCheck.fail("notifications", "POST_NOTIFICATIONS denied — alerts stay inside the app")
+        }
+
+        return checks
+    }
+
+    /** Diagnosis from the rule list plus the live probes that actually ran. */
+    fun diagnoseReport(complaint: String = "", deep: Boolean = true): String {
+        val checks = selfChecks(deep)
+        val d = SelfRepair.diagnose(providerState(), engineState(), complaint, checks)
         return "Diagnosis [${d.worst}]:\n" + d.summary()
     }
 
-    /** Diagnoses and applies only the repairs that are safe to apply automatically. */
-    fun repairNow(): String {
-        val d = SelfRepair.diagnose(
-            SelfRepair.ProviderState(
-                config.baseUrl, config.apiKey.isNotBlank(), config.model, 0, AgentRuntimeError.last,
-            ),
-            SelfRepair.EngineState(
-                engine.live, engine.engineOn, engine.trading, engine.isLoopRunning, engine.liveFeedOn,
-                config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
-                if (engine.live) engine.feedPositions().size else engine.broker.positions.size,
-                engine.leverage,
-                lastError = EngineRuntimeError.last,
-            ),
-        )
-        val applied = SelfRepair.applyAutoFixes(d) { action ->
-            when (action) {
-                "pick_model" -> runCatching {
-                    val models = ModelClient(config.baseUrl, config.apiKey).listModels()
-                    if (models.isEmpty()) "could not list models" else {
-                        val chosen = ModelClient.pickModel(models)
-                        config.model = chosen
-                        "model set to $chosen"
-                    }
-                }.getOrElse { "model probe failed: ${it.message}" }
-                "probe_provider" -> runCatching {
-                    ModelClient(config.baseUrl, config.apiKey).listModels().size
-                }.map { "provider reachable ($it models)" }
-                    .getOrElse { "provider probe failed: ${it.message}" }
-                "restart_loop" -> {
-                    engine.startLoop(30) { msg -> say(msg) }
-                    "trading loop restarted"
-                }
-                "reconnect_feed" -> {
-                    engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
-                    "private feed reconnecting"
-                }
-                "clamp_leverage" -> {
-                    engine.leverage = engine.leverage.coerceAtMost(engine.leverageCeiling())
-                    "leverage clamped to ${engine.leverage}x"
-                }
-                else -> "nothing to do for $action"
-            }
+    /**
+     * The real agent loop for "something is wrong": collect runtime evidence,
+     * then make the model reason over that evidence. With no provider it says
+     * exactly that and shows the checks instead of guessing or reassuring.
+     */
+    fun analyse(complaint: String, deep: Boolean = true): String {
+        val checks = selfChecks(deep)
+        val d = SelfRepair.diagnose(providerState(), engineState(), complaint, checks)
+        val runtime = buildString {
+            appendLine("Engine status: ${engine.status().replace("\n", " | ")}")
+            appendLine("Config: ${engine.configLine()}")
+            appendLine("Loop running: ${engine.isLoopRunning}, feed: ${engine.liveFeedOn}, live: ${engine.live}")
+            if (AgentRuntimeError.last.isNotBlank()) appendLine("Last provider error: ${AgentRuntimeError.last}")
+            if (EngineRuntimeError.last.isNotBlank()) appendLine("Last engine error: ${EngineRuntimeError.last}")
+        }.trim()
+
+        val providerReady = config.baseUrl.isNotBlank() && config.apiKey.isNotBlank()
+        val fixable = d.findings.count { it.autoFixable }
+        val repairHint = if (fixable > 0) {
+            "\n\n$fixable finding(s) can be repaired automatically — send /repair; it re-runs these checks afterwards."
+        } else ""
+        if (!providerReady) {
+            return d.summary() + repairHint + "\n\n" +
+                "No LLM provider is configured, so I cannot reason past these checks. " +
+                "Settings → provider URL + key (or /connect_provider <url> <key>), then ask again. " +
+                "The failed checks above are real and already tell you where to look."
         }
-        return "Repair report:\n$applied"
+
+        val client = ModelClient(config.baseUrl, config.apiKey)
+        return try {
+            var model = config.model
+            if (model.isBlank()) {
+                model = ModelClient.pickModel(client.listModels())
+                if (model.isNotBlank()) config.model = model
+            }
+            if (model.isBlank()) return d.summary() + repairHint + "\n\nProvider is set but lists no usable model — /connect_provider or /models."
+
+            val reply = client.chat(
+                model,
+                listOf(
+                    "system" to SelfCheck.analystSystemPrompt(CAPABILITIES),
+                    "user" to "The user reports: \"${complaint.trim()}\"\n\n" +
+                        "Evidence collected by the app itself:\n" +
+                        SelfCheck.evidenceBlock(checks, d.findingsText(), runtime),
+                ),
+                maxTokens = 900,
+            )
+            d.summary() + repairHint + "\n\n— Agent analysis (" + model + ") —\n" + AgentBrain.stripToolCalls(reply).trim()
+        } catch (e: Exception) {
+            AgentRuntimeError.last = "Error: ${e.message}"
+            d.summary() + "\n\nThe analysis model failed: ${e.message}\n" +
+                "That failure is now the top suspect — /autopsy shows it, /repair retries the provider."
+        }
+    }
+
+    /** One safe repair action, shared by /repair and the automatic heal path. */
+    fun repairAction(action: String): String = when (action) {
+        "pick_model" -> runCatching {
+            val models = ModelClient(config.baseUrl, config.apiKey).listModels()
+            if (models.isEmpty()) "could not list models" else {
+                val chosen = ModelClient.pickModel(models)
+                config.model = chosen
+                "model set to $chosen"
+            }
+        }.getOrElse { "model probe failed: ${it.message}" }
+        "probe_provider" -> runCatching {
+            ModelClient(config.baseUrl, config.apiKey).listModels().size
+        }.map { "provider reachable ($it models)" }
+            .getOrElse { "provider probe failed: ${it.message}" }
+        "restart_loop" -> {
+            engine.startLoop(30) { msg -> say(msg) }
+            "trading loop restarted"
+        }
+        "reconnect_feed" -> {
+            engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+            "private feed reconnecting"
+        }
+        "clamp_leverage" -> {
+            engine.leverage = engine.leverage.coerceAtMost(engine.leverageCeiling())
+            "leverage clamped to ${engine.leverage}x"
+        }
+        else -> "nothing to do for $action"
+    }
+
+    /** Diagnoses, applies only the safe repairs, then re-runs the checks to prove it worked. */
+    fun repairNow(): String {
+        val d = SelfRepair.diagnose(providerState(), engineState())
+        val applied = SelfRepair.applyAutoFixes(d) { action -> repairAction(action) }
+        val after = selfChecks(deep = false)
+        val failed = after.filter { it.status == SelfCheck.Status.FAIL }
+        return buildString {
+            appendLine("Repair report:")
+            appendLine(applied)
+            appendLine()
+            appendLine("Re-check after repair — ${SelfCheck.counts(after)}")
+            appendLine(SelfCheck.render(after))
+            if (failed.isNotEmpty()) {
+                appendLine("Still failing: " + failed.joinToString(", ") { it.name } + " — /autopsy has the last error.")
+            }
+        }.trim()
     }
 
     /** Runs a trader command (or the self-repair flow) from a button. */
@@ -661,21 +849,34 @@ fun AgentApp(
                         "Spawning is simulated: assign each subtask to a sub-agent and merge results."
                     )
                 }
-                "/code_review" -> {
-                    val target = parsed.args.ifBlank { "overall architecture" }
+                "/code_review", "/review" -> {
+                    val target = parsed.args.ifBlank { "the whole app (start with the trader engine and the chat loop)" }
                     if (config.model.isBlank()) {
-                        say("No model set. Set a model first (/models then /set_model), or open Settings.")
+                        // Never run a network probe on the UI thread: the price
+                        // check would fail for the wrong reason.
+                        runAsync(post, ::say) {
+                            val checks = selfChecks(deep = false)
+                            "Code review needs a model, and none is set. What I can verify without one:\n" +
+                                SelfCheck.counts(checks) + "\n" + SelfCheck.render(checks)
+                        }
                     } else {
                         runAsync(post, ::say) {
+                            val checks = selfChecks(deep = false)
                             ModelClient(config.baseUrl, config.apiKey).chat(
                                 config.model,
                                 listOf(
                                     "system" to config.soul,
-                                    "user" to "Act as a senior code reviewer. Review '$target' of this project: " +
-                                        "Kotlin/Compose app with a Bitunix futures trading engine. Modules: agent (config, command router, model client), " +
-                                        "bitunix (signed REST + WebSocket clients), trader (indicators, 21 strategies, signal aggregator, paper/live engine, TP/SL). " +
-                                        "List concrete risks, bugs, and the top fixes, concise. Also note which parts are untested vs verified.",
+                                    "user" to "Act as a senior code reviewer for Agent Trader, the app running this chat: " +
+                                        "Kotlin/Compose, modules: agent (config, command router, self-repair, model client), " +
+                                        "bitunix (signed REST + WebSocket), trader (indicators, strategies, signal aggregator, " +
+                                        "paper/live engine, TP/SL).\n" +
+                                        "Review: $target\n" +
+                                        "Runtime facts from the app: ${engine.configLine()}; checks: ${SelfCheck.counts(checks)}.\n" +
+                                        "Rules: if you were not given the actual source of a file, say which file you need — " +
+                                        "never claim the code is clean or bug-free without seeing it. " +
+                                        "List concrete risks with file/function names and the top 3 fixes.",
                                 ),
+                                maxTokens = 900,
                             )
                         }
                     }
@@ -683,52 +884,66 @@ fun AgentApp(
                 "/bug_fix" -> {
                     val symptom = parsed.args.ifBlank { "unspecified symptom" }
                     if (config.model.isBlank()) {
-                        say("No model set. Set a model first (/models then /set_model).")
+                        runAsync(post, ::say) { analyse(symptom, deep = false) }
                     } else {
                         runAsync(post, ::say) {
+                            val checks = selfChecks(deep = false)
                             val suggestion = ModelClient(config.baseUrl, config.apiKey).chat(
                                 config.model,
                                 listOf(
-                                    "system" to config.soul,
-                                    "user" to "Diagnose this bug: '$symptom'. Suggest the most likely root cause and a minimal code fix. " +
-                                        "State clearly that file edits require user approval before applying.",
+                                    "system" to SelfCheck.analystSystemPrompt(CAPABILITIES),
+                                    "user" to "Diagnose this bug: '$symptom'.\n" +
+                                        "Evidence collected by the app:\n" +
+                                        SelfCheck.evidenceBlock(checks, "none", "Config: ${engine.configLine()}") +
+                                        "\nGive the most likely root cause and a minimal code fix.",
                                 ),
+                                maxTokens = 900,
                             )
-                            suggestion + "\n\n(No file was changed. Reply with /verify to confirm any fix.)"
+                            suggestion + "\n\n(No file was changed. Reply with /verify to re-run the checks.)"
                         }
                     }
                 }
                 "/simplify" -> {
                     val code = parsed.args
-                    if (code.isBlank()) say("Usage: /simplify <code snippet>")
-                    else if (config.model.isBlank()) say("No model set. Set a model first (/models then /set_model).")
-                    else {
-                        runAsync(post, ::say) {
+                    when {
+                        code.isNotBlank() && config.model.isBlank() ->
+                            say("No model set — /simplify needs one to rewrite code. Use /diagnose <problem> for the checks that need no model.")
+                        code.isNotBlank() -> runAsync(post, ::say) {
                             ModelClient(config.baseUrl, config.apiKey).chat(
                                 config.model,
                                 listOf(
                                     "system" to config.soul,
                                     "user" to "Simplify this Kotlin snippet without changing behavior, and explain each change:\n$code",
                                 ),
+                                maxTokens = 900,
                             )
+                        }
+                        // No snippet given: do not pretend there is nothing to fix.
+                        else -> runAsync(post, ::say) {
+                            "Simplification needs a snippet: /simplify <code>.\n\n" +
+                                "Meanwhile, the checks that need no model:\n" +
+                                diagnoseReport(complaint = "simplify request without a snippet", deep = false)
                         }
                     }
                 }
-                "/verify" -> {
-                    config.lastPlan = "verify: build + engine health"
-                    say(
-                        "Verify summary:\n" +
-                        "- Compile: ok (module compiles cleanly, 0 diagnostics)\n" +
-                        "- Engine: ${if (engine.engineOn) "on" else "off"}, mode ${if (engine.live) "LIVE" else "PAPER"}, balance ${engine.balanceText()}\n" +
-                        (if (engine.live) {
-                            "- Positions: ${engine.feedPositions().size} on the private feed (use 'positions' for the exchange snapshot)\n"
+                "/verify" -> runAsync(post, ::say) {
+                    config.lastPlan = "verify: runtime checks (compile happens in CI)"
+                    val checks = selfChecks(deep = true)
+                    val failed = checks.filter { it.status == SelfCheck.Status.FAIL }
+                    buildString {
+                        appendLine("Verification — ${SelfCheck.counts(checks)}")
+                        appendLine(SelfCheck.render(checks))
+                        appendLine()
+                        appendLine("Compile: not possible inside the app. CI compiles and signs the APK on every tag,")
+                        appendLine("and the unit tests run in that pipeline. Anything else would be a guess, so it is not claimed.")
+                        if (failed.isEmpty()) {
+                            appendLine("Verdict: every probe above passed. That covers the probe list only — say what you")
+                            appendLine("actually see broken and I will trace it: /diagnose <what happens>.")
                         } else {
-                            "- Open positions: ${engine.broker.positions.size}, realized PnL: ${fmt(engine.broker.realizedPnl)}\n"
-                        }) +
-                        "- Last error (provider): ${AgentRuntimeError.last.ifBlank { "none" }}" +
-                        (if (EngineRuntimeError.last.isNotBlank())
-                            "\n- Last error (engine): ${EngineRuntimeError.last}" else "")
-                    )
+                            appendLine("Verdict: ${failed.size} probe(s) failed — " + failed.joinToString(", ") { it.name } + ".")
+                            appendLine("Top fix: /repair (applies the safe ones), then /verify again.")
+                        }
+                    }.trim()
                 }
                 "/autopsy" -> {
                     val providerErr = AgentRuntimeError.last
@@ -776,7 +991,10 @@ fun AgentApp(
                         )
                     }
                 }
-                "/diagnose" -> runAsync(post, ::say) { diagnoseReport() }
+                "/diagnose" -> runAsync(post, ::say) {
+                    val complaint = parsed.args.trim()
+                    diagnoseReport(complaint = complaint, deep = true)
+                }
                 "/repair" -> runAsync(post, ::say) { repairNow() }
                 else -> say("${parsed.command} is not wired yet.")
             }
@@ -791,8 +1009,23 @@ fun AgentApp(
                 engine.handle(parsed.text)
             }
             is CommandRouter.Parsed.Chat -> {
-                if (config.model.isBlank()) {
-                    say("No model set. Open Settings, save provider + key, then /models.")
+                val text = parsed.text.trim()
+                if (SelfRepair.asksForDiagnosis(text)) {
+                    // A complaint is not small talk: run the real probes, then let the
+                    // model reason over the evidence. Before this, the message either
+                    // reached a model with no runtime facts or died on "No model set".
+                    busy = true
+                    history.add("user" to text)
+                    runAsync(post, { s ->
+                        say(s)
+                        history.add("assistant" to s)
+                        busy = false
+                    }) { analyse(text, deep = true) }
+                } else if (config.model.isBlank()) {
+                    say(
+                        "No model set. Open Settings, save provider + key, then /models.\n" +
+                            "If something is broken, type /diagnose <what you see> — that runs the real checks without a model.",
+                    )
                 } else {
                     busy = true
                     history.add("user" to parsed.text)
