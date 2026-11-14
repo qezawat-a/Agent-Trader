@@ -171,11 +171,11 @@ object SignalAggregator {
         val qualifying = counts.entries.filter { it.value >= need }
         // Both sides reaching the threshold = genuinely torn market: no trade.
         val dir = if (qualifying.size == 1) qualifying[0].key else return null
-        val strong = sigs.filter { it.dir == dir && it.confidence >= gates.minTfConfidence }
+        val strong = sigs.withIndex().filter { (_, s) -> s.dir == dir && s.confidence >= gates.minTfConfidence }
         if (strong.size < need) return null
-        val conf = strong.map { it.confidence }.average()
+        val conf = strong.map { it.value.confidence }.average()
         if (conf < gates.minConfidence) return null
-        return Signal(dir, conf, strong.map { it.timeframe })
+        return Signal(dir, conf, strong.map { gates.timeframes[it.index] })
     }
 }
 
