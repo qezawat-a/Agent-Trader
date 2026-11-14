@@ -1,6 +1,7 @@
 package com.codeassist.agenttrader.trader
 
 import com.codeassist.agenttrader.bitunix.Candle
+import com.codeassist.agenttrader.util.fmt0
 import kotlin.math.abs
 
 /** Aggregated view of one timeframe. dir is 1, -1, or 0 when nothing qualifies. */
@@ -70,8 +71,8 @@ object SignalAggregator {
 
     /** Short status text: "LONG 78%", "SHORT 74%" or "no trade". */
     fun statusText(dir: Int, confidence: Double): String = when {
-        dir > 0 -> "LONG ${"%.0f".format(confidence)}%"
-        dir < 0 -> "SHORT ${"%.0f".format(confidence)}%"
+        dir > 0 -> "LONG ${fmt0(confidence)}%"
+        dir < 0 -> "SHORT ${fmt0(confidence)}%"
         else -> "no trade"
     }
 
@@ -95,7 +96,7 @@ object SignalAggregator {
                     -1 -> "SHORT"
                     else -> "no side"
                 }
-                detail += "${e.timeframe}: $sideVar, ${e.agreeing} strategies at ${"%.0f".format(e.confidence)}%" +
+                detail += "${e.timeframe}: $sideVar, ${e.agreeing} strategies at ${fmt0(e.confidence)}%" +
                     " (need ${gates.minAgreeing} at >=${gates.minTfConfidence.toInt()}%)"
             }
             val withSide = rows.filter { it.dir != 0 }
@@ -124,7 +125,7 @@ object SignalAggregator {
                                 else -> {
                                     val avg = strong.map { it.confidence }.average()
                                     if (avg < gates.minConfidence) {
-                                        "combined confidence ${"%.0f".format(avg)}% is below ${gates.minConfidence.toInt()}%"
+                                        "combined confidence ${fmt0(avg)}% is below ${gates.minConfidence.toInt()}%"
                                     } else {
                                         dir = side
                                         confidence = avg
@@ -244,7 +245,7 @@ internal fun formatSignalBoard(
         append("  ${r.symbol.padEnd(11)} $side")
         if (r.timeframes.isNotEmpty()) {
             append("  " + r.timeframes.joinToString(" · ") { e ->
-                "${e.timeframe} ${"%.0f".format(e.confidence)}%/${e.agreeing}v"
+                "${e.timeframe} ${fmt0(e.confidence)}%/${e.agreeing}v"
             })
         }
         appendLine()

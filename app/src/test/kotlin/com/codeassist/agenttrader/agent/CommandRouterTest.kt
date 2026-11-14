@@ -24,4 +24,13 @@ class CommandRouterTest {
         assertTrue(CommandRouter.parse("hi, why is there no signal?") is CommandRouter.Parsed.Chat)
         assertTrue(CommandRouter.parse("/help") is CommandRouter.Parsed.Agent)
     }
+
+    @Test
+    fun tp_distance_and_majority_gate_commands_go_to_the_engine() {
+        // Regression: both commands exist on the engine but were missing from the
+        // router, so they fell through to the LLM and never changed anything.
+        assertTrue(CommandRouter.parse("set tp r 3") is CommandRouter.Parsed.Trader)
+        assertTrue(CommandRouter.parse("set tp 2.5") is CommandRouter.Parsed.Trader)
+        assertTrue(CommandRouter.parse("set tf agree 2") is CommandRouter.Parsed.Trader)
+    }
 }

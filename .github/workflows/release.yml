@@ -49,6 +49,15 @@ jobs:
             echo "No keystore secret set — release APK will be unsigned."
           fi
 
+      - name: Verify the root source mirror is in sync
+        run: |
+          # The project is carried twice (app/ for Gradle, src/ for CodeAssist).
+          # A drifted mirror silently ships old code to the on-device build.
+          if ! diff -rq app/src/main src/main; then
+            echo "ERROR: src/ is out of sync with app/src/main — copy it and commit."
+            exit 1
+          fi
+
       - name: Test and build debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
@@ -96,6 +105,8 @@ jobs:
             echo "### Highlights"
             echo "- Bitunix futures engine: signed REST (marginCoin, per-endpoint rate limits, retry), WS on wss://fapi.bitunix.com/public + /private, live order path with TP/SL"
             echo "- Agentic chat: multi-turn LLM memory, wired slash commands, provider tester"
+            echo "- LIVE balance always comes from the exchange (never the paper account)"
+            echo "- DNS/network outages are reported as connectivity issues, not model failures"
             echo "- Dark trading theme with chat bubbles and quick actions"
           } > release-notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then

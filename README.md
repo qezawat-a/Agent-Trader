@@ -209,6 +209,7 @@ endpoint clamps `limit` to the documented maximum.
 | Quantities below the exchange minimum | Skipped, never silently upsized |
 | Kline returns closed candles only | The forming candle is excluded by design |
 | Leverage has no single account-wide max | The authority is each symbol's `maxLeverage` (up to 200x) |
+| `Unable to resolve host "fapi.bitunix.com"` | This device has no DNS/connection, not a broken model. The loop retries and `/diagnose` says so; no model switch is needed |
 
 ## Trading logic
 
@@ -270,13 +271,17 @@ configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 75 JVM unit tests
+gradle :app:testDebugUnitTest   # 236 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```
 
 Versions: AGP 8.13.2 · Kotlin 2.2.21 · Compose 1.11.2 · Material3 1.4.0 · compileSdk 36 ·
 minSdk 23 · JDK 17.
+
+Two workflows run on GitHub: **CI** (every push and pull request) checks that the root
+`src/` mirror is in sync with `app/src/main` and runs the unit tests; **Release APK**
+(tag `v*`) additionally builds and publishes the signed APKs with checksums.
 
 Release signing uses repository secrets: `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`,
 `KEY_PASSWORD`. Pushing a tag `v*` (or running the *Release APK* workflow) builds the APKs,
@@ -290,17 +295,22 @@ app/src/main/kotlin/com/codeassist/agenttrader/
 ├── bitunix/    BitunixRest (signed REST) · BitunixWs (public + private feed)
 ├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood
 ├── ui/         Control + Trade surfaces
+├── util/       Format (locale-independent number formatting)
 └── MainActivity.kt
 ```
 
 The project is carried twice on purpose: the canonical module lives in `app/` (what Gradle and
 CI build), and the root `src/` mirrors it byte-for-byte for on-device CodeAssist builds
-(`module.toml` points there). Keep both in sync when editing.
+(`module.toml` points there). Keep both in sync when editing — CI fails the build when they
+drift.
 
 ## Safety
 
 - Paper mode is the default; LIVE requires real Bitunix keys **and** an explicit toggle.
 - The LIVE switch refuses to arm without credentials.
+- LIVE never shows the paper balance: every account line reads the exchange (WS push or
+  30s REST refresh) and says `unavailable (exchange)` until it answers. Paper values are
+  always labelled `(paper)`, so the two accounts cannot be confused.
 - No live order is sent without the LIVE toggle, and the brain is instructed never to open or
   close a position that the user did not explicitly ask for.
 - Quantities below the exchange minimum are skipped, never upsized.

@@ -42,7 +42,10 @@ import java.util.UUID
 class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     private val base = "https://fapi.bitunix.com"
-    private var lastRequestMs = 0L
+
+    /** Timestamp of the last request — atomic because the chat, the scanner and
+     *  the trading loop all call this client from different threads. */
+    private val lastRequestMs = java.util.concurrent.atomic.AtomicLong(0)
     private val lastCallMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Public GET, no signature. */
@@ -80,7 +83,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     private fun throttle(path: String) {
         val now = System.currentTimeMillis()
         // Global cap: the docs allow 10 req/s on most endpoints, we stay at 8.
-        var wait = lastRequestMs + MIN_INTERVAL_MS - now
+        var wait = lastRequestMs.get() + MIN_INTERVAL_MS - now
         // Per-endpoint cap: some endpoints are far stricter (close_all = 1/s,
         // batch_order = 2/s, adjust_position_margin = 5/s).
         RATE_LIMITS[path]?.let { perSecond ->
@@ -89,7 +92,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }
         if (wait > 0) Thread.sleep(wait)
         val stamp = System.currentTimeMillis()
-        lastRequestMs = stamp
+        lastRequestMs.set(stamp)
         lastCallMs[path] = stamp
     }
 

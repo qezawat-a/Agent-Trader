@@ -2,6 +2,7 @@ package com.codeassist.agenttrader.agent
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /** Self-diagnosis: what is broken, what can be repaired automatically. */
@@ -23,7 +24,18 @@ class SelfRepairTest {
         keys: Boolean = false,
         positions: Int = 0,
         leverage: Int = 5,
-    ) = SelfRepair.EngineState(live, engineOn, trading, loop, feed, keys, positions, leverage)
+        error: String = "",
+    ) = SelfRepair.EngineState(
+        live = live,
+        engineOn = engineOn,
+        trading = trading,
+        loopRunning = loop,
+        feedConnected = feed,
+        bitunixKeysPresent = keys,
+        openPositions = positions,
+        leverage = leverage,
+        lastError = error,
+    )
 
     @Test
     fun missing_provider_is_critical_and_not_auto_fixed() {
@@ -102,5 +114,31 @@ class SelfRepairTest {
         val d = SelfRepair.diagnose(provider(url = "", model = ""), engine(live = true))
         val severities = d.findings.map { it.severity }
         assertEquals("CRITICAL", severities.first())
+    }
+
+    @Test
+    fun exchange_dns_failure_is_not_blamed_on_the_model() {
+        val dns = "Bitunix unreachable (DNS) — check this device's internet connection; retrying in 30s"
+        val d = SelfRepair.diagnose(provider(), engine(error = dns))
+
+        val finding = d.findings.first { it.issue.startsWith("Exchange unreachable") }
+        assertFalse(finding.autoFixable)
+        assertTrue(finding.fix.contains("internet"))
+        assertTrue(finding.fix.contains("no model change"))
+        assertTrue(d.findings.none { it.issue.contains("Last provider call failed") })
+    }
+
+    @Test
+    fun exchange_dns_failure_is_not_auto_probed() {
+        val d = SelfRepair.diagnose(provider(), engine(error = "Bitunix unreachable (DNS) — check this device's internet connection"))
+        val applied = SelfRepair.applyAutoFixes(d) { action -> "unexpected $action" }
+        assertTrue(applied.contains("Nothing needed"), applied)
+    }
+
+    @Test
+    fun provider_errors_keep_the_provider_finding() {
+        val d = SelfRepair.diagnose(provider(error = "Error: HTTP 401"), engine())
+        assertTrue(d.findings.any { it.issue.contains("Last provider call failed") })
+        assertTrue(d.findings.none { it.issue.startsWith("Exchange unreachable") })
     }
 }

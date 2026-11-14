@@ -1,6 +1,8 @@
 package com.codeassist.agenttrader.trader
 
 import com.codeassist.agenttrader.bitunix.Candle
+import com.codeassist.agenttrader.util.fmt1
+import com.codeassist.agenttrader.util.fmt3
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -47,11 +49,11 @@ object MarketMoodCalc {
             when {
                 volPct >= 4.0 -> {
                     stress += 55
-                    drivers += "volatility ${"%.1f".format(volPct)}% per candle — violent tape"
+                    drivers += "volatility ${fmt1(volPct)}% per candle — violent tape"
                 }
                 volPct >= 2.0 -> {
                     stress += 32
-                    drivers += "volatility ${"%.1f".format(volPct)}% per candle — choppy"
+                    drivers += "volatility ${fmt1(volPct)}% per candle — choppy"
                 }
                 volPct >= 1.0 -> stress += 14
             }
@@ -64,10 +66,10 @@ object MarketMoodCalc {
             val dropPct = (high - last) / max(high, 1e-9) * 100
             if (dropPct >= 5.0) {
                 stress += 30
-                drivers += "price ${"%.1f".format(dropPct)}% off the recent high"
+                drivers += "price ${fmt1(dropPct)}% off the recent high"
             } else if (dropPct >= 2.5) {
                 stress += 16
-                drivers += "price ${"%.1f".format(dropPct)}% below the recent high"
+                drivers += "price ${fmt1(dropPct)}% below the recent high"
             }
         }
 
@@ -78,7 +80,7 @@ object MarketMoodCalc {
                 abs(fPct) >= 0.05 -> {
                     stress += 22
                     val who = if (fPct > 0) "longs pay shorts — crowded long" else "shorts pay longs — crowded short"
-                    drivers += "funding ${"%.3f".format(fPct)}% ($who)"
+                    drivers += "funding ${fmt3(fPct)}% ($who)"
                 }
                 abs(fPct) >= 0.02 -> stress += 10
             }
@@ -89,11 +91,11 @@ object MarketMoodCalc {
         if (pnlPct != null) {
             val p = pnlPct * 100
             bookNote = when {
-                p <= -15 -> "your book is deep underwater (${"%.1f".format(p)}%) — protect it"
-                p <= -5 -> "your book is down ${"%.1f".format(p)}%"
-                p >= 15 -> "your book is up ${"%.1f".format(p)}% — protect the gains"
-                p >= 5 -> "your book is up ${"%.1f".format(p)}%"
-                else -> "your book is roughly flat (${"%.1f".format(p)}%)"
+                p <= -15 -> "your book is deep underwater (${fmt1(p)}%) — protect it"
+                p <= -5 -> "your book is down ${fmt1(p)}%"
+                p >= 15 -> "your book is up ${fmt1(p)}% — protect the gains"
+                p >= 5 -> "your book is up ${fmt1(p)}%"
+                else -> "your book is roughly flat (${fmt1(p)}%)"
             }
             if (p <= -8) stress += 25
             else if (p >= 8) stress += 8

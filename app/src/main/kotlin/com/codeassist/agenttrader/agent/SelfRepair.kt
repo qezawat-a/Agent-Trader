@@ -1,5 +1,7 @@
 package com.codeassist.agenttrader.agent
 
+import com.codeassist.agenttrader.trader.NetworkErrors
+
 /**
  * Self-diagnosis and self-repair for the running app.
  *
@@ -50,6 +52,11 @@ object SelfRepair {
         val leverage: Int,
         /** Highest leverage the exchange lists for any contract (200 for BTCUSDT/ETHUSDT). */
         val leverageCeiling: Int = 200,
+        /**
+         * Last exchange/engine failure ([com.codeassist.agenttrader.trader.EngineRuntimeError]).
+         * Kept separate from the provider error so a DNS outage is not blamed on the model.
+         */
+        val lastError: String = "",
     )
 
     /**
@@ -79,6 +86,25 @@ object SelfRepair {
 
         if (!engine.bitunixKeysPresent && engine.live) {
             f += Finding("CRITICAL", "LIVE mode without Bitunix keys.", "Add API key + secret in Settings, or switch to PAPER", false)
+        }
+        if (engine.lastError.isNotBlank()) {
+            if (NetworkErrors.isNetwork(engine.lastError)) {
+                // A dead connection is not a provider problem. Say what to check
+                // and never suggest probing the model.
+                f += Finding(
+                    "WARN",
+                    "Exchange unreachable: ${engine.lastError.take(160)}",
+                    "Check this device's internet connection (DNS); the app retries automatically — no model change needed",
+                    false,
+                )
+            } else {
+                f += Finding(
+                    "INFO",
+                    "Last engine error: ${engine.lastError.take(160)}",
+                    "Review the log; restart the trading loop if it repeats",
+                    false,
+                )
+            }
         }
         if (engine.trading && !engine.engineOn) {
             f += Finding("WARN", "Trading is on but the engine is off.", "Turn the engine on", true)

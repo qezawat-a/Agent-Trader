@@ -4,6 +4,11 @@ import com.codeassist.agenttrader.bitunix.BitunixApiException
 import com.codeassist.agenttrader.bitunix.BitunixRest
 import com.codeassist.agenttrader.bitunix.BitunixWs
 import com.codeassist.agenttrader.bitunix.Candle
+import com.codeassist.agenttrader.util.fmt
+import com.codeassist.agenttrader.util.fmt0
+import com.codeassist.agenttrader.util.fmt1
+import com.codeassist.agenttrader.util.fmt2
+import com.codeassist.agenttrader.util.fmt6
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -35,13 +40,13 @@ data class Position(
  */
 data class RiskSettings(
     /** Stop moves to entry once ROI reaches this % (0 = breakeven off). */
-    val breakevenRoiPct: Double = 10.0,
+    val breakevenRoiPct: Double = 25.0,
     /** Trailing starts once ROI reaches this % — fires after breakeven (0 = off). */
-    val trailingTriggerRoiPct: Double = 15.0,
+    val trailingTriggerRoiPct: Double = 40.0,
     /** Trailing stop keeps this much ROI distance behind the best price. */
-    val trailDistanceRoiPct: Double = 15.0,
+    val trailDistanceRoiPct: Double = 25.0,
     /** Initial stop sits this % of the way toward liquidation. */
-    val stopFractionOfLiqPct: Double = 50.0,
+    val stopFractionOfLiqPct: Double = 30.0,
 )
 
 /**
@@ -148,10 +153,8 @@ data class PairInfo(
     val maxLeverage: Int,
 )
 
-fun fmt(v: Double): String = "%.4f".format(v)
-
 /** Percent display that shows "off" when the value is 0 (breakeven/trailing/caps). */
-internal fun offable(v: Double): String = if (v > 0) "${"%.0f".format(v)}%" else "off"
+internal fun offable(v: Double): String = if (v > 0) "${fmt0(v)}%" else "off"
 
 /**
  * Trader engine: owns the broker, the scanner universe, and the on/off switches.
@@ -162,7 +165,24 @@ class TraderEngine(private val rest: BitunixRest) {
     var engineOn = false
     var trading = false
     var scanOn = false
+
+    /**
+     * LIVE trades real money; every balance/PnL display must then come from the
+     * exchange, never from [broker]. Volatile because the WS/loop threads read it.
+     */
+    @Volatile
     var live = false
+        set(value) {
+            val leavingLive = field && !value
+            field = value
+            // Do not carry an old exchange balance into the next LIVE session or
+            // into PAPER displays: it would look current when it is not.
+            if (leavingLive) {
+                exchangeBalance.set(null)
+                exchangeBalanceAt.set(0)
+            }
+        }
+
     var leverage = 5
     var marginMode = "ISOLATION"
     var positionMode = "ONE_WAY"
@@ -182,7 +202,12 @@ class TraderEngine(private val rest: BitunixRest) {
     var minTfConfidence: Double = SignalAggregator.TIMEFRAME_CONFIDENCE
     var minConfidence: Double = SignalAggregator.MIN_CONFIDENCE
 
-    private fun gates() = SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence)
+    /** How many timeframes must share one side before a trade is allowed.
+     *  Int.MAX_VALUE = all of them must agree (the old strict rule). */
+    var minSideTfs: Int = Int.MAX_VALUE
+
+    private fun gates() =
+        SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence, minSideTfs)
 
     // ---- Risk manager & exits (v1.1.7) — every value user-changeable. ----
 
@@ -198,14 +223,21 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Minimum seconds between two entries (0 = off). */
     var guardIntervalSec = 300L
 
-    internal var lastEntryAt = 0L
-    internal var dayStamp = ""
-    internal var dayStartBalance = 0.0
+    /** Take-profit distance as an R-multiple of the stop distance (live orders attach
+     *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
+    var tpR: Double = 1.0
 
     // Live-position mid-management state, keyed by symbol.
     private val liveBest = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveLastStop = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveBreakevenDone = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** Last seen live positions (symbol → "side|qty") — the diff announces opens/closes. */
+    private val seenLive = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    internal var lastEntryAt = 0L
+    internal var dayStamp = ""
+    internal var dayStartBalance = 0.0
 
     /** Periodic report settings. */
     var reportOn = false
@@ -229,13 +261,23 @@ class TraderEngine(private val rest: BitunixRest) {
 
     // ---- Live WebSocket feed (private channels) ----
     private var ws: BitunixWs? = null
-    private val wsBalance = java.util.concurrent.atomic.AtomicReference<Double?>(null)
+
+    /**
+     * Last known exchange balance (available USDT). The WS feed pushes it, and
+     * [refreshLiveBalance] fills it over REST when the feed is silent — without
+     * it the UI (and the risk manager) would reason about the PAPER balance
+     * while the engine trades real money.
+     */
+    private val exchangeBalance = java.util.concurrent.atomic.AtomicReference<Double?>(null)
+    private val exchangeBalanceAt = java.util.concurrent.atomic.AtomicLong(0)
     private var lastWsError: String? = null
 
     // ---- Signal board (shared by chat, report and the Signals screen) ----
     private var signalCache: List<SignalRow> = emptyList()
     private var signalCacheAt = 0L
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
+    // Latest private "tpsl" event per orderId, so the tpsl command can show live TP/SL state.
+    private val wsTpSl = java.util.Collections.synchronizedMap(LinkedHashMap<String, org.json.JSONObject>())
 
     // Public WS market data (no keys needed): "tickers" last prices, "price" market/index/funding.
     private var marketFeed: BitunixWs? = null
@@ -314,12 +356,23 @@ class TraderEngine(private val rest: BitunixRest) {
 
             override fun onChannel(ch: String, symbol: String?, data: JSONObject) {
                 when (ch) {
-                    "balance" -> wsBalance.set(data.optString("available").toDoubleOrNull())
+                    "balance" -> parseBalance(data)?.let { available ->
+                        exchangeBalance.set(available)
+                        exchangeBalanceAt.set(System.currentTimeMillis())
+                    }
                     "position" -> {
                         val sym = data.optString("symbol").ifBlank { symbol ?: "" }
                         val qty = data.optString("qty").toDoubleOrNull() ?: 0.0
                         if (sym.isNotBlank()) {
                             if (qty == 0.0) wsPositions.remove(sym) else wsPositions[sym] = data
+                        }
+                    }
+                    "tpsl" -> {
+                        val id = data.optString("orderId")
+                        if (id.isNotBlank()) {
+                            wsTpSl.remove(id)
+                            wsTpSl[id] = data
+                            while (wsTpSl.size > 50) wsTpSl.remove(wsTpSl.keys.first())
                         }
                     }
                 }
@@ -335,7 +388,10 @@ class TraderEngine(private val rest: BitunixRest) {
             }
 
             override fun onClosed(privateChannel: Boolean, reason: String) {
-                onEvent?.invoke("WS closed: $reason")
+                // 1000 = normal closure; every 1000 here is benign (manual stop, or a
+                // graceful server close that now auto-reconnects). It reads like an
+                // error, so stay silent for it.
+                if (!reason.startsWith("closed 1000")) onEvent?.invoke("WS closed: $reason")
             }
         })
         ws = client
@@ -346,15 +402,70 @@ class TraderEngine(private val rest: BitunixRest) {
     fun stopLiveFeed() {
         ws?.close()
         ws = null
-        wsBalance.set(null)
+        // Keep the last exchange balance cached: LIVE mode still needs it for
+        // sizing and the daily-loss cap while the feed reconnects.
         wsPositions.clear()
+        wsTpSl.clear()
     }
+
+    /** TP/SL events received on the private WS feed, newest last. */
+    fun feedTpSl(): List<org.json.JSONObject> = synchronized(wsTpSl) { wsTpSl.values.toList() }
 
     /** True when the private WebSocket feed is connected. */
     val liveFeedOn: Boolean get() = ws != null
 
-    /** Balance from the WebSocket feed when available, otherwise a REST call. */
-    fun liveBalance(): Double = wsBalance.get() ?: rest.availableUsdt()
+    /**
+     * Extracts the USDT balance from an account/WS payload. Bitunix names the
+     * field differently across endpoints ("available" on the account snapshot,
+     * "balance"/"allBalance" on older payloads), so accept all three.
+     */
+    private fun parseBalance(data: JSONObject): Double? =
+        listOf("available", "balance", "allBalance")
+            .firstNotNullOfOrNull { data.optString(it).toDoubleOrNull() }
+
+    /**
+     * The exchange balance (available USDT) as last seen — from the WS feed or
+     * from a REST refresh. Null until the exchange answered once.
+     */
+    fun liveBalanceSnapshot(): Double? = exchangeBalance.get()
+
+    /**
+     * Refreshes the exchange balance over REST and caches it.
+     * Blocking (network) — call it from a background thread, never from the UI.
+     * Returns the new value, or the last known one when the exchange is unreachable.
+     */
+    @Synchronized
+    fun refreshLiveBalance(): Double? {
+        if (!live) return null
+        val fetched = runCatching { rest.availableUsdt() }.getOrNull()
+        // The mode can switch while the REST call is in flight — do not repopulate
+        // an exchange cache that the PAPER session is not allowed to show.
+        if (fetched != null && live) {
+            exchangeBalance.set(fetched)
+            exchangeBalanceAt.set(System.currentTimeMillis())
+        }
+        return if (live) fetched ?: exchangeBalance.get() else null
+    }
+
+    /** Refreshes only when the cache is missing or older than [maxAgeMs]. */
+    fun refreshLiveBalanceIfStale(maxAgeMs: Long = 30_000): Double? {
+        if (!live) return null
+        val cached = exchangeBalance.get()
+        if (cached != null && liveBalanceAgeMs() <= maxAgeMs) return cached
+        return refreshLiveBalance()
+    }
+
+    /** When the exchange balance was last refreshed (ms), 0 when never. */
+    fun liveBalanceAgeMs(): Long {
+        val at = exchangeBalanceAt.get()
+        return if (at == 0L) 0L else System.currentTimeMillis() - at
+    }
+
+    /** Test hook: seeds the cached exchange balance without network. */
+    internal fun seedLiveBalance(value: Double) {
+        exchangeBalance.set(value)
+        exchangeBalanceAt.set(System.currentTimeMillis())
+    }
 
     /** Symbols the WebSocket feed currently reports as open. */
     fun feedPositions(): List<String> = synchronized(wsPositions) { wsPositions.keys.toList() }
@@ -391,7 +502,7 @@ class TraderEngine(private val rest: BitunixRest) {
     fun formatQty(symbol: String, raw: Double): String? = formatQty(symbol, raw, pairInfo(symbol))
 
     internal fun formatQty(symbol: String, raw: Double, info: PairInfo?): String? {
-        if (info == null) return "%.6f".format(raw)
+        if (info == null) return fmt6(raw)
         // valueOf() uses the canonical decimal string, avoiding the BigDecimal(double)
         // binary artifact that made 0.123 floor to 0.122 at 3 decimals.
         val qty = java.math.BigDecimal.valueOf(raw)
@@ -487,11 +598,40 @@ class TraderEngine(private val rest: BitunixRest) {
     fun configLine(): String =
         "${if (live) "LIVE" else "PAPER"} · lev ${leverage}x · risk ${(riskFraction * 100).toInt()}% · " +
             "${timeframes.joinToString("+")} · universe ${universe.size} · " +
-            "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%"
+            "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%" +
+                " · tf agree ${minSideTfs.coerceAtMost(timeframes.size)}/${timeframes.size}"
 
-    /** Full settings dump the user and the agent can both read. */
-    /** Balance the risk manager reasons about: WS live value when connected, else paper. */
-    fun currentBalance(): Double = wsBalance.get() ?: broker.balance
+    /**
+     * The account balance the engine reasons about.
+     *
+     * PAPER: the simulated account ([PaperBroker.balance]).
+     * LIVE:  the exchange balance — the WS push when the feed is up, else the
+     *        last REST refresh. While the exchange has not answered yet it is
+     *        0, NOT the paper balance: a fake baseline would make the daily-loss
+     *        cap fire on the wrong number (and block every entry).
+     */
+    fun currentBalance(): Double = if (live) liveBalanceSnapshot() ?: 0.0 else broker.balance
+
+    /** Exchange balance as display text. Never falls back to the paper account. */
+    fun liveBalanceText(): String {
+        val value = liveBalanceSnapshot()
+        return if (value == null) "unavailable (exchange)" else "${fmt2(value)} USDT (exchange)"
+    }
+
+    /** Balance line whose source is always explicit: paper or exchange. */
+    fun balanceText(): String = if (live) liveBalanceText() else "${fmt2(broker.balance)} USDT (paper)"
+
+    /**
+     * One-line account summary for the UI. In LIVE it reports exchange data only;
+     * the paper balance and paper realized PnL are hidden by design.
+     */
+    fun accountLine(): String = if (live) {
+        val open = feedPositions()
+        val positions = if (open.isEmpty()) "— (feed)" else "${open.size} on the feed"
+        "Balance ${liveBalanceText()} · open $positions"
+    } else {
+        "Balance ${fmt2(broker.balance)} USDT (paper) · realized ${fmt(broker.realizedPnl)} · open ${broker.positions.size}"
+    }
 
     /** UTC day stamp used to reset the daily-loss baseline at midnight UTC. */
     internal fun todayStamp(): String =
@@ -501,22 +641,18 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /**
      * Risk-manager gate evaluated before EVERY new entry. Returns the blocking
-     * reason (also announced as an event) or null when a new entry is allowed.
+     * reason (every caller surfaces it in chat) or null when a new entry is allowed.
      * Order: guard interval → max open positions (paper) → daily loss cap.
      */
     internal fun riskBlock(): String? {
         if (guardIntervalSec > 0 && lastEntryAt > 0) {
             val leftMs = guardIntervalSec * 1000 - (System.currentTimeMillis() - lastEntryAt)
             if (leftMs > 0) {
-                val reason = "Risk manager: guard interval — next entry allowed in ${"%.0f".format(leftMs / 1000.0)}s"
-                onEvent?.invoke(reason)
-                return reason
+                return "Risk manager: guard interval — next entry allowed in ${fmt0(leftMs / 1000.0)}s"
             }
         }
         if (!live && maxOpenPositions > 0 && broker.positions.size >= maxOpenPositions) {
-            val reason = "Risk manager: max open positions ($maxOpenPositions) reached — close one or raise the cap"
-            onEvent?.invoke(reason)
-            return reason
+            return "Risk manager: max open positions ($maxOpenPositions) reached — close one or raise the cap"
         }
         // Daily loss cap: the baseline re-arms when the UTC day rolls over.
         val today = todayStamp()
@@ -527,9 +663,7 @@ class TraderEngine(private val rest: BitunixRest) {
         if (maxDailyLossPct > 0 && dayStartBalance > 0) {
             val drop = (dayStartBalance - currentBalance()) / dayStartBalance * 100.0
             if (drop >= maxDailyLossPct) {
-                val reason = "Risk manager: daily loss cap hit (-${"%.2f".format(drop)}% >= ${"%.0f".format(maxDailyLossPct)}%) — new entries blocked until tomorrow"
-                onEvent?.invoke(reason)
-                return reason
+                return "Risk manager: daily loss cap hit (-${fmt2(drop)}% >= ${fmt0(maxDailyLossPct)}%) — new entries blocked until tomorrow"
             }
         }
         return null
@@ -552,14 +686,15 @@ class TraderEngine(private val rest: BitunixRest) {
         )
         appendLine("  universe (${universe.size}, scanner ${if (scanOn) "on" else "off"}, top $scanTop): ${universe.joinToString(", ")}")
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
-        appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined")
+        appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
-        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${"%.0f".format(risk.trailDistanceRoiPct)}% behind best · initial SL ${"%.0f".format(risk.stopFractionOfLiqPct)}% toward liq")
+        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · initial SL ${fmt0(risk.stopFractionOfLiqPct)}% toward liq")
         appendLine("  risk manager: max open positions $maxOpenPositions · daily loss cap ${offable(maxDailyLossPct)} · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
-            "set min agree <n> · set min tf <pct> · set min conf <pct> · set leverage <n> · set risk <pct> · " +
+            "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
             "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set stop frac <pct> · " +
+            "set tp r <n> (TP = n× the stop distance) · " +
             "set max positions <n> · set daily loss <pct> · set guard <sec>")
     }.trim()
 
@@ -570,16 +705,20 @@ class TraderEngine(private val rest: BitunixRest) {
         for (sym in symbols) {
             // Risk manager: guard interval / max open positions / daily loss cap.
             riskBlock()?.let { out.add(it); break }
-            val perTf = timeframes.associateWith { SignalAggregator.timeframe(candles(sym, it)) }
+            // One kline fetch per timeframe; the price reuses the 15m series
+            // instead of asking the exchange for the very same candles twice.
+            val byTf = timeframes.associateWith { candles(sym, it) }
+            val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
-            val price = candles(sym, SignalAggregator.TIMEFRAMES.first()).last().close
+            val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
+                ?: candles(sym, PRICE_TIMEFRAME).last().close
             if (live) {
                 out.add(openLive(sym, sig.dir, price, sig.confidence) ?: continue)
             } else {
                 if (broker.positions.containsKey(sym)) continue
                 broker.open(sym, sig.dir, price, leverage, risk)?.let {
                     noteEntry()
-                    out.add("OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${"%.0f".format(sig.confidence)}")
+                    out.add("OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}")
                 }
             }
         }
@@ -649,7 +788,7 @@ class TraderEngine(private val rest: BitunixRest) {
         wsLivePrice(symbol)?.let { return it }
         val live = runCatching { rest.lastPrice(symbol) }.getOrNull() ?: 0.0
         if (live > 0) return live
-        return candles(symbol, "15m").lastOrNull()?.close ?: 0.0
+        return candles(symbol, PRICE_TIMEFRAME).lastOrNull()?.close ?: 0.0
     }
 
     /** How the market and the trader's book feel right now (cached for 60s). */
@@ -658,7 +797,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val cached = moodCache
         if (cached != null && now - cached.first < 60_000) return cached.second
         val sym = universe.firstOrNull() ?: "BTCUSDT"
-        val series = runCatching { candles(sym, "15m") }.getOrDefault(emptyList())
+        val series = runCatching { candles(sym, PRICE_TIMEFRAME) }.getOrDefault(emptyList())
         val funding = runCatching {
             rest.fundingRate(sym).optString("fundingRate").toDoubleOrNull()
         }.getOrNull()
@@ -671,6 +810,9 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** Unrealized P&L as a fraction of the margin committed, or null when flat. */
     private fun unrealizedPct(): Double? {
+        // The paper book is not the live book; mixing them would mislabel the
+        // market mood in LIVE mode.
+        if (live) return null
         if (broker.positions.isEmpty()) return null
         val prices = broker.positions.keys.associateWith { symbolPrice(it) }
         val margin = broker.balance * riskFraction * broker.positions.size
@@ -686,6 +828,16 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
     ): String {
+        // Refresh the exchange balance FIRST: order sizing and the daily-loss
+        // gate must use one authoritative number, never the paper account.
+        val available = rest.availableUsdt()
+        exchangeBalance.set(available)
+        exchangeBalanceAt.set(System.currentTimeMillis())
+        val today = todayStamp()
+        if (dayStamp != today || dayStartBalance <= 0.0) {
+            dayStamp = today
+            dayStartBalance = available
+        }
         riskBlock()?.let { return it }
         val livePositions = rest.pendingPositions(symbol)
         for (i in 0 until livePositions.length()) {
@@ -694,7 +846,6 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         val lev = effectiveLeverage(symbol)
-        val available = rest.availableUsdt()
         val margin = available * marginFraction.coerceIn(0.0001, 1.0)
         // TP/SL triggers are LAST_PRICE per project rule, so plan the levels from
         // the signal price; fall back to the mark price when the exchange publishes one.
@@ -724,20 +875,40 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         try {
+            // TP sits tpR × the stop distance away from entry (set tp r <n>).
+            // Previously the FIRST ladder rung (1R) was attached — a very short TP.
+            val rDist = kotlin.math.abs(triggerBasis - plan.stop).coerceAtLeast(1e-12)
+            val tp = if (dir > 0) triggerBasis + tpR * rDist else triggerBasis - tpR * rDist
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
-                tpPrice = formatPrice(symbol, plan.ladder.first().first),
+                tpPrice = formatPrice(symbol, tp),
                 slPrice = formatPrice(symbol, plan.stop),
                 reduceOnly = false,
             )
             val orderId = order.optString("orderId")
             val status = waitForFill(orderId)
-            val conf = if (confidence != null) " conf ${"%.0f".format(confidence)}" else ""
-            noteEntry()
-            return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                "| order $orderId $status"
+            val conf = if (confidence != null) " conf ${fmt0(confidence)}" else ""
+            if (status == "FILLED" || status == "PART_FILLED") {
+                noteEntry()
+                return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
+                    "| order $orderId $status"
+            }
+            // Accepted but never filled (min qty, insufficient margin, TP/SL
+            // rejected — the exchange cancels right after placement). The old code
+            // armed the guard interval HERE, locking entries out for 5 minutes
+            // after every dead order — the "no trades ever" spiral. Surface why.
+            val line = "LIVE OPEN FAILED $symbol: order ${orderId.ifBlank { "?" }} ended $status"
+            onEvent?.invoke(line)
+            return line
         } catch (e: BitunixApiException) {
-            return "LIVE ERROR $symbol: ${e.message}"
+            val line = "LIVE ERROR $symbol: ${e.message}"
+            onEvent?.invoke(line)
+            return line
+        } catch (e: Exception) {
+            // Retryable/network paths that outlive the API-internal retries.
+            val line = "LIVE ERROR $symbol: ${e.message ?: e.javaClass.simpleName}"
+            onEvent?.invoke(line)
+            return line
         }
     }
 
@@ -760,6 +931,10 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Live account snapshot: balance, open positions, per-symbol settings, pending orders. */
     fun liveStatus(): String = try {
         val bal = rest.account()
+        parseBalance(bal)?.let {
+            exchangeBalance.set(it)
+            exchangeBalanceAt.set(System.currentTimeMillis())
+        }
         val positions = rest.pendingPositions()
         val orders = rest.pendingOrders(limit = 5)
         val syms = (0 until positions.length())
@@ -773,7 +948,8 @@ class TraderEngine(private val rest: BitunixRest) {
             if (sym.isNotBlank()) bySymbol[sym] = p
         }
         buildString {
-            appendLine("Account: available ${bal.optString("available")} USDT, margin ${bal.optString("margin")}")
+            val available = parseBalance(bal)
+            appendLine("Account: available ${available?.let { fmt2(it) } ?: "?"} USDT, margin ${bal.optString("margin")}")
             val feed = feedPositions()
             if (feed.isNotEmpty()) appendLine("Feed: live feed tracking ${feed.joinToString(", ")}")
             appendLine("Open positions: ${positions.length()}")
@@ -809,17 +985,23 @@ class TraderEngine(private val rest: BitunixRest) {
             appendLine("Pending orders: ${orders.length()}")
         }
     } catch (e: Exception) {
-        "Live status failed: ${e.message ?: e.javaClass.simpleName} (check Bitunix keys)"
+        val cached = liveBalanceSnapshot()
+        val suffix = if (cached != null) " Last exchange balance: ${fmt2(cached)} USDT." else ""
+        "Live status failed: ${e.message ?: e.javaClass.simpleName} (check Bitunix keys)$suffix"
     }
 
     /** Manages open positions against current prices. */
     fun tick(): List<String> {
         val events = mutableListOf<String>()
-        for (sym in broker.positions.keys.toList()) {
-            val price = candles(sym, "15m").lastOrNull()?.close ?: continue
-            events.addAll(broker.manage(sym, price, risk))
-        }
-        if (live) events.addAll(manageLiveStops())
+        // The paper book is only managed in PAPER mode. In LIVE it must not
+        // produce "breakeven"/"close" events for positions that do not exist
+        // on the exchange.
+        if (!live) {
+            for (sym in broker.positions.keys.toList()) {
+                val price = candles(sym, PRICE_TIMEFRAME).lastOrNull()?.close ?: continue
+                events.addAll(broker.manage(sym, price, risk))
+            }
+        } else events.addAll(manageLiveStops())
         return events
     }
 
@@ -835,6 +1017,53 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.pendingPositions()
         } catch (_: Exception) {
             return events // transient feed/API hiccup — retry on the next tick
+        }
+        // Announce opens/closes by diffing the exchange snapshot against the last
+        // tick. This is REST-authoritative: it works even when the WS pushes are
+        // missing, which is what the user kept reporting ("asan elam nemikone").
+        val nowSeen = HashMap<String, String>()
+        for (i in 0 until positions.length()) {
+            val p = positions.getJSONObject(i)
+            val sym = p.optString("symbol")
+            val side = p.optString("side").uppercase()
+            val qty = posQty(p)
+            if (sym.isNotBlank()) nowSeen[sym] = "$side|$qty"
+        }
+        for ((sym, fp) in nowSeen) {
+            if (seenLive.put(sym, fp) == null) {
+                val p = (0 until positions.length()).firstOrNull {
+                    positions.getJSONObject(it).optString("symbol") == sym
+                }?.let { positions.getJSONObject(it) }
+                val entry = p?.let { posEntry(it).toDoubleOrNull() } ?: 0.0
+                val side = fp.substringBefore('|')
+                val qty = fp.substringAfter('|')
+                events.add(
+                    "POSITION OPENED $sym $side qty $qty" +
+                        (if (entry > 0) " @ ${fmt(entry)}" else "")
+                )
+            }
+        }
+        // Collect the closed symbols first: the maps are read while they are
+        // iterated, so removing inside the loop would be a concurrent mutation.
+        val closedSymbols = seenLive.keys.filter { it !in nowSeen }
+        for (sym in closedSymbols) {
+            seenLive.remove(sym)
+            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym)
+            // Pull the net result from history so the user immediately sees the PnL.
+            val net = runCatching {
+                val h = rest.historyPositions(sym, limit = 1)
+                if (h.length() > 0) {
+                    val p = h.getJSONObject(0)
+                    netPositionPnl(
+                        p.optString("realizedPNL").toDoubleOrNull() ?: 0.0,
+                        p.optString("fee").toDoubleOrNull() ?: 0.0,
+                        p.optString("funding").toDoubleOrNull() ?: 0.0,
+                    )
+                } else null
+            }.getOrNull()
+            events.add(
+                "POSITION CLOSED $sym" + (if (net != null) " — net ${fmt(net)} USDT" else "")
+            )
         }
         val openSymbols = mutableSetOf<String>()
         for (i in 0 until positions.length()) {
@@ -890,13 +1119,13 @@ class TraderEngine(private val rest: BitunixRest) {
                 applyLiveSl(sym, positionId, trail, "Trailing", roi, events)
             }
         }
-        // Forget state for positions that closed.
-        for (sym in liveBest.keys) {
-            if (sym !in openSymbols) {
-                liveBest.remove(sym)
-                liveLastStop.remove(sym)
-                liveBreakevenDone.remove(sym)
-            }
+        // Forget state for positions that closed (collect first, then remove —
+        // the map is being iterated).
+        val staleSymbols = liveBest.keys.filter { it !in openSymbols }
+        for (sym in staleSymbols) {
+            liveBest.remove(sym)
+            liveLastStop.remove(sym)
+            liveBreakevenDone.remove(sym)
         }
         return events
     }
@@ -913,7 +1142,7 @@ class TraderEngine(private val rest: BitunixRest) {
         try {
             rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
             liveLastStop[sym] = sl
-            events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${"%.1f".format(roi * 100)}%)")
+            events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
         } catch (e: Exception) {
             events.add("Risk manager: SL move on $sym failed — ${e.message ?: e.javaClass.simpleName}")
         }
@@ -923,14 +1152,19 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("Engine: ${if (engineOn) "on" else "off"}, trading: ${if (trading) "on" else "off"}, scan: ${if (scanOn) "on" else "off"}")
         appendLine("Mode: ${if (live) "LIVE" else "PAPER"}, leverage $leverage${if (live) "x (clamped per symbol)" else "x"}, margin $marginMode, position $positionMode")
         if (live) {
-            appendLine("Balance (exchange): see 'balance'. Open positions (exchange): see 'positions'.")
+            appendLine("Balance: ${balanceText()}")
+            appendLine(
+                "Open positions (exchange): " +
+                    if (liveFeedOn) "${feedPositions().size} on the feed" else "feed off — use 'positions'",
+            )
         } else {
             appendLine("Balance: ${fmt(broker.balance)} USDT, open positions: ${broker.positions.size}")
         }
     }
 
     fun pnl(): String =
-        "Realized PnL: ${fmt(broker.realizedPnl)} USDT. Balance: ${fmt(broker.balance)} USDT."
+        "PAPER (demo) — Realized PnL: ${fmt(broker.realizedPnl)} USDT, balance ${fmt(broker.balance)} USDT." +
+            " This is the simulated account; your real Bitunix balance is separate."
 
     fun closePosition(symbol: String): String {
         if (live) {
@@ -945,7 +1179,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 "Close failed: ${e.message ?: e.javaClass.simpleName}"
             }
         }
-        val price = candles(symbol, "15m").lastOrNull()?.close ?: return "No price for $symbol."
+        val price = candles(symbol, PRICE_TIMEFRAME).lastOrNull()?.close ?: return "No price for $symbol."
         return broker.close(symbol, price) ?: "No open position on $symbol."
     }
 
@@ -964,10 +1198,13 @@ class TraderEngine(private val rest: BitunixRest) {
             Triple(o.optString("symbol"), rate, o.optLong("nextFundingTime"))
         }
         if (rows.isEmpty()) return "No funding data."
-        val fmtTime = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.US)
+        val fmtTime = java.text.SimpleDateFormat("MM-dd HH:mm", Locale.US)
         val body = rows.sortedByDescending { kotlin.math.abs(it.second) }.take(top)
             .joinToString("\n") { (sym, rate, next) ->
-                "%-10s %s %.4f%%  %s  next %s".format(
+                // Locale.US keeps the decimal separator a dot on every device.
+                String.format(
+                    Locale.US,
+                    "%-10s %s %.4f%%  %s  next %s",
                     sym,
                     if (rate >= 0) "▲" else "▼",
                     rate * 100,
@@ -986,10 +1223,18 @@ class TraderEngine(private val rest: BitunixRest) {
             try {
                 if (!trading) return@scheduleWithFixedDelay
                 val events = tick() + scanOnce()
+                // A successful poll means the exchange is reachable again, so a
+                // stale DNS failure must not keep showing in /diagnose.
+                EngineRuntimeError.clear()
                 events.forEach(onEvent)
             } catch (e: Exception) {
-                AgentRuntimeError.last = "Loop: ${e.message ?: e.javaClass.simpleName}"
-                onEvent("Loop error: ${e.message ?: e.javaClass.simpleName}")
+                // Exchange/network failures are engine errors, never provider
+                // errors. Writing them to AgentRuntimeError made /diagnose blame
+                // the LLM and suggest switching models during a DNS outage.
+                val friendly = NetworkErrors.describe(NetworkErrors.rawMessage(e), intervalSec)
+                if (EngineRuntimeError.record(friendly)) {
+                    onEvent("Loop error: $friendly")
+                }
             }
         }, intervalSec, intervalSec, TimeUnit.SECONDS)
         startReport()
@@ -1004,8 +1249,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     formatSignalBoard(signalBoard(maxAgeMs = 0).take(3), gates())
                 }.getOrElse { "signals unavailable" }
                 onEvent?.invoke(
-                    "Periodic report: balance ${fmt(broker.balance)} USDT, positions ${broker.positions.size}, " +
-                        "realized ${fmt(broker.realizedPnl)} USDT\n$signals"
+                    "Periodic report: ${accountLine()}\n$signals"
                 )
             } catch (_: Exception) {
             }
@@ -1034,7 +1278,10 @@ class TraderEngine(private val rest: BitunixRest) {
     fun handle(text: String): String {
         val t = text.trim().lowercase()
         return when {
-            t.startsWith("engine on") -> { engineOn = true; "Engine on (paper mode)." }
+            t.startsWith("engine on") -> {
+                engineOn = true
+                "Engine on (${if (live) "LIVE" else "paper"} mode)."
+            }
             t.startsWith("engine off") -> { engineOn = false; trading = false; stopLoop(); "Engine off." }
             t.startsWith("start trading") -> when {
                 !engineOn -> "Turn the engine on first: engine on"
@@ -1047,11 +1294,20 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("scan on") -> { scanOn = true; "Scanner on: ranking the top symbols by volume." }
             t.startsWith("scan off") -> { scanOn = false; "Scanner off: using the fixed universe." }
             t.startsWith("status") -> status()
-            t.startsWith("balance") -> if (live) liveStatus().lines().firstOrNull() ?: "Account unavailable." else pnl()
+            t.startsWith("balance") -> if (live) {
+                val balance = refreshLiveBalance()
+                if (balance == null) {
+                    "Exchange balance unavailable — check Bitunix keys/network. (Paper balance is never used in LIVE.)"
+                } else "Account (exchange): available ${fmt2(balance)} USDT"
+            } else pnl()
             t.startsWith("positions history") -> if (live) {
                 try {
                     val arr = rest.historyPositions(limit = 10)
-                    if (arr.length() == 0) "No closed positions yet."
+                    if (arr.length() == 0) {
+                        val open = runCatching { rest.pendingPositions().length() }.getOrDefault(-1)
+                        "No closed positions yet — history fills only after a trade opens AND closes." +
+                            (if (open > 0) " Open now: $open." else if (open == 0) " Nothing open right now." else "")
+                    }
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val p = arr.getJSONObject(i)
                         val realized = p.optString("realizedPNL").toDoubleOrNull() ?: 0.0
@@ -1069,7 +1325,9 @@ class TraderEngine(private val rest: BitunixRest) {
                 else broker.positions.values.joinToString("\n") { p ->
                     "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} qty ${fmt(p.qty)} entry ${fmt(p.entry)} stop ${fmt(p.stop)}"
                 })
-            t.startsWith("trades_history") -> tradesHistory()
+            t.startsWith("trades_history") -> if (live) {
+                "LIVE mode: use 'history orders' or 'positions history' for exchange fills. The paper trade log is not shown in LIVE."
+            } else tradesHistory()
             t.startsWith("orders") -> if (live) {
                 try {
                     val arr = rest.pendingOrders(limit = 10)
@@ -1082,9 +1340,9 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Orders failed: ${e.message}"
                 }
             } else "Paper mode: orders are simulated instantly."
-            t.startsWith("tpsl_history") -> "TP/SL plan: initial stop ${"%.0f".format(risk.stopFractionOfLiqPct)}% toward liquidation, " +
-                "ladder 1R..4R each 25%, breakeven ${if (risk.breakevenRoiPct > 0) "at ${"%.0f".format(risk.breakevenRoiPct)}% ROI" else "off"}, " +
-                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${"%.0f".format(risk.trailingTriggerRoiPct)}% ROI, ${"%.0f".format(risk.trailDistanceRoiPct)}% behind" else "off"}."
+            t.startsWith("tpsl_history") -> "TP/SL plan: initial stop ${fmt0(risk.stopFractionOfLiqPct)}% toward liquidation, " +
+                "ladder 1R..4R each 25%, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             t.startsWith("tiers") -> {
                 val sym = t.removePrefix("tiers").trim().uppercase().ifEmpty { "BTCUSDT" }
                 try {
@@ -1100,7 +1358,13 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("tpsl") -> if (live) {
-                try {
+                val fromWs = feedTpSl()
+                if (liveFeedOn && fromWs.isNotEmpty()) {
+                    "TP/SL (live WS, ${fromWs.size} events):\n" + fromWs.joinToString("\n") { o ->
+                        "${o.optString("symbol")} ${o.optString("event")} ${o.optString("status")} " +
+                            "tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} id ${o.optString("orderId")}"
+                    }
+                } else try {
                     val arr = rest.pendingTpSlOrders(limit = 10)
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
@@ -1111,7 +1375,18 @@ class TraderEngine(private val rest: BitunixRest) {
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
                 }
-            } else "Paper mode: TP/SL orders are simulated."
+            } else if (broker.positions.isEmpty()) "No open paper positions, so no TP/SL plan yet."
+            else broker.positions.values.joinToString("\n") { p ->
+                val ladder = p.plan.ladder.mapIndexed { i, (price, frac) ->
+                    val state = if (i < p.nextRung) "hit" else "open"
+                    "${i + 1}R ${fmt(price)} (${fmt0(frac * 100)}%, $state)"
+                }.joinToString(", ")
+                "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} entry ${fmt(p.entry)} " +
+                    "stop ${fmt(p.stop)} liq ${fmt(p.plan.liquidation)}\n" +
+                    "  TP ladder: $ladder\n" +
+                    "  breakeven ${if (p.breakeven) "done" else "pending"}, " +
+                    "paper TP/SL is simulated locally"
+            }
             t.startsWith("history orders") -> if (live) {
                 try {
                     val arr = rest.historyOrders(limit = 10)
@@ -1134,7 +1409,9 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Cancel failed: ${e.message}"
                 }
             } else "Paper mode: nothing to cancel."
-            t.startsWith("pnl") -> pnl()
+            t.startsWith("pnl") -> if (live) {
+                "LIVE mode: realized PnL is on the exchange — use 'positions history'. The paper account is not in use."
+            } else pnl()
             t.startsWith("funding") -> try {
                 fundingSummary(rest.fundingRateBatch())
             } catch (e: Exception) {
@@ -1190,7 +1467,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     risk = risk.copy(breakevenRoiPct = v)
                     configRev++
-                    "Breakeven ${if (v > 0) "at ${"%.0f".format(v)}% ROI — SL moves to entry" else "off"}."
+                    "Breakeven ${if (v > 0) "at ${fmt0(v)}% ROI — SL moves to entry" else "off"}."
                 }
             }
             t.startsWith("set trail trigger") -> {
@@ -1199,7 +1476,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     risk = risk.copy(trailingTriggerRoiPct = v)
                     configRev++
-                    "Trailing trigger ${if (v > 0) "at ${"%.0f".format(v)}% ROI" else "off"}."
+                    "Trailing trigger ${if (v > 0) "at ${fmt0(v)}% ROI" else "off"}."
                 }
             }
             t.startsWith("set trail distance") -> {
@@ -1208,7 +1485,18 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     risk = risk.copy(trailDistanceRoiPct = v)
                     configRev++
-                    "Trailing distance set to ${"%.0f".format(v)}% ROI behind the best price."
+                    "Trailing distance set to ${fmt0(v)}% ROI behind the best price."
+                }
+            }
+            t.startsWith("set tp r") || t.startsWith("set tp ") -> {
+                val v = t.removePrefix("set tp r").removePrefix("set tp")
+                    .trim().removePrefix("r").trim().toDoubleOrNull()
+                if (v == null || v < 0.5 || v > 20.0) "Usage: set tp r <0.5-20> (TP = n× the stop distance; 1 = at the SL, 3 = 3× farther)"
+                else {
+                    tpR = v
+                    configRev++
+                    val slPct = risk.stopFractionOfLiqPct
+                    "TP set to ${v}× the stop distance (SL is ${fmt0(slPct)}% toward liquidation)."
                 }
             }
             t.startsWith("set stop frac") -> {
@@ -1217,7 +1505,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     risk = risk.copy(stopFractionOfLiqPct = v)
                     configRev++
-                    "Initial stop set to ${"%.0f".format(v)}% of the way to liquidation."
+                    "Initial stop set to ${fmt0(v)}% of the way to liquidation."
                 }
             }
             t.startsWith("set max positions") -> {
@@ -1235,7 +1523,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     maxDailyLossPct = v
                     configRev++
-                    "Daily loss cap ${if (v > 0) "set to ${"%.0f".format(v)}% — entries blocked beyond it" else "off"}."
+                    "Daily loss cap ${if (v > 0) "set to ${fmt0(v)}% — entries blocked beyond it" else "off"}."
                 }
             }
             t.startsWith("set guard") -> {
@@ -1312,6 +1600,17 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Gate set: combined confidence must be ${v.toInt()}%."
                 }
             }
+            t.startsWith("set tf agree") -> {
+                val v = t.removePrefix("set tf agree").trim().toIntOrNull()
+                if (v == null || v !in 1..timeframes.size)
+                    "Usage: set tf agree <1-${timeframes.size}> (how many timeframes must share one side)"
+                else {
+                    minSideTfs = v
+                    signalCacheAt = 0
+                    configRev++
+                    "Gate set: $v of ${timeframes.size} timeframes must share one side."
+                }
+            }
             t.startsWith("settings trade") -> settingsTradeText()
             t.startsWith("scan once") -> {
                 val out = scanOnce()
@@ -1323,6 +1622,12 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     companion object {
+        /**
+         * The timeframe the engine takes its entry price and its mid-management
+         * marks from (the default first timeframe of [SignalAggregator.TIMEFRAMES]).
+         */
+        val PRICE_TIMEFRAME: String = SignalAggregator.TIMEFRAMES.first()
+
         /**
          * Upper bound for the leverage slider and the `set leverage` command.
          * Bitunix publishes no account-wide maximum in the docs; the authority is

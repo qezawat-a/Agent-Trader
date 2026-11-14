@@ -30,6 +30,8 @@ object CommandRouter {
         "/check_system" to "Check the trader engine, scanner and agent code",
         "/autopsy" to "Analyse the last failure step by step",
         "/diagnose" to "Collect logs and diagnostics for an issue",
+        "/repair" to "Apply the safe automatic repairs",
+        "/ws on|off|status" to "Connect or disconnect the Bitunix private WebSocket feed",
     )
 
     sealed class Parsed {
@@ -55,6 +57,10 @@ object CommandRouter {
         "set breakeven", "set trail trigger", "set trail distance",
         "set stop frac", "set stop fraction",
         "set max positions", "set maxpos", "set daily loss", "set guard",
+        // v2.2.x TP distance + majority-side gate — both engine commands, both were
+        // missing here, so they fell through to the LLM and never changed anything.
+        // Note: the router matches lower-cased text, so "set tpR" is spelled "set tp r".
+        "set tp r", "set tp ", "set tf agree",
     )
 
     fun parse(input: String): Parsed {

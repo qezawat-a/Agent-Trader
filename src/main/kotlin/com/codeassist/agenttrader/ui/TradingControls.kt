@@ -16,33 +16,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DateRange
-import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.Done
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Face
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Menu
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
@@ -62,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -73,7 +57,9 @@ import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.trader.MarketMood
 import com.codeassist.agenttrader.trader.SignalRow
 import com.codeassist.agenttrader.trader.TraderEngine
-import com.codeassist.agenttrader.trader.fmt
+import com.codeassist.agenttrader.util.fmt
+import com.codeassist.agenttrader.util.fmt0
+import com.codeassist.agenttrader.util.fmt2
 
 /** Where the app is right now — the top-level navigation. */
 enum class AppScreen { CHAT, TRADE, SIGNALS, CONTROL, SETTINGS }
@@ -142,6 +128,15 @@ fun ControlScreen(
     var risk by remember(engine.configRev) { mutableStateOf((engine.riskFraction * 100).toFloat()) }
     var reportMin by remember(engine.configRev) { mutableStateOf(engine.reportIntervalMin.toFloat()) }
     val scheme = MaterialTheme.colorScheme
+    // Poll the engine's own summary: in LIVE it reads the exchange balance, in
+    // PAPER the simulated one. Reading broker.balance here was the bug that made
+    // LIVE show the paper account.
+    val accountLine by produceState(initialValue = engine.accountLine(), engine, engine.live) {
+        while (true) {
+            value = engine.accountLine()
+            kotlinx.coroutines.delay(2_000)
+        }
+    }
 
     LazyColumn(
         modifier.fillMaxWidth(),
@@ -164,8 +159,7 @@ fun ControlScreen(
                         )
                     }
                     Text(
-                        "Balance ${"%.2f".format(engine.broker.balance)} USDT · realized ${fmt(engine.broker.realizedPnl)} · " +
-                            "open ${engine.broker.positions.size}",
+                        accountLine,
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onSurfaceVariant,
                     )
@@ -502,7 +496,7 @@ fun SignalsScreen(
                             else -> "—"
                         }
                         Text(
-                            "${e.timeframe}: $side · ${e.agreeing} votes · ${"%.0f".format(e.confidence)}%",
+                            "${e.timeframe}: $side · ${e.agreeing} votes · ${fmt0(e.confidence)}%",
                             style = MaterialTheme.typography.bodySmall,
                             color = if (e.dir == 0) scheme.onSurfaceVariant else color,
                         )
@@ -569,6 +563,13 @@ fun TradeScreen(
     var sizePct by remember { mutableStateOf((engine.riskFraction * 100).toFloat()) }
     var price by remember { mutableStateOf(0.0) }
     val scheme = MaterialTheme.colorScheme
+    // LIVE must list exchange positions, not the paper book.
+    val livePositions by produceState(initialValue = engine.feedPositions(), engine, engine.live) {
+        while (engine.live) {
+            value = engine.feedPositions()
+            kotlinx.coroutines.delay(2_000)
+        }
+    }
     val symbols = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
 
     LazyColumn(
@@ -603,7 +604,7 @@ fun TradeScreen(
                         }) {
                             Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text(if (price > 0) "%.2f".format(price) else "Price")
+                            Text(if (price > 0) fmt2(price) else "Price")
                         }
                     }
                     Spacer(Modifier.height(6.dp))
@@ -659,7 +660,42 @@ fun TradeScreen(
             Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
                 Column(Modifier.padding(14.dp)) {
                     Text("Open positions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    if (engine.broker.positions.isEmpty()) {
+                    if (engine.live) {
+                        if (livePositions.isEmpty()) {
+                            Text(
+                                "No live positions on the private feed " +
+                                    "(${if (engine.liveFeedOn) "feed connected" else "feed off"}). " +
+                                    "Use Positions for the exchange snapshot.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = scheme.onSurfaceVariant,
+                            )
+                        } else {
+                            livePositions.forEach { sym ->
+                                Row(
+                                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            sym,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                        )
+                                        Text(
+                                            "live on the exchange — use Positions for qty/entry/stop",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = scheme.onSurfaceVariant,
+                                        )
+                                    }
+                                    AssistChip(
+                                        onClick = { onClose(sym) },
+                                        label = { Text("Close") },
+                                        leadingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) },
+                                    )
+                                }
+                            }
+                        }
+                    } else if (engine.broker.positions.isEmpty()) {
                         Text(
                             "No open positions.",
                             style = MaterialTheme.typography.bodySmall,

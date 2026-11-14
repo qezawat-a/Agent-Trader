@@ -11,13 +11,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.core.app.ActivityCompat
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,7 +24,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -37,9 +35,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
@@ -72,27 +70,32 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.codeassist.agenttrader.agent.AgentBrain
 import com.codeassist.agenttrader.agent.AgentConfig
 import com.codeassist.agenttrader.agent.CommandRouter
 import com.codeassist.agenttrader.agent.ModelClient
 import com.codeassist.agenttrader.agent.SelfRepair
 import com.codeassist.agenttrader.bitunix.BitunixRest
-import com.codeassist.agenttrader.trader.AgentRuntimeError
-import com.codeassist.agenttrader.trader.TraderEngine
-import com.codeassist.agenttrader.trader.fmt
-import com.codeassist.agenttrader.ui.AppScreen
-import com.codeassist.agenttrader.ui.TraderTheme
-import com.codeassist.agenttrader.ui.ControlScreen
 import com.codeassist.agenttrader.notify.Notifier
 import com.codeassist.agenttrader.notify.notifiable
 import com.codeassist.agenttrader.notify.notificationTitle
+import com.codeassist.agenttrader.trader.AgentRuntimeError
+import com.codeassist.agenttrader.trader.EngineRuntimeError
+import com.codeassist.agenttrader.trader.MarketMood
+import com.codeassist.agenttrader.trader.NetworkErrors
 import com.codeassist.agenttrader.trader.SignalRow
+import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.trader.parseSymbolsCsv
 import com.codeassist.agenttrader.trader.parseTimeframesCsv
-import com.codeassist.agenttrader.ui.StatusPill
+import com.codeassist.agenttrader.ui.AppScreen
+import com.codeassist.agenttrader.ui.ControlScreen
 import com.codeassist.agenttrader.ui.SignalsScreen
+import com.codeassist.agenttrader.ui.StatusPill
 import com.codeassist.agenttrader.ui.TradeScreen
+import com.codeassist.agenttrader.ui.TraderTheme
+import com.codeassist.agenttrader.util.fmt
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -116,8 +119,8 @@ private data class ChatMsg(val text: String, val isUser: Boolean, val time: Stri
 /** What the app can do — injected into the brain so it can guide the user accurately. */
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
-Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-21>, set min tf <1-100>, set min conf <1-100>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <n>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
+Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn /ws on|off
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
 
@@ -184,7 +187,7 @@ fun AgentApp(
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
-    var mood by remember { mutableStateOf<com.codeassist.agenttrader.trader.MarketMood?>(null) }
+    var mood by remember { mutableStateOf<MarketMood?>(null) }
     var settingsMsg by remember { mutableStateOf("") }
     var signalRows by remember { mutableStateOf<List<SignalRow>>(emptyList()) }
     var signalsLoading by remember { mutableStateOf(false) }
@@ -295,6 +298,9 @@ fun AgentApp(
         // The feed follows the mode immediately (config changes do not recompose).
         if (on && config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank()) {
             engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+            // Prime the exchange balance right away: until it arrives the UI
+            // shows "unavailable (exchange)", never the paper account.
+            Thread { runCatching { engine.refreshLiveBalance() } }.apply { isDaemon = true }.start()
         } else {
             engine.stopLiveFeed()
         }
@@ -321,8 +327,9 @@ fun AgentApp(
                 loopRunning = engine.isLoopRunning,
                 feedConnected = engine.liveFeedOn,
                 bitunixKeysPresent = config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
-                openPositions = engine.broker.positions.size,
+                openPositions = if (engine.live) engine.feedPositions().size else engine.broker.positions.size,
                 leverage = engine.leverage,
+                lastError = EngineRuntimeError.last,
             ),
         )
         return "Diagnosis [${d.worst}]:\n" + d.summary()
@@ -337,7 +344,9 @@ fun AgentApp(
             SelfRepair.EngineState(
                 engine.live, engine.engineOn, engine.trading, engine.isLoopRunning, engine.liveFeedOn,
                 config.bitunixApiKey.isNotBlank() && config.bitunixSecret.isNotBlank(),
-                engine.broker.positions.size, engine.leverage,
+                if (engine.live) engine.feedPositions().size else engine.broker.positions.size,
+                engine.leverage,
+                lastError = EngineRuntimeError.last,
             ),
         )
         val applied = SelfRepair.applyAutoFixes(d) { action ->
@@ -382,15 +391,23 @@ fun AgentApp(
     }
 
     /** Live context handed to the LLM so it can reason with real numbers. */
-    fun liveContext(moodSnapshot: com.codeassist.agenttrader.trader.MarketMood? = mood): String =
+    fun liveContext(moodSnapshot: MarketMood? = mood): String =
         AgentBrain.buildContext(
         mode = if (engine.live) "LIVE" else "PAPER",
-        balance = "${"%.2f".format(engine.broker.balance)} USDT",
-        positionsSummary = engine.broker.positions.entries.joinToString(", ") {
-            "${it.key} ${if (it.value.dir > 0) "LONG" else "SHORT"} qty ${fmt(it.value.qty)} @ ${fmt(it.value.entry)}"
-        }.ifEmpty { "none" },
+        // LIVE must never hand the model the simulated balance — it would
+        // confidently quote a paper number as the real account.
+        balance = engine.balanceText(),
+        positionsSummary = if (engine.live) {
+            engine.feedPositions().joinToString(", ")
+                .ifEmpty { "none on the private feed — use <tool>positions</tool>" }
+        } else {
+            engine.broker.positions.entries.joinToString(", ") {
+                "${it.key} ${if (it.value.dir > 0) "LONG" else "SHORT"} qty ${fmt(it.value.qty)} @ ${fmt(it.value.entry)}"
+            }.ifEmpty { "none" }
+        },
         moodLine = moodSnapshot?.summary() ?: "",
-        fundingLine = engine.broker.positions.size.toString().let { "" },
+        // Funding needs a REST round-trip, so it is left out here instead of
+        // faked — the agent asks for it with <tool>funding</tool> when it matters.
         extra = "Config: ${engine.configLine()} · Signals: " + engine.signalsBrief().ifBlank { "not evaluated yet" },
     )
 
@@ -434,6 +451,17 @@ fun AgentApp(
                 })
             }
             m.start()
+            kotlinx.coroutines.delay(30_000)
+        }
+    }
+
+    // LIVE account balance: refresh from the exchange every 30s (off the UI thread).
+    // The Control/Trade screens poll accountLine(), so the value shows up within 2s.
+    LaunchedEffect(engineVersion, engine.live) {
+        while (engine.live) {
+            val t = Thread { runCatching { engine.refreshLiveBalanceIfStale(30_000) } }
+            t.isDaemon = true
+            t.start()
             kotlinx.coroutines.delay(30_000)
         }
     }
@@ -605,8 +633,7 @@ fun AgentApp(
                 "/check_system" -> say(
                     "Engine: ${if (engine.engineOn) "on" else "off"}, trading: ${if (engine.trading) "on" else "off"}, scan: ${if (engine.scanOn) "on" else "off"}\n" +
                     "Mode: ${if (engine.live) "LIVE" else "PAPER"}, leverage ${engine.leverage}x, margin ${engine.marginMode}, position ${engine.positionMode}\n" +
-                    "Loop: ${if (engine.isLoopRunning) "running" else "stopped"}, open positions: ${engine.broker.positions.size}, " +
-                    "balance: ${"%.2f".format(engine.broker.balance)} USDT"
+                    "Loop: ${if (engine.isLoopRunning) "running" else "stopped"}, ${engine.accountLine()}"
                 )
                 "/add_mcp" -> {
                     val parts = parsed.args.split(" ", limit = 2)
@@ -692,21 +719,60 @@ fun AgentApp(
                     say(
                         "Verify summary:\n" +
                         "- Compile: ok (module compiles cleanly, 0 diagnostics)\n" +
-                        "- Engine: ${if (engine.engineOn) "on" else "off"}, mode ${if (engine.live) "LIVE" else "PAPER"}, balance ${"%.2f".format(engine.broker.balance)} USDT\n" +
-                        "- Open positions: ${engine.broker.positions.size}, realized PnL: ${"%.4f".format(engine.broker.realizedPnl)}\n" +
-                        "- Last error: ${com.codeassist.agenttrader.trader.AgentRuntimeError.last.ifBlank { "none" }}"
+                        "- Engine: ${if (engine.engineOn) "on" else "off"}, mode ${if (engine.live) "LIVE" else "PAPER"}, balance ${engine.balanceText()}\n" +
+                        (if (engine.live) {
+                            "- Positions: ${engine.feedPositions().size} on the private feed (use 'positions' for the exchange snapshot)\n"
+                        } else {
+                            "- Open positions: ${engine.broker.positions.size}, realized PnL: ${fmt(engine.broker.realizedPnl)}\n"
+                        }) +
+                        "- Last error (provider): ${AgentRuntimeError.last.ifBlank { "none" }}" +
+                        (if (EngineRuntimeError.last.isNotBlank())
+                            "\n- Last error (engine): ${EngineRuntimeError.last}" else "")
                     )
                 }
                 "/autopsy" -> {
-                    val err = com.codeassist.agenttrader.trader.AgentRuntimeError.last
-                    if (err.isBlank()) {
+                    val providerErr = AgentRuntimeError.last
+                    val engineErr = EngineRuntimeError.last
+                    val entries = mutableListOf<String>()
+                    if (providerErr.isNotBlank()) entries += "Captured error (provider): $providerErr"
+                    if (engineErr.isNotBlank()) entries += "Captured error (engine): $engineErr"
+                    if (entries.isEmpty()) {
                         say("No recorded failure to analyse. Errors during async work are stored automatically (see /diagnose).")
                     } else {
+                        val engineOnly = providerErr.isBlank() && engineErr.isNotBlank()
+                        val stage = when {
+                            engineOnly && NetworkErrors.isNetwork(engineErr) -> "exchange/network (Bitunix unreachable)"
+                            entries.any { it.contains("HTTP") } -> "network/API call"
+                            entries.any { it.contains("Exception") } -> "logic/exception"
+                            else -> "unknown"
+                        }
+                        val action = if (stage.startsWith("exchange/network")) {
+                            "This is a connectivity problem, not a model problem. Check Wi-Fi/mobile data; the loop retries automatically."
+                        } else {
+                            "Check provider/keys, retry the operation, or review the trace above."
+                        }
                         say(
                             "Autopsy of last failure:\n" +
-                            "1. Captured error: $err\n" +
-                            "2. Likely stage: ${if (err.contains("HTTP")) "network/API call" else if (err.contains("Exception")) "logic/exception" else "unknown"}\n" +
-                            "3. Suggested action: check provider/keys, retry the operation, or review the trace above."
+                            entries.mapIndexed { i, line -> "${i + 1}. $line" }.joinToString("\n") +
+                            "\n${entries.size + 1}. Likely stage: $stage\n" +
+                            "${entries.size + 2}. Suggested action: $action"
+                        )
+                    }
+                }
+                "/ws" -> {
+                    when (parsed.args.trim().lowercase()) {
+                        "on" -> say(
+                            if (config.bitunixApiKey.isBlank() || config.bitunixSecret.isBlank())
+                                "WS needs Bitunix API keys — add them in Settings first."
+                            else engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+                        )
+                        "off" -> {
+                            engine.stopLiveFeed()
+                            say("WS feed disconnected.")
+                        }
+                        else -> say(
+                            "WS feed: ${if (engine.liveFeedOn) "connected" else "off"}. " +
+                                "Usage: /ws on | /ws off"
                         )
                     }
                 }
@@ -779,7 +845,7 @@ fun AgentApp(
             ) {
                 if (screen != AppScreen.CHAT) {
                     IconButton(onClick = { screen = AppScreen.CHAT }) {
-                        Icon(Icons.Default.ArrowBack, "Back", tint = scheme.onSurface)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = scheme.onSurface)
                     }
                 } else {
                     IconButton(onClick = { screen = AppScreen.CONTROL }) {
@@ -956,7 +1022,7 @@ fun AgentApp(
                 NavigationBarItem(
                     selected = screen == AppScreen.SIGNALS,
                     onClick = { screen = AppScreen.SIGNALS },
-                    icon = { Icon(Icons.Default.List, null) },
+                    icon = { Icon(Icons.AutoMirrored.Filled.List, null) },
                     label = { Text("Signals") },
                 )
                 NavigationBarItem(
@@ -1185,9 +1251,18 @@ private fun runAsync(post: (Runnable) -> Unit, done: (String) -> Unit, work: () 
         val result = try {
             work()
         } catch (e: Exception) {
-            val msg = "Error: ${e.message ?: e.javaClass.simpleName}"
-            com.codeassist.agenttrader.trader.AgentRuntimeError.last = msg
-            msg
+            val raw = NetworkErrors.rawMessage(e)
+            if (NetworkErrors.isExchange(e)) {
+                // Bitunix failures belong to the engine diagnostic, even when
+                // they happen inside a command handler.
+                val friendly = NetworkErrors.describe(raw)
+                EngineRuntimeError.record(friendly)
+                friendly
+            } else {
+                val msg = "Error: $raw"
+                AgentRuntimeError.last = msg
+                msg
+            }
         }
         post(object : Runnable {
             override fun run() {

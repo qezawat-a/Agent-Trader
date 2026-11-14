@@ -1,102 +1,150 @@
-# Code Review Report — Agent-Trader (qezawat-a/Agent-Trader)
+# Code Review — Agent-Trader
 
 **Repo:** https://github.com/qezawat-a/Agent-Trader
-**Current tag:** v1.1.7 (commit 9c731bc)
-**Stack:** Kotlin 2.2.21 · AGP 8.13.2 · Compose 1.11.2 · compileSdk 36 / minSdk 23
-**Project layout:** app/src/main/kotlin/com/codeassist/agenttrader/{agent,trader,bitunix,ui,notify}
+**Stack:** Kotlin 2.2.21 · AGP 8.13.2 · Compose 1.11.2 · compileSdk 36 / minSdk 23 · JDK 17
+**Layout:** `app/src/main/kotlin/com/codeassist/agenttrader/{agent,bitunix,trader,ui,notify,util}` (mirrored byte-for-byte in the root `src/` for the on-device CodeAssist build)
+
+Reviewed against the **coding-standards** skill (readability, KISS, DRY, YAGNI, descriptive
+naming, error handling, test coverage, code smells). Everything below was verified by
+building the project and running the unit tests (236 tests, 0 failures).
 
 ---
 
 ## Verdict
 
-**Production-ready as-is, with targeted enhancements needed to match your exact spec.**
+The code is in good shape: the Bitunix client is documented down to the signature formula,
+the REST layer is verified against the official endpoint contract, and the trading logic
+is covered by 236 JVM tests. The gaps are not in the trading algorithm — they are in
+**duplication that has started to drift**, **dead code**, **magic numbers**, and a handful
+of **genuine bugs** in the strategy registry and the command router.
 
-The Android app already implements nearly everything you listed. Below is the
-gap analysis and the work planned.
+**Fixed in this pass (all behaviour-preserving except where noted):**
 
----
+| # | Finding | Severity | Fix |
+|---|---|---|---|
+| 1 | `set tp r` and `set tf agree` were implemented on the engine but missing from `CommandRouter` — the chat sent them to the LLM, which answered "Done." and changed nothing | **bug** | Added to `traderPrefixes` + regression test |
+| 2 | The root `src/` mirror had drifted from `app/src/main` (missing `tpR`, `minSideTfs`, `/ws`, old launcher icon) even though the README promises a byte-for-byte mirror | **bug** | Re-synced + CI guard (`ci.yml`, release workflow) |
+| 3 | Numbers were formatted with the device locale — a German/Persian phone printed `1,2345` | bug (display) | New `util/Format.kt` (one helper per precision, `Locale.US`) |
+| 4 | 44 ad-hoc `"%.2f".format(...)` calls | DRY | Replaced with the shared helpers |
+| 5 | `Three White Soldiers Trend Confirm` had an `if/else` whose branches were identical — the confirmation was dead | smell | Collapsed (behaviour kept), documented as an open finding |
+| 6 | `Golden Cross … Long` and `Death Cross … Short` are exact inverses, `Hammer`/`Hammer Oversold Bounce` and 4 more pairs are identical → the "N strategies agree" gate counts the same signal twice | **logic** | Not changed — see "Open findings" (changes trading behaviour) |
+| 7 | `Mid-Band MACD Cross` compares the MACD line with the Bollinger mid-band → it votes **SHORT on every market** (a free bearish vote in the gate) | **logic** | Not changed — see "Open findings" |
+| 8 | `DEMA55 Bullish Trend Follow` votes SHORT whenever DEMA is below price — i.e. in an uptrend | **logic** | Not changed — see "Open findings" |
+| 9 | `BitunixRest.throttle` used a plain `var` for the global rate-limit timestamp, written from the chat, scanner and trading-loop threads | bug (race) | `AtomicLong` |
+| 10 | `manageLiveStops` removed entries from two `ConcurrentHashMap`s while iterating them | smell (race) | Collect the keys first, then remove |
+| 11 | `scanOnce()` fetched the 15m klines twice per symbol (once for the signal, once for the price) | perf | Reuse the series it already has |
+| 12 | 17 unused icon imports in `TradingControls.kt`, 2 deprecated (non-RTL) icons in `MainActivity.kt` | dead code | Removed / switched to `Icons.AutoMirrored` |
+| 13 | `MainActivity` mixed `import AgentRuntimeError` with `com.codeassist.agenttrader.trader.AgentRuntimeError` at three call sites, and inlined `android.os.Build` instead of importing it | style | Consistent imports |
+| 14 | The help text and the LLM capability list were stale (`set min agree <1-21>`, no `/ws`, no `/repair`, no `set tf agree`) | docs | Refreshed |
+| 15 | `AgentBrain.TOOLS` did not list `set tf agree` / `set tp r` → the agent could never call them | gap | Added |
+| 16 | `liveContext()` computed `fundingLine = positions.size.toString().let { "" }` — always empty | dead code | Removed; the agent fetches funding with `<tool>funding</tool>` |
+| 17 | `Engine.handle("set tpR …")` was unreachable (the text is lower-cased before matching) | dead code | Removed the branch, kept `set tp r` / `set tp` |
+| 18 | LIVE mode still displayed the **paper** balance: the Control/Trade screens, `/check_system`, `/verify`, the periodic report and the LLM context all read `engine.broker.balance` | **bug** | Every user-visible balance now goes through `balanceText()` / `accountLine()`: LIVE shows the exchange value or `unavailable (exchange)`, never paper. Added an exchange cache (`refreshLiveBalance`, WS push, 30s UI refresh) and routed the risk manager through it |
+| 19 | A Bitunix DNS outage (`Unable to resolve host "fapi.bitunix.com"`) was written into `AgentRuntimeError` — the **provider** error — and re-printed every 30s, so `/diagnose` blamed the last model call and suggested switching models | **bug** | Added `NetworkErrors` (DNS/timeout classifier + friendly text) and `EngineRuntimeError` (engine-only, identical repeats shown once per 5 min). The loop records exchange failures there; `/verify`, `/autopsy` and `SelfRepair` now say "check this device's internet connection — no model change needed" |
 
-## What is already implemented ✅
+**Tests added:** 28 (15: `CommandRouterTest` routing, `EngineCommandTest` for the two settings
+commands, `FormatTest` for the locale, `StrategyRegistryFingerprintTest` pinning every
+strategy's vote on a rising and a falling series, `BalanceDisplayTest` proving LIVE never
+falls back to the paper account; 13: `NetworkErrorsTest` for DNS classification and repeat
+windows, plus `SelfRepairTest` cases proving an exchange outage is not blamed on the model).
 
-| Requirement | Status | Files |
-|---|---|---|
-| Agent commands (/help, /models, /set_model, /connect_provider, /check_ai, /price, /soul, /add_soul, /think, /memory, /add_skill, /skill, /mcp, /add_mcp, /check_system, /autopsy, /diagnose, /verify, /code_review, /bug_fix, /simplify, /team_spawn, /clear) | All present in `CommandRouter.kt` | agent/CommandRouter.kt |
-| Agent settings (AGENT_MAX_STEPS=128, AGENT_THINKING=MAX, AGENT_AUTONOMOUS_SEC=15, AGENT_RATE_LIMIT_WINDOW=128) | Present in `AgentConfig.kt` | agent/AgentConfig.kt |
-| AutoSetModelByKey (fetch models from base URL + key, pick working default) | Present in `ModelClient.kt` (pickModel + autoSetModels) | agent/ModelClient.kt |
-| 21 strategies across 6 groups | Present in `StrategyRegistry.kt` | trader/Strategies.kt |
-| Risk manager (breakeven, trailing, initial stop, daily loss, guard, max positions) | Present in `Engine.kt` | trader/Engine.kt |
-| Trader commands (engine on/off, start/stop trading, scan on/off|once, status, balance, positions, pnl, funding, tiers, signals, settings trade, tpsl, mid management, close position, close all, manual entry, set leverage/risk/breakeven/trail trigger/trail distance/stop frac/max positions/daily loss/guard, set universe/timeframes/scan top/min agree/min tf/min conf, report on/off/interval) | All present in `Engine.handle()` | trader/Engine.kt |
-| TP/SL (partial ladder 1R–4R at 25%, breakeven at 10% ROI, trailing from 15% ROI) | Present in `TpSlPlanner.kt` + `PaperBroker` | trader/Engine.kt + trader/TpSlPlanner.kt |
-| WebSocket (public market feed: tickers + price; private feed: balance/position/order/tpsl) | Present in `BitunixWs.kt` | bitunix/BitunixWs.kt |
-| Signed REST client against official Bitunix docs | Present in `BitunixRest.kt` (40 functions) | bitunix/BitunixRest.kt |
-| UI (5 screens: Chat, Trade, Signals, Control, Settings) | Present | ui/ |
-| 19 unit tests | Present | app/src/test/... |
-| Self-repair (/diagnose /repair) | Present in `SelfRepair.kt` | agent/SelfRepair.kt |
-
----
-
-## Gaps vs user spec
-
-### 1. Strategy names don't exactly match your spec
-The existing `StrategyRegistry.kt` has 21 strategies with different names
-(EMA 9/21 cross, SMA 50/200, MACD cross, RSI reversion, Bollinger reversion,
-ATR filter, Volume confirm, VWAP deviation, Hammer, Shooting star, Morning star,
-Dark cloud, Three soldiers/crows, Donchian breakout, Bollinger squeeze breakout,
-Volume breakout, TEMA 20, DEMA 20, MACD histogram, RSI momentum 50, EMA 50 slope).
-Your spec names some exact strategies that are NOT in the registry:
-- "Vegas Tunnel Trend-Confirmed Bearish" / "Vegas Tunnel Trend-Confirmed Bullish"
-- "Golden Cross 50/200 Enhanced Long"
-- "Death Cross 50/200 Enhanced Short"
-- "VWAP Breakdown Alert"
-- "Hammer Oversold Bounce"
-- "Morning Star Bullish Divergence"
-- "Shooting Star Overbought Alert"
-- "Dark Cloud Cover Death Cross"
-- "Bollinger Upper Band Breakout"
-- "Mid-Band MACD Cross"
-- "MA200 Cross MACD Confirm"
-- "TEMA Cross Above VWAP Confirm"
-- "DEMA55 Bullish Trend Follow"
-- "VWAP Bullish Confirmation"
-- "Three White Soldiers Trend Confirm"
-
-### 2. Missing REST endpoints (cp/asset sub-account asset queries)
-The official contract (docs/bitunix_api_contract.json) includes 3 cp/asset
-endpoints that the Android client does not implement:
-- GET `/api/v1/cp/asset/query`
-- POST `/api/v1/futures/cp/asset/transfer-to-sub-account`
-- POST `/api/v1/futures/cp/asset/transfer-to-main-account`
-
-### 3. No integration/UI tests
-Only 19 JVM unit tests; no UI tests, no Engine integration tests, no Android
-instrumentation tests.
-
-### 4. README is thorough but could document the strategy list explicitly
-The README mentions "21 strategies" but doesn't enumerate them.
+Note on the reported **10000**: there is no `10000` literal in the source — `PaperBroker`
+starts at `1000.0`, and no branch sets another starting value. The defect was structural:
+LIVE read the same `broker.balance` field as PAPER with no source label, so whatever the
+simulated account held was rendered in LIVE. `balanceText()` / `accountLine()` now make the
+source explicit and remove the paper path from LIVE entirely.
 
 ---
 
-## Implementation plan
+## Open findings (need an owner decision — they change trading behaviour)
 
-1. **Add exact strategy names** to `StrategyRegistry.kt` (15 new strategies).
-2. **Add cp/asset REST endpoints** to `BitunixRest.kt`.
-3. **Add unit tests** for the new strategies + REST endpoints.
-4. **Update README** to enumerate the strategy list.
-5. **Push to GitHub** when you provide the PAT.
+### 1. Duplicate and inverted strategies inflate the "N strategies agree" gate
+
+`StrategyRegistry` holds 37 strategies, but many of them are the same signal under a
+different name:
+
+| Pair | Relation |
+|---|---|
+| `EMA 9/21 cross` / `Vegas Tunnel Trend-Confirmed Bullish` | identical comparison |
+| `EMA 9/21 cross` / `Vegas Tunnel Trend-Confirmed Bearish` | same comparison, opposite side |
+| `Hammer` / `Hammer Oversold Bounce` | identical |
+| `Shooting star` / `Shooting Star Overbought Alert` | identical |
+| `Morning star` / `Morning Star Bullish Divergence` | identical |
+| `Dark cloud cover` / `Dark Cloud Cover Death Cross` | identical |
+| `VWAP deviation` / `VWAP Breakdown Alert` | the short side of the same rule |
+| `Golden Cross 50/200 Enhanced Long` / `Death Cross 50/200 Enhanced Short` | exact inverses |
+
+With `MIN_AGREEING = 3` the gate can be satisfied by **one** market view counted three
+times (e.g. EMA 9/21 above EMA 21 also gives "Vegas Tunnel Bullish" and, through the
+inverted pair, one bearish vote). The fix is to give each strategy a *group of origin*
+(`"ema9_21"`, `"hammer"`, …) and count **distinct** origins toward the gate. That changes
+which symbols qualify → it needs the owner's sign-off and a backtest.
+
+### 2. Three strategies vote the wrong side
+
+* `Mid-Band MACD Cross` — `macd.line > bands.mid` compares an oscillator (price
+  *difference*) with a *price level*. The MACD line is orders of magnitude smaller than
+  the price, so the condition is practically never true and the strategy votes SHORT on
+  every market (fingerprint: SHORT 70 on a rising **and** on a falling series).
+* `DEMA55 Bullish Trend Follow` — `dema > lastClose && macd.line > macd.signal` → in a
+  normal uptrend the (lagging) DEMA is *below* price, so the "bullish" strategy votes
+  SHORT. It is long-only by name and short-only by behaviour.
+* `TEMA 20 trend` / `MACD histogram trend` — on a clean trend these sit exactly on the
+  crossover, so the sign of the comparison is decided by floating-point noise.
+
+### 3. `Engine.handle()` is a 300-line `when`
+
+Every chat command is one `when` branch in `trader/Engine.kt` (the file is 1.5k lines).
+It is readable but hard to extend, and the branch order encodes precedence — e.g.
+`"positions history"` must stay above `"positions"`, and `"set tp r"` above `"set tp"`.
+Suggested split: a `Command` data class (prefix → handler) parsed once, with the handlers
+in `trader/commands/`.
+
+### 4. Live and paper share one code path with different rules
+
+`riskBlock()` only enforces `maxOpenPositions` when `!live` — in LIVE mode the cap is
+silently not applied. `unrealizedPct()` no longer divides by the paper balance in LIVE
+(it returns null), and the balance itself is now exchange-only, but the position cap
+still needs an explicit decision (the live count would come from the REST/WS position
+list, not `broker.positions`).
+
+### 5. Engine state is shared across threads without a contract
+
+`broker.positions` is a `LinkedHashMap` written by the trading loop and read by the
+Compose thread (the Trade screen) — a classic `ConcurrentModificationException` waiting
+for a busy market. The same applies to the `var engineOn/trading/risk` fields. The
+WebSocket caches use `ConcurrentHashMap` correctly; the paper broker does not.
 
 ---
 
-## Verified — no bugs requiring fixes
-- All 19 unit tests pass (JVM).
-- REST endpoints match the official contract.
-- Signature formula matches the docs: `digest = SHA256(nonce+ts+key+sortedQ+body)`,
-  `sign = SHA256(digest+secret)`.
-- TP/SL planner matches the spec: 50% stop-to-liq, ladder 1R–4R @ 25% each,
-  breakeven at 10% ROI, trailing 15% ROI.
-- Leaky abstractions: none found.
+## Remaining smaller items
+
+* **Magic numbers** — the engine still hard-codes `15_000` (WS price staleness),
+  `60_000` (signal cache), `300` (max TP/SL events), `1001` (notification request code),
+  `2.5` (daily-loss default). Each deserves a named constant next to the code that owns it.
+* **`AgentConfig` carries four unused fields** (`maxSteps`, `thinking`, `autonomousSec`,
+  `rateLimitWindow`) — the settings the agent spec asks for, but nothing reads them.
+  Either wire them up or delete them (YAGNI).
+* **`data/data/Download/Agent_Trader/`** is a generated IDE scaffold committed to git.
+  It should be ignored, not tracked.
+* **No linting** — there is no `ktlint`/`detekt`/Android-Lint gate in CI, so the naming and
+  unused-import rules depend on review. `gradle :app:lintDebug` would catch the rest.
+* **README numbers drift** — it claims 75 unit tests (there are 236) and lists 21
+  strategies in one place. Fixed in this pass for the test count.
+* **The mirror is still two copies** — `src/` duplicates `app/src/main/`. A single source
+  of truth (the CodeAssist `module.toml` pointing at `app/src/main`) would remove the
+  class of bug in finding #2 entirely; it was left in place because the on-device build
+  depends on the layout.
 
 ---
 
-## Next steps
-Reply with your GitHub PAT (and we'll push + tag releases). Meanwhile, the
-implementations below are executed first.
+## What was verified
+
+```
+gradle :app:testDebugUnitTest   →  236 tests, 0 failures
+gradle :app:assembleDebug       →  builds clean (only pre-existing deprecation notes)
+```
+
+The strategy fingerprint test compares the registry **before and after** the rename
+pass: 37/37 votes identical on a rising and on a falling series, so the readability
+refactor of `Strategies.kt` is provably behaviour-preserving.
