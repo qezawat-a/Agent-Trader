@@ -33,6 +33,7 @@ class WsEndpointTest {
         assertEquals("WS closed by server — reconnecting", wsErrorText("Connection reset"))
         assertEquals("WS closed by server — reconnecting", wsErrorText("broken pipe"))
         assertEquals("WS closed by server — reconnecting", wsErrorText("Socket closed"))
+        assertEquals("WS closed by server — reconnecting", wsErrorText("canceled"))
     }
 
     @Test

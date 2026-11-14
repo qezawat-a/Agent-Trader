@@ -345,7 +345,10 @@ class TraderEngine(private val rest: BitunixRest) {
             }
 
             override fun onClosed(privateChannel: Boolean, reason: String) {
-                onEvent?.invoke("WS closed: $reason")
+                // 1000 = normal closure; every 1000 here is benign (manual stop, or a
+                // graceful server close that now auto-reconnects). It reads like an
+                // error, so stay silent for it.
+                if (!reason.startsWith("closed 1000")) onEvent?.invoke("WS closed: $reason")
             }
         })
         ws = client

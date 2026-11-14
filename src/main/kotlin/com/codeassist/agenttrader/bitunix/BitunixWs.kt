@@ -201,9 +201,10 @@ class BitunixWs(
                         // reconnect with backoff — after an abnormal drop the server can
                         // keep the previous session's slot briefly, so the next attempt
                         // may also fail; the 1s→30s backoff rides that out.
-                        state.ready.set(false)
-                        webSocket.close(1000, "login failed")
-                        if (!state.manualClose.get()) scheduleReconnect(state)
+                        // Cancel (not close): an abrupt teardown fires onFailure, which is
+                        // the single reconnect path — a graceful close would wait for the
+                        // server's ack (can hang) and onClosed would need its own reconnect.
+                        webSocket.cancel()
                     }
                 }
                 else -> {
@@ -239,6 +240,10 @@ class BitunixWs(
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             state.ready.set(false)
             listener.onClosed(state.privateChannel, "closed $code $reason")
+            // A graceful close was previously a dead end: only onFailure reconnected,
+            // so a polite server close (maintenance, load-balancing) killed the feed
+            // forever. Reconnect here too — manual stops are filtered by manualClose.
+            if (!state.manualClose.get()) scheduleReconnect(state)
         }
     }
 
@@ -319,8 +324,10 @@ internal fun wsErrorText(raw: String?): String {
         m.contains("timeout", ignoreCase = true) || m.contains("timed out", ignoreCase = true) ->
             "WS timeout — reconnecting"
         // Server/network closed the TCP stream mid-session (EOFException, reset,
-        // broken pipe...). Routine: the client reconnects automatically with backoff.
-        m.contains("EOF", ignoreCase = true) ||
+        // broken pipe, cancelled websocket...). Routine: the client reconnects
+        // automatically with backoff.
+        m.contains("cancel", ignoreCase = true) ||
+            m.contains("EOF", ignoreCase = true) ||
             m.contains("Connection reset", ignoreCase = true) ||
             m.contains("broken pipe", ignoreCase = true) ||
             m.contains("Socket closed", ignoreCase = true) ||
