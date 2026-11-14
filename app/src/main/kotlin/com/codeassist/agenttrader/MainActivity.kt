@@ -74,7 +74,9 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.codeassist.agenttrader.agent.AgentBrain
 import com.codeassist.agenttrader.agent.AgentConfig
+import com.codeassist.agenttrader.agent.AppIdentity
 import com.codeassist.agenttrader.agent.CommandRouter
+import com.codeassist.agenttrader.agent.ConfigBackup
 import com.codeassist.agenttrader.agent.ModelClient
 import com.codeassist.agenttrader.agent.SelfCheck
 import com.codeassist.agenttrader.agent.SelfRepair
@@ -122,7 +124,8 @@ private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose <what is wrong> /repair /autopsy /verify /code_review (/review) /bug_fix /simplify /team_spawn /ws on|off
 Self-diagnosis: /verify runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set auto universe on|off, set min volume <usdt>, set auto rank gainers|volume, refresh auto, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set live on|off (paper vs real), set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set auto universe on|off, set min volume <usdt>, set auto rank gainers|volume, refresh auto, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
+The universe is automatic: every scan refreshes it to the top symbols by 24h gainers or volume (min 24h volume filter). "set universe ..." switches to a fixed list.
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
 
@@ -830,6 +833,27 @@ fun AgentApp(
                     "Mode: ${if (engine.live) "LIVE" else "PAPER"}, leverage ${engine.leverage}x, margin ${engine.marginMode}, position ${engine.positionMode}\n" +
                     "Loop: ${if (engine.isLoopRunning) "running" else "stopped"}, ${engine.accountLine()}"
                 )
+                "/cert" -> say(AppIdentity.describe(appContext))
+                "/backup" -> runAsync(post, ::say) {
+                    val path = ConfigBackup.write(appContext, config.exportSettings())
+                    "Backup written (provider, model, Bitunix keys, engine settings):\n$path\n\n" +
+                        "Copy that file off the phone (cable/USB or a file manager) and keep it. " +
+                        "If an update ever asks you to uninstall, run /restore after the reinstall."
+                }
+                "/restore" -> runAsync(post, ::say) {
+                    val map = ConfigBackup.read(appContext)
+                    if (map == null) {
+                        "No backup found at ${ConfigBackup.file(appContext).absolutePath}.\n" +
+                            "Put the backup file there (or paste its JSON) and run /restore again."
+                    } else {
+                        config.importSettings(map)
+                        "Restored ${map.size} settings from ${ConfigBackup.file(appContext).absolutePath}.\n" +
+                            "Provider: ${if (config.baseUrl.isBlank()) "(none)" else config.baseUrl} · " +
+                            "model: ${if (config.model.isBlank()) "(none)" else config.model} · " +
+                            "Bitunix key: ${if (config.bitunixApiKey.isBlank()) "(none)" else "set"}\n" +
+                            "Reload the app so the engine picks the restored values up."
+                    }
+                }
                 "/add_mcp" -> {
                     val parts = parsed.args.split(" ", limit = 2)
                     if (parts.size < 2 || !parts[1].contains("://")) {

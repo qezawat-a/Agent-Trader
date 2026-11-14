@@ -201,8 +201,9 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** Auto-universe: when on, each scan refreshes the universe to the top [scanTop]
      *  symbols by 24h change (gainers) or 24h quote volume, filtered by [autoMinVolumeUsd].
-     *  Off by default — the fixed universe from `set universe` is used. */
-    var autoUniverse: Boolean = false
+     *  On by default since v.2.4.4 — the app picks the symbols itself. A fixed
+     *  universe typed with `set universe` turns this off again. */
+    var autoUniverse: Boolean = true
         set(value) { field = value; configRev++ }
 
     /** Minimum 24h quote volume (USDT) for an auto-universe candidate. */
@@ -637,7 +638,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val symbols = runCatching {
             // Auto-universe: refresh the symbol list from the live ticker feed
             // before evaluating, so each scan sees today's top gainers/volume.
-            if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
+            if (autoUniverse) refreshAutoUniverseIfStale()
             if (scanOn) rankUniverse(scanTop) else universe.toList()
         }.getOrElse { universe.toList() }
         val rows = symbols.mapNotNull { sym ->
@@ -658,10 +659,25 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Full signal explanation for chat and the periodic report. */
     fun signalsText(): String = try {
         val rows = signalBoard()
-        if (rows.isEmpty()) "No signals: could not load klines for any symbol."
+        if (rows.isEmpty()) "No signals: ${emptyBoardReason()}"
         else formatSignalBoard(rows, gates())
     } catch (e: Exception) {
         "Signals unavailable: ${e.message ?: e.javaClass.simpleName}"
+    }
+
+    /**
+     * Why the board is empty. A bare "no symbols evaluated" looks like a broken
+     * app, so the board names the thing the user has to change.
+     */
+    fun emptyBoardReason(): String = when {
+        universe.isEmpty() && autoUniverse ->
+            "auto-universe has not picked anything yet — run: refresh auto (needs internet)"
+        universe.isEmpty() ->
+            "the universe is empty — set universe BTCUSDT,ETHUSDT or let the app pick: set auto universe on"
+        !scanOn ->
+            "the scanner is off — scan on (universe: ${universe.size} symbols)"
+        else ->
+            "klines failed for all ${universe.size} symbols — check they exist on Bitunix (set universe BTCUSDT,ETHUSDT)"
     }
 
     /** One-line summary for the chat context. */
@@ -980,7 +996,18 @@ class TraderEngine(private val rest: BitunixRest) {
             onEvent?.invoke(line)
             return line
         } catch (e: BitunixApiException) {
-            val line = "LIVE ERROR $symbol: ${e.message}"
+            val line = if (e.code == 20003) {
+                // Bitunix 20003: the Futures wallet is empty. Money parked in the
+                // Funding wallet does NOT count for futures orders — that is the
+                // single most confusing error in this app, so it gets spelled out.
+                val bal = runCatching { refreshLiveBalance() }.getOrNull()
+                "LIVE ERROR $symbol: Bitunix error 20003 — insufficient balance" +
+                    (if (bal != null) " (Futures wallet: ${fmt2(bal)} USDT)" else "") +
+                    ". Funds in the Funding wallet do not pay for futures orders — transfer USDT to the " +
+                    "Futures wallet, or trade on paper: set live off"
+            } else {
+                "LIVE ERROR $symbol: ${e.message}"
+            }
             onEvent?.invoke(line)
             return line
         } catch (e: Exception) {
@@ -1326,7 +1353,8 @@ class TraderEngine(private val rest: BitunixRest) {
             try {
                 if (!reportOn || !engineOn) return@scheduleWithFixedDelay
                 val signals = runCatching {
-                    formatSignalBoard(signalBoard(maxAgeMs = 0).take(3), gates())
+                    val rows = signalBoard(maxAgeMs = 0).take(3)
+                    formatSignalBoard(rows, gates(), emptyBoardReason())
                 }.getOrElse { "signals unavailable" }
                 onEvent?.invoke(
                     "Periodic report: ${accountLine()}\n$signals"
@@ -1355,8 +1383,27 @@ class TraderEngine(private val rest: BitunixRest) {
     val isLoopRunning: Boolean get() = loopTask != null && !loopTask!!.isDone
 
     /** Handles one trader command typed in chat. Returns the reply text. */
+    /**
+     * People type commands the way they talk: "min volume 24h usd 10000",
+     * "leverage 20", "auto universe on". The old code answered "Usage:" to all
+     * of them, which looks like the app ignoring the chat, so the missing
+     * "set " prefix is added here before the command is matched.
+     */
+    private fun normalizeCommand(t: String): String = when {
+        t.startsWith("min volume") -> "set $t"
+        t.startsWith("auto universe") -> "set $t"
+        t.startsWith("auto rank") -> "set $t"
+        t.startsWith("auto on") -> "set auto universe on"
+        t.startsWith("auto off") -> "set auto universe off"
+        t.startsWith("scan top") -> "set $t"
+        t.startsWith("leverage ") -> "set $t"
+        t.startsWith("risk ") -> "set $t"
+        t.startsWith("universe ") -> "set $t"
+        else -> t
+    }
+
     fun handle(text: String): String {
-        val t = text.trim().lowercase()
+        val t = normalizeCommand(text.trim().lowercase())
         return when {
             t.startsWith("engine on") -> {
                 engineOn = true
@@ -1373,6 +1420,24 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("stop trading") -> { trading = false; stopLoop(); "Trading stopped." }
             t.startsWith("scan on") -> { scanOn = true; "Scanner on: ranking the top symbols by volume." }
             t.startsWith("scan off") -> { scanOn = false; "Scanner off: using the fixed universe." }
+            t.startsWith("set live") -> {
+                val v = t.removePrefix("set live").trim()
+                when {
+                    v.startsWith("off") || v == "paper" -> {
+                        live = false
+                        configRev++
+                        "Paper mode — orders are simulated, no real money. (Live trades need: set live on)"
+                    }
+                    v.startsWith("on") || v == "live" -> {
+                        live = true
+                        configRev++
+                        "LIVE mode — real orders, real money. The Futures wallet must hold USDT."
+                    }
+                    else -> "Usage: set live on|off"
+                }
+            }
+            t.startsWith("paper mode") -> { live = false; configRev++; "Paper mode — orders are simulated." }
+            t.startsWith("live mode") -> { live = true; configRev++; "LIVE mode — real orders, real money." }
             t.startsWith("status") -> status()
             t.startsWith("balance") -> if (live) {
                 val balance = refreshLiveBalance()
@@ -1500,7 +1565,7 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("report on") -> { reportOn = true; "Periodic reports on (every $reportIntervalMin min)." }
             t.startsWith("report off") -> { reportOn = false; "Periodic reports off." }
             t.startsWith("report interval") -> {
-                val m = t.removePrefix("report interval").trim().toLongOrNull()
+                val m = extractNumber(t.removePrefix("report interval"))?.toLong()
                 if (m != null && m in 1..1440) {
                     reportIntervalMin = m
                     reportTask?.cancel(false)
@@ -1524,7 +1589,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 manualEntry(sym, dir, (pct / 100.0).coerceIn(0.01, 1.0))
             }
             t.startsWith("set leverage") -> {
-                val v = t.removePrefix("set leverage").trim().toIntOrNull()
+                val v = extractNumber(t.removePrefix("set leverage"))?.toInt()
                 if (v == null || v !in 1..MAX_LEVERAGE) "Usage: set leverage <1-$MAX_LEVERAGE>"
                 else {
                     leverage = v
@@ -1533,7 +1598,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set risk") -> {
-                val v = t.removePrefix("set risk").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set risk"))
                 if (v == null || v !in 1.0..100.0) "Usage: set risk <1-100> (percent of balance per trade)"
                 else {
                     riskFraction = v / 100.0
@@ -1542,7 +1607,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set breakeven") -> {
-                val v = t.removePrefix("set breakeven").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set breakeven"))
                 if (v == null || v !in 0.0..1000.0) "Usage: set breakeven <pct> (0 = off)"
                 else {
                     risk = risk.copy(breakevenRoiPct = v)
@@ -1551,7 +1616,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set trail trigger") -> {
-                val v = t.removePrefix("set trail trigger").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set trail trigger"))
                 if (v == null || v !in 0.0..1000.0) "Usage: set trail trigger <pct> (0 = off)"
                 else {
                     risk = risk.copy(trailingTriggerRoiPct = v)
@@ -1560,7 +1625,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set trail distance") -> {
-                val v = t.removePrefix("set trail distance").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set trail distance"))
                 if (v == null || v !in 0.1..1000.0) "Usage: set trail distance <pct> (ROI distance behind the best price)"
                 else {
                     risk = risk.copy(trailDistanceRoiPct = v)
@@ -1569,8 +1634,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set tp r") || t.startsWith("set tp ") -> {
-                val v = t.removePrefix("set tp r").removePrefix("set tp")
-                    .trim().removePrefix("r").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set tp r").removePrefix("set tp").trim().removePrefix("r"))
                 if (v == null || v < 0.5 || v > 20.0) "Usage: set tp r <0.5-20> (TP = n× the stop distance; 1 = at the SL, 3 = 3× farther)"
                 else {
                     tpR = v
@@ -1580,7 +1644,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set stop frac") -> {
-                val v = t.removePrefix("set stop fraction").removePrefix("set stop frac").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set stop fraction").removePrefix("set stop frac"))
                 if (v == null || v !in 1.0..95.0) "Usage: set stop frac <10-90> (percent of the way to liquidation)"
                 else {
                     risk = risk.copy(stopFractionOfLiqPct = v)
@@ -1589,7 +1653,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set max positions") -> {
-                val v = t.removePrefix("set max positions").removePrefix("set maxpos").trim().toIntOrNull()
+                val v = extractNumber(t.removePrefix("set max positions").removePrefix("set maxpos"))?.toInt()
                 if (v == null || v !in 1..20) "Usage: set max positions <1-20>"
                 else {
                     maxOpenPositions = v
@@ -1598,7 +1662,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set daily loss") -> {
-                val v = t.removePrefix("set daily loss").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set daily loss"))
                 if (v == null || v !in 0.0..100.0) "Usage: set daily loss <pct> (0 = off)"
                 else {
                     maxDailyLossPct = v
@@ -1607,7 +1671,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set guard") -> {
-                val v = t.removePrefix("set guard interval").removePrefix("set guard").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set guard interval").removePrefix("set guard"))
                 if (v == null || v < 0.0) "Usage: set guard <seconds> (0 = off)"
                 else {
                     guardIntervalSec = v.toLong()
@@ -1623,10 +1687,39 @@ class TraderEngine(private val rest: BitunixRest) {
                 )
                 if (parsed == null) "Usage: set universe BTCUSDT,ETHUSDT,SOLUSDT"
                 else {
-                    universe.clear(); universe.addAll(parsed)
-                    signalCacheAt = 0
-                    configRev++
-                    "Universe set (${parsed.size}): ${parsed.joinToString(", ")}"
+                    // Verify against the exchange: stock tickers (RANK, MOVERS) are
+                    // not Bitunix contracts, and the scanner then has nothing to
+                    // evaluate while the board just says "no symbols evaluated".
+                    val known = runCatching {
+                        val arr = rest.tickers()
+                        (0 until arr.length()).mapNotNull { i ->
+                            arr.optJSONObject(i)?.optString("symbol")?.takeIf { it.isNotBlank() }
+                        }.toSet()
+                    }.getOrNull()
+                    if (known.isNullOrEmpty()) {
+                        universe.clear(); universe.addAll(parsed)
+                        signalCacheAt = 0
+                        configRev++
+                        autoUniverse = false
+                        "Universe set (${parsed.size}): ${parsed.joinToString(", ")}\n" +
+                            "Auto-universe OFF (you set a fixed list) — turn it back on: set auto universe on\n" +
+                            "(could not check Bitunix's symbol list — the list was empty or the network is down)"
+                    } else {
+                        val check = matchUniverse(parsed, known)
+                        universe.clear(); universe.addAll(check.accepted)
+                        signalCacheAt = 0
+                        configRev++
+                        autoUniverse = false
+                        buildString {
+                            append("Universe set (${check.accepted.size}): ${check.accepted.joinToString(", ")}")
+                            if (check.unknown.isNotEmpty()) {
+                                append("\nNot listed on Bitunix, ignored: ${check.unknown.joinToString(", ")}")
+                                append("\nBitunix trades USDT contracts — try BTCUSDT, ETHUSDT, SOLUSDT,")
+                                append("\nor let the app pick them: set auto universe on")
+                            }
+                            append("\nAuto-universe OFF (you set a fixed list) — turn it back on: set auto universe on")
+                        }.trim()
+                    }
                 }
             }
             t.startsWith("set timeframes") -> {
@@ -1641,7 +1734,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set scan top") -> {
-                val v = t.removePrefix("set scan top").trim().toIntOrNull()
+                val v = extractNumber(t.removePrefix("set scan top"))?.toInt()
                 if (v == null || v !in 3..50) "Usage: set scan top <3-50>"
                 else {
                     scanTop = v
@@ -1652,27 +1745,30 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             t.startsWith("set auto universe") -> {
                 val v = t.removePrefix("set auto universe").trim().lowercase()
-                when {
-                    v in listOf("on", "true", "1", "yes") ->
-                        autoUniverse = true
-                    v in listOf("off", "false", "0", "no") ->
-                        autoUniverse = false
-                    else -> "Usage: set auto universe on|off"
+                val on = v in listOf("on", "true", "1", "yes")
+                val off = v in listOf("off", "false", "0", "no")
+                if (!on && !off) {
+                    "Usage: set auto universe on|off"
+                } else {
+                    autoUniverse = on
+                    signalCacheAt = 0
+                    configRev++
+                    val head = "Auto-universe ${if (autoUniverse) "ON" else "OFF"} — " +
+                        (if (autoUniverse) "each scan refreshes the universe to the top $scanTop by $autoRankBy " +
+                        "(min ${autoMinVolumeUsd.toLong()} USDT 24h vol)" else "fixed universe from set universe")
+                    if (autoUniverse) "$head\n${refreshAutoUniverse()}" else head
                 }
-                signalCacheAt = 0
-                configRev++
-                "Auto-universe ${if (autoUniverse) "ON" else "OFF"} — " +
-                    (if (autoUniverse) "each scan refreshes the universe to the top $scanTop by $autoRankBy " +
-                    "(min ${autoMinVolumeUsd.toLong()} USDT 24h vol)" else "fixed universe from `set universe`")
             }
             t.startsWith("set min volume") -> {
-                val v = t.removePrefix("set min volume").trim().toDoubleOrNull()
-                if (v == null || v < 0.0) "Usage: set min volume <usdt> (e.g. 5000000)"
-                else {
+                val v = extractAmount(t.removePrefix("set min volume"))
+                if (v == null || v < 0.0) {
+                    "Usage: set min volume <usdt> — e.g. set min volume 5000000 (or 5m)"
+                } else {
                     autoMinVolumeUsd = v
                     signalCacheAt = 0
                     configRev++
-                    "Min 24h volume for auto-universe: ${v.toLong()} USDT."
+                    val head = "Min 24h volume for auto-universe: ${v.toLong()} USDT."
+                    if (autoUniverse) "$head\n${refreshAutoUniverse()}" else head
                 }
             }
             t.startsWith("set auto rank") -> {
@@ -1683,7 +1779,8 @@ class TraderEngine(private val rest: BitunixRest) {
                     autoRankBy = v
                     signalCacheAt = 0
                     configRev++
-                    "Auto-universe ranks by $v."
+                    val head = "Auto-universe ranks by $v."
+                    if (autoUniverse) "$head\n${refreshAutoUniverse()}" else head
                 }
             }
             t.startsWith("refresh auto") -> {
@@ -1694,7 +1791,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set min agree") -> {
-                val v = t.removePrefix("set min agree").trim().toIntOrNull()
+                val v = extractNumber(t.removePrefix("set min agree"))?.toInt()
                 if (v == null || v !in 1..37) "Usage: set min agree <1-37> (strategies required per timeframe)"
                 else {
                     minAgreeing = v
@@ -1704,7 +1801,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set min tf") -> {
-                val v = t.removePrefix("set min tf").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set min tf"))
                 if (v == null || v !in 1.0..100.0) "Usage: set min tf <1-100> (per-timeframe confidence gate)"
                 else {
                     minTfConfidence = v
@@ -1714,7 +1811,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set min conf") -> {
-                val v = t.removePrefix("set min conf").trim().toDoubleOrNull()
+                val v = extractNumber(t.removePrefix("set min conf"))
                 if (v == null || v !in 1.0..100.0) "Usage: set min conf <1-100> (combined confidence gate)"
                 else {
                     minConfidence = v
@@ -1724,7 +1821,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set tf agree") -> {
-                val v = t.removePrefix("set tf agree").trim().toIntOrNull()
+                val v = extractNumber(t.removePrefix("set tf agree"))?.toInt()
                 if (v == null || v !in 1..timeframes.size)
                     "Usage: set tf agree <1-${timeframes.size}> (how many timeframes must share one side)"
                 else {

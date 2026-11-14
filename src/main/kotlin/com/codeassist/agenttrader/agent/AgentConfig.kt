@@ -136,9 +136,11 @@ class AgentConfig(context: Context) {
         get() = prefs.getFloat("tp_r", 0f)
         set(value) = prefs.edit().putFloat("tp_r", value).apply()
 
-    /** Auto-universe: pick the top symbols by 24h change/volume automatically. */
+    /** Auto-universe: pick the top symbols by 24h change/volume automatically.
+     *  On by default since v.2.4.4 — the app picks the universe itself, so the
+     *  user never has to type a symbol list. Setting a fixed universe turns it off. */
     var autoUniverse: Boolean
-        get() = prefs.getBoolean("auto_universe", false)
+        get() = prefs.getBoolean("auto_universe", true)
         set(value) = prefs.edit().putBoolean("auto_universe", value).apply()
 
     /** Min 24h quote volume (USDT) for auto-universe candidates. */
@@ -158,6 +160,91 @@ class AgentConfig(context: Context) {
     fun mcpGet(name: String): String? = prefs.getString("mcp_$name", null)
     fun mcpPut(name: String, url: String) = prefs.edit().putString("mcp_$name", url.trim()).apply()
     fun mcpNames(): List<String> = prefs.all.keys.filter { it.startsWith("mcp_") }.map { it.removePrefix("mcp_") }
+
+    /**
+     * Every setting as a flat map — what /backup writes.
+     *
+     * The keys double as the JSON names, so a backup stays readable even when
+     * the app is reinstalled with a different version.
+     */
+    fun exportSettings(): Map<String, Any?> = linkedMapOf(
+        "base_url" to baseUrl,
+        "api_key" to apiKey,
+        "model" to model,
+        "soul" to soul,
+        "bitunix_api_key" to bitunixApiKey,
+        "bitunix_secret" to bitunixSecret,
+        "leverage" to leverage,
+        "margin_mode" to marginMode,
+        "position_mode" to positionMode,
+        "live" to live,
+        "risk_pct" to riskPct,
+        "engine_on" to engineOn,
+        "scan_on" to scanOn,
+        "report_on" to reportOn,
+        "report_interval_min" to reportIntervalMin,
+        "notifications" to notifications,
+        "universe" to universe,
+        "timeframes" to timeframes,
+        "scan_top" to scanTop,
+        "min_agreeing" to minAgreeing,
+        "min_tf_conf" to minTfConfidence,
+        "min_conf" to minConfidence,
+        "min_side_tfs" to minSideTfs,
+        "breakeven_roi" to breakevenRoiPct,
+        "trail_trigger" to trailTriggerRoiPct,
+        "trail_distance" to trailDistanceRoiPct,
+        "stop_frac" to stopFracPct,
+        "tp_r" to tpR,
+        "auto_universe" to autoUniverse,
+        "auto_min_volume_usd" to autoMinVolumeUsd,
+        "auto_rank_by" to autoRankBy,
+        "last_plan" to lastPlan,
+    )
+
+    /** Restores settings from a backup map; keys that are absent stay as they are. */
+    fun importSettings(map: Map<String, Any?>) {
+        fun str(key: String): String? = map[key]?.toString()
+        fun num(key: String): Double? = str(key)?.trim()?.toDoubleOrNull()
+        fun int(key: String): Int? = num(key)?.toInt()
+        fun bool(key: String): Boolean? = when (str(key)?.trim()?.lowercase()) {
+            "true" -> true
+            "false" -> false
+            else -> null
+        }
+        str("base_url")?.let { baseUrl = it }
+        str("api_key")?.let { apiKey = it }
+        str("model")?.let { model = it }
+        str("soul")?.let { soul = it }
+        str("bitunix_api_key")?.let { bitunixApiKey = it }
+        str("bitunix_secret")?.let { bitunixSecret = it }
+        int("leverage")?.let { leverage = it }
+        str("margin_mode")?.let { marginMode = it }
+        str("position_mode")?.let { positionMode = it }
+        bool("live")?.let { live = it }
+        int("risk_pct")?.let { riskPct = it }
+        bool("engine_on")?.let { engineOn = it }
+        bool("scan_on")?.let { scanOn = it }
+        bool("report_on")?.let { reportOn = it }
+        int("report_interval_min")?.let { reportIntervalMin = it.toLong() }
+        bool("notifications")?.let { notifications = it }
+        str("universe")?.let { universe = it }
+        str("timeframes")?.let { timeframes = it }
+        int("scan_top")?.let { scanTop = it }
+        int("min_agreeing")?.let { minAgreeing = it }
+        num("min_tf_conf")?.let { minTfConfidence = it.toInt() }
+        num("min_conf")?.let { minConfidence = it.toInt() }
+        int("min_side_tfs")?.let { minSideTfs = it }
+        int("breakeven_roi")?.let { breakevenRoiPct = it }
+        int("trail_trigger")?.let { trailTriggerRoiPct = it }
+        int("trail_distance")?.let { trailDistanceRoiPct = it }
+        int("stop_frac")?.let { stopFracPct = it }
+        num("tp_r")?.let { tpR = it.toFloat() }
+        bool("auto_universe")?.let { autoUniverse = it }
+        num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }
+        str("auto_rank_by")?.let { autoRankBy = it }
+        str("last_plan")?.let { lastPlan = it }
+    }
 
     var lastError: String
         get() = prefs.getString("last_error", "") ?: ""

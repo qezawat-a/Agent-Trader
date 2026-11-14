@@ -32,6 +32,9 @@ object CommandRouter {
         "/diagnose" to "Run every check; add your complaint: /diagnose <what is wrong>",
         "/repair" to "Apply the safe automatic repairs",
         "/ws on|off|status" to "Connect or disconnect the Bitunix private WebSocket feed",
+        "/cert" to "Show the signing key of this build (which APK updates it)",
+        "/backup" to "Write every setting to a file on the phone (survives a reinstall)",
+        "/restore" to "Read the settings back from that file",
     )
 
     sealed class Parsed {
@@ -61,6 +64,11 @@ object CommandRouter {
         // missing here, so they fell through to the LLM and never changed anything.
         // Note: the router matches lower-cased text, so "set tpR" is spelled "set tp r".
         "set tp r", "set tp ", "set tf agree",
+        // v.2.4.4 — the user types commands the way he talks ("min volume 24h
+        // usd 10000"). Without these prefixes such a line fell through to the
+        // LLM, which answered in prose and changed nothing.
+        "min volume", "auto universe", "auto rank", "auto on", "auto off",
+        "refresh auto", "scan top", "set live", "live mode", "paper mode",
     )
 
     fun parse(input: String): Parsed {

@@ -230,6 +230,7 @@ object TpSlPlanner {
 internal fun formatSignalBoard(
     rows: List<SignalRow>,
     gates: SignalAggregator.Gates = SignalAggregator.Gates(),
+    emptyReason: String = "",
 ): String = buildString {
     appendLine(
         "Signal board — ${gates.timeframes.joinToString("+")} must agree; each timeframe needs " +
@@ -238,7 +239,8 @@ internal fun formatSignalBoard(
             "${gates.minConfidence.toInt()}%",
     )
     if (rows.isEmpty()) {
-        appendLine("  no symbols evaluated")
+        // "no symbols evaluated" alone looks like a broken app — say what to fix.
+        appendLine("  no symbols evaluated" + if (emptyReason.isBlank()) "" else " — $emptyReason")
     }
     rows.forEach { r ->
         val side = r.status
@@ -271,6 +273,99 @@ internal fun parseSymbolsCsv(raw: String): List<String>? {
         .filter { it.length in 4..16 && it.all { ch -> ch.isLetterOrDigit() } }
         .distinct()
     return out.ifEmpty { null }
+}
+
+/**
+ * Numbers typed by a human, not by a parser.
+ *
+ * The user writes how they talk: "set min volume 24h usdt 10000", "min volume
+ * 24h usd 10000", "set scan top 10", "leverage 20x". A strict number parse
+ * answers "Usage:" to all of them, which looks like the app ignoring the
+ * command. These helpers read the number out of the sentence instead.
+ */
+private data class TypedNumber(val value: Double, val suffix: String)
+
+private val NUMBER_TOKEN = Regex("^([0-9]+(?:[.,][0-9]+)?)([a-zA-Z%]*)$")
+
+/** Every number-like token in the text, with the unit that followed it. */
+private fun typedNumbers(raw: String): List<TypedNumber> =
+    raw.split(Regex("[\\s,;:/]+"))
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .mapNotNull { tok ->
+            val m = NUMBER_TOKEN.find(tok) ?: return@mapNotNull null
+            val v = m.groupValues[1].replace(",", ".").toDoubleOrNull() ?: return@mapNotNull null
+            TypedNumber(v, m.groupValues[2].lowercase())
+        }
+
+/** Units that describe a duration, not an amount ("24h" in "24h usdt 10000"). */
+private val TIME_UNITS = setOf("h", "hr", "hrs", "d", "day", "days", "s", "sec", "secs", "w", "week", "weeks")
+
+/** Multiplier for a money unit ("5m" = 5 million). */
+private fun amountMultiplier(suffix: String): Double? = when (suffix) {
+    "", "usdt", "usd", "t", "u", "%", "x" -> 1.0
+    "k", "thousand" -> 1_000.0
+    "m", "mm", "million" -> 1_000_000.0
+    "b", "bn", "billion" -> 1_000_000_000.0
+    else -> null
+}
+
+/**
+ * The number the user meant: the last one, ignoring duration words.
+ * "24h usdt 10000" -> 10000, "24h" -> 24, "10" -> 10.
+ */
+internal fun extractNumber(raw: String): Double? {
+    val nums = typedNumbers(raw)
+    if (nums.isEmpty()) return null
+    val withoutTime = nums.filterNot { it.suffix in TIME_UNITS }
+    return (withoutTime.lastOrNull() ?: nums.last()).value
+}
+
+/**
+ * The amount the user meant, honouring k/m/b suffixes: "5m usdt" -> 5000000.
+ * "24h usdt 10000" -> 10000 (the "24h" is a duration, not the amount).
+ */
+internal fun extractAmount(raw: String): Double? {
+    val nums = typedNumbers(raw)
+    if (nums.isEmpty()) return null
+    val withUnits = nums.mapNotNull { n ->
+        val mult = amountMultiplier(n.suffix) ?: return@mapNotNull null
+        n to mult
+    }
+    if (withUnits.isEmpty()) return nums.last().value
+    val withoutTime = withUnits.filterNot { it.first.suffix in TIME_UNITS }
+    val (num, mult) = withoutTime.lastOrNull() ?: withUnits.last()
+    return num.value * mult
+}
+
+/** Result of checking a user-typed universe against the exchange's symbol list. */
+internal data class UniverseCheck(
+    /** Symbols that exist on the exchange (bare names are mapped to the USDT pair). */
+    val accepted: List<String>,
+    /** Symbols the exchange does not list — stock tickers like RANK or MOVERS. */
+    val unknown: List<String>,
+)
+
+/**
+ * Matches a typed universe against the live symbol list.
+ *
+ * "BTC" becomes "BTCUSDT" when that contract exists; anything the exchange
+ * does not list (RANK, MOVERS, AAPL…) is reported instead of being silently
+ * scanned — the scanner would fetch nothing for those and the board would say
+ * "no symbols evaluated" without saying why.
+ */
+internal fun matchUniverse(symbols: List<String>, known: Set<String>): UniverseCheck {
+    val accepted = mutableListOf<String>()
+    val unknown = mutableListOf<String>()
+    for (s in symbols) {
+        val upper = s.uppercase()
+        when {
+            upper in known -> accepted.add(upper)
+            "${upper}USDT" in known -> accepted.add("${upper}USDT")
+            else -> unknown.add(upper)
+        }
+    }
+    return UniverseCheck(accepted.distinct(), unknown)
 }
 
 /** Parses "15m,1h,1M" into valid kline intervals (max 5); null when anything is invalid.
