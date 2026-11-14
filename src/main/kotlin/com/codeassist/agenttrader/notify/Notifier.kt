@@ -73,6 +73,8 @@ private val NOTIFIABLE_PREFIXES = listOf(
     "open",        // paper opens ("OPEN …", "Opened …")
     "partial",
     "close",       // paper + live closes and close failures
+    "position opened",   // REST-diff announcer (v.2.2.6)
+    "position closed",
     "sl moved",
     "breakeven",
     "periodic report",

@@ -35,13 +35,13 @@ data class Position(
  */
 data class RiskSettings(
     /** Stop moves to entry once ROI reaches this % (0 = breakeven off). */
-    val breakevenRoiPct: Double = 10.0,
+    val breakevenRoiPct: Double = 25.0,
     /** Trailing starts once ROI reaches this % — fires after breakeven (0 = off). */
-    val trailingTriggerRoiPct: Double = 15.0,
+    val trailingTriggerRoiPct: Double = 40.0,
     /** Trailing stop keeps this much ROI distance behind the best price. */
-    val trailDistanceRoiPct: Double = 15.0,
+    val trailDistanceRoiPct: Double = 25.0,
     /** Initial stop sits this % of the way toward liquidation. */
-    val stopFractionOfLiqPct: Double = 50.0,
+    val stopFractionOfLiqPct: Double = 30.0,
 )
 
 /**
@@ -203,14 +203,21 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Minimum seconds between two entries (0 = off). */
     var guardIntervalSec = 300L
 
-    internal var lastEntryAt = 0L
-    internal var dayStamp = ""
-    internal var dayStartBalance = 0.0
+    /** Take-profit distance as an R-multiple of the stop distance (live orders attach
+     *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
+    var tpR: Double = 1.0
 
     // Live-position mid-management state, keyed by symbol.
     private val liveBest = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveLastStop = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveBreakevenDone = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+
+    /** Last seen live positions (symbol → "side|qty") — the diff announces opens/closes. */
+    private val seenLive = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    internal var lastEntryAt = 0L
+    internal var dayStamp = ""
+    internal var dayStartBalance = 0.0
 
     /** Periodic report settings. */
     var reportOn = false
@@ -577,6 +584,7 @@ class TraderEngine(private val rest: BitunixRest) {
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
             "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
             "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set stop frac <pct> · " +
+            "set tp r <n> (TP = n× the stop distance) · " +
             "set max positions <n> · set daily loss <pct> · set guard <sec>")
     }.trim()
 
@@ -741,9 +749,13 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         try {
+            // TP sits tpR × the stop distance away from entry (set tp r <n>).
+            // Previously the FIRST ladder rung (1R) was attached — a very short TP.
+            val rDist = kotlin.math.abs(triggerBasis - plan.stop).coerceAtLeast(1e-12)
+            val tp = if (dir > 0) triggerBasis + tpR * rDist else triggerBasis - tpR * rDist
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
-                tpPrice = formatPrice(symbol, plan.ladder.first().first),
+                tpPrice = formatPrice(symbol, tp),
                 slPrice = formatPrice(symbol, plan.stop),
                 reduceOnly = false,
             )
@@ -869,6 +881,52 @@ class TraderEngine(private val rest: BitunixRest) {
         } catch (_: Exception) {
             return events // transient feed/API hiccup — retry on the next tick
         }
+        // Announce opens/closes by diffing the exchange snapshot against the last
+        // tick. This is REST-authoritative: it works even when the WS pushes are
+        // missing, which is what the user kept reporting ("asan elam nemikone").
+        val nowSeen = HashMap<String, String>()
+        for (i in 0 until positions.length()) {
+            val p = positions.getJSONObject(i)
+            val sym = p.optString("symbol")
+            val side = p.optString("side").uppercase()
+            val qty = posQty(p)
+            if (sym.isNotBlank()) nowSeen[sym] = "$side|$qty"
+        }
+        for ((sym, fp) in nowSeen) {
+            if (seenLive.put(sym, fp) == null) {
+                val p = (0 until positions.length()).firstOrNull {
+                    positions.getJSONObject(it).optString("symbol") == sym
+                }?.let { positions.getJSONObject(it) }
+                val entry = p?.let { posEntry(it).toDoubleOrNull() } ?: 0.0
+                val side = fp.substringBefore('|')
+                val qty = fp.substringAfter('|')
+                events.add(
+                    "POSITION OPENED $sym $side qty $qty" +
+                        (if (entry > 0) " @ ${fmt(entry)}" else "")
+                )
+            }
+        }
+        for ((sym, _) in seenLive) {
+            if (sym !in nowSeen) {
+                seenLive.remove(sym)
+                liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym)
+                // Pull the net result from history so the user immediately sees the PnL.
+                val net = runCatching {
+                    val h = rest.historyPositions(sym, limit = 1)
+                    if (h.length() > 0) {
+                        val p = h.getJSONObject(0)
+                        netPositionPnl(
+                            p.optString("realizedPNL").toDoubleOrNull() ?: 0.0,
+                            p.optString("fee").toDoubleOrNull() ?: 0.0,
+                            p.optString("funding").toDoubleOrNull() ?: 0.0,
+                        )
+                    } else null
+                }.getOrNull()
+                events.add(
+                    "POSITION CLOSED $sym" + (if (net != null) " — net ${fmt(net)} USDT" else "")
+                )
+            }
+        }
         val openSymbols = mutableSetOf<String>()
         for (i in 0 until positions.length()) {
             val p = positions.getJSONObject(i)
@@ -963,7 +1021,8 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     fun pnl(): String =
-        "Realized PnL: ${fmt(broker.realizedPnl)} USDT. Balance: ${fmt(broker.balance)} USDT."
+        "PAPER (demo) — Realized PnL: ${fmt(broker.realizedPnl)} USDT, balance ${fmt(broker.balance)} USDT." +
+            " This is the simulated account; your real Bitunix balance is separate."
 
     fun closePosition(symbol: String): String {
         if (live) {
@@ -1263,6 +1322,17 @@ class TraderEngine(private val rest: BitunixRest) {
                     risk = risk.copy(trailDistanceRoiPct = v)
                     configRev++
                     "Trailing distance set to ${"%.0f".format(v)}% ROI behind the best price."
+                }
+            }
+            t.startsWith("set tp r") || t.startsWith("set tp ") || t.startsWith("set tpR") -> {
+                val v = t.removePrefix("set tp r").removePrefix("set tpR").removePrefix("set tp")
+                    .trim().removePrefix("r").trim().toDoubleOrNull()
+                if (v == null || v < 0.5 || v > 20.0) "Usage: set tp r <0.5-20> (TP = n× the stop distance; 1 = at the SL, 3 = 3× farther)"
+                else {
+                    tpR = v
+                    configRev++
+                    val slPct = risk.stopFractionOfLiqPct
+                    "TP set to ${v}× the stop distance (SL is ${"%.0f".format(slPct)}% toward liquidation)."
                 }
             }
             t.startsWith("set stop frac") -> {
