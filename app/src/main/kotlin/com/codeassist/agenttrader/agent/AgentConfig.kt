@@ -106,6 +106,11 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("min_conf", 70)
         set(value) = prefs.edit().putInt("min_conf", value).apply()
 
+    /** How many timeframes must share one side. 0 = all must agree (strict default). */
+    var minSideTfs: Int
+        get() = prefs.getInt("min_side_tfs", 0)
+        set(value) = prefs.edit().putInt("min_side_tfs", value).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }
