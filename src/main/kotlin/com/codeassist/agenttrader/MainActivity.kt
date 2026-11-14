@@ -122,7 +122,7 @@ private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose <what is wrong> /repair /autopsy /verify /code_review (/review) /bug_fix /simplify /team_spawn /ws on|off
 Self-diagnosis: /verify runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set auto universe on|off, set min volume <usdt>, set auto rank gainers|volume, refresh auto, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
 
@@ -152,6 +152,10 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             parseSymbolsCsv(config.universe)?.let { csv ->
                 universe.clear(); universe.addAll(csv)
             }
+            // Auto-universe persisted since v.2.4.3.
+            this.autoUniverse = config.autoUniverse
+            this.autoMinVolumeUsd = config.autoMinVolumeUsd
+            this.autoRankBy = config.autoRankBy
             // Risk settings persisted since v.2.2.6 (previously reset on restart).
             if (config.breakevenRoiPct > 0) risk = risk.copy(breakevenRoiPct = config.breakevenRoiPct.toDouble())
             if (config.trailTriggerRoiPct > 0) risk = risk.copy(trailingTriggerRoiPct = config.trailTriggerRoiPct.toDouble())
@@ -220,6 +224,9 @@ fun AgentApp(
         config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct.toInt()
         config.stopFracPct = engine.risk.stopFractionOfLiqPct.toInt()
         config.tpR = engine.tpR.toFloat()
+        config.autoUniverse = engine.autoUniverse
+        config.autoMinVolumeUsd = engine.autoMinVolumeUsd
+        config.autoRankBy = engine.autoRankBy
     }
 
     fun say(text: String) {

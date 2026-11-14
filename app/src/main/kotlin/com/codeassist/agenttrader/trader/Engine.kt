@@ -198,6 +198,23 @@ class TraderEngine(private val rest: BitunixRest) {
     // Scanner & signal gates — all user-changeable (set universe / set timeframes / set min ...).
     var scanTop = 10
     var timeframes: List<String> = SignalAggregator.TIMEFRAMES
+
+    /** Auto-universe: when on, each scan refreshes the universe to the top [scanTop]
+     *  symbols by 24h change (gainers) or 24h quote volume, filtered by [autoMinVolumeUsd].
+     *  Off by default — the fixed universe from `set universe` is used. */
+    var autoUniverse: Boolean = false
+        set(value) { field = value; configRev++ }
+
+    /** Minimum 24h quote volume (USDT) for an auto-universe candidate. */
+    var autoMinVolumeUsd: Double = 5_000_000.0
+        set(value) { field = value; configRev++ }
+
+    /** "gainers" (24h change %) or "volume" (24h quote volume). */
+    var autoRankBy: String = "gainers"
+        set(value) { field = value; configRev++ }
+
+    private var autoCacheAt: Long = 0
+
     var minAgreeing: Int = SignalAggregator.MIN_AGREEING
     var minTfConfidence: Double = SignalAggregator.TIMEFRAME_CONFIDENCE
     var minConfidence: Double = SignalAggregator.MIN_CONFIDENCE
@@ -555,6 +572,61 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /**
+     * Pure: pick symbols from the exchange's full ticker list.
+     * Filters by min 24h quote volume, ranks by 24h change (gainers) or by volume,
+     * returns the top [top] symbols.
+     */
+    internal fun autoUniverseSymbols(
+        tickers: org.json.JSONArray,
+        enabled: Boolean,
+        minVolumeUsd: Double,
+        rankBy: String,
+        top: Int,
+    ): List<String> {
+        if (!enabled || tickers.length() == 0 || top <= 0) return emptyList()
+        val rows = (0 until tickers.length()).mapNotNull { i ->
+            val o = tickers.optJSONObject(i) ?: return@mapNotNull null
+            val sym = o.optString("symbol", "")
+            val vol = o.optString("quoteVol", "0").toDoubleOrNull() ?: 0.0
+            val open = o.optString("open", "0").toDoubleOrNull() ?: 0.0
+            val last = o.optString("lastPrice", "0").toDoubleOrNull() ?: 0.0
+            if (sym.isBlank() || vol < minVolumeUsd || open <= 0) return@mapNotNull null
+            val changePct = (last - open) / open * 100.0
+            Triple(sym, vol, changePct)
+        }
+        val sorted = when (rankBy.lowercase()) {
+            "volume" -> rows.sortedByDescending { it.second }
+            else -> rows.sortedByDescending { it.third }
+        }
+        return sorted.map { it.first }.distinct().take(top)
+    }
+
+    /** Refreshes the universe from the live ticker list when auto-universe is on. */
+    internal fun refreshAutoUniverseIfStale(maxAgeMs: Long = 60_000): String {
+        if (!autoUniverse) return ""
+        val now = System.currentTimeMillis()
+        if (now - autoCacheAt <= maxAgeMs && universe.size >= scanTop) return ""
+        val picked = try {
+            autoUniverseSymbols(rest.tickers(), true, autoMinVolumeUsd, autoRankBy, scanTop)
+        } catch (e: Exception) {
+            "Auto-universe refresh failed: ${e.message ?: e.javaClass.simpleName}".let { return it }
+        }
+        if (picked.isEmpty()) {
+            autoCacheAt = now
+            return "Auto-universe: no symbols passed the min ${autoMinVolumeUsd.toLong()} USDT volume filter."
+        }
+        universe.clear()
+        universe.addAll(picked)
+        signalCacheAt = 0
+        autoCacheAt = now
+        configRev++
+        return "Auto-universe: ${picked.size} symbols → ${picked.joinToString(", ")}"
+    }
+
+    /** One-off manual refresh of the auto universe. */
+    fun refreshAutoUniverse(): String = refreshAutoUniverseIfStale(0)
+
+    /**
      * Evaluates the universe and returns one explainable row per symbol.
      * Cached for [maxAgeMs] because each row costs two kline requests.
      */
@@ -563,6 +635,9 @@ class TraderEngine(private val rest: BitunixRest) {
         val now = System.currentTimeMillis()
         if (signalCache.isNotEmpty() && now - signalCacheAt <= maxAgeMs) return signalCache
         val symbols = runCatching {
+            // Auto-universe: refresh the symbol list from the live ticker feed
+            // before evaluating, so each scan sees today's top gainers/volume.
+            if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
             if (scanOn) rankUniverse(scanTop) else universe.toList()
         }.getOrElse { universe.toList() }
         val rows = symbols.mapNotNull { sym ->
@@ -684,7 +759,8 @@ class TraderEngine(private val rest: BitunixRest) {
                 "engine ${if (engineOn) "on" else "off"} · trading ${if (trading) "on" else "off"} · " +
                 "loop ${if (isLoopRunning) "running" else "stopped"}",
         )
-        appendLine("  universe (${universe.size}, scanner ${if (scanOn) "on" else "off"}, top $scanTop): ${universe.joinToString(", ")}")
+        appendLine("  universe (${universe.size}, scanner ${if (scanOn) "on" else "off"}, top $scanTop): ${universe.joinToString(", ")}" +
+            (if (autoUniverse) " · AUTO: $autoRankBy, min ${autoMinVolumeUsd.toLong()} USDT 24h vol" else ""))
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
@@ -701,7 +777,10 @@ class TraderEngine(private val rest: BitunixRest) {
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
     fun scanOnce(): List<String> {
         val out = mutableListOf<String>()
-        val symbols = if (scanOn) rankUniverse(scanTop) else universe.toList()
+        val symbols = runCatching {
+            if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
+            if (scanOn) rankUniverse(scanTop) else universe.toList()
+        }.getOrElse { universe.toList() }
         for (sym in symbols) {
             // Risk manager: guard interval / max open positions / daily loss cap.
             riskBlock()?.let { out.add(it); break }
@@ -1151,6 +1230,7 @@ class TraderEngine(private val rest: BitunixRest) {
     fun status(): String = buildString {
         appendLine("Engine: ${if (engineOn) "on" else "off"}, trading: ${if (trading) "on" else "off"}, scan: ${if (scanOn) "on" else "off"}")
         appendLine("Mode: ${if (live) "LIVE" else "PAPER"}, leverage $leverage${if (live) "x (clamped per symbol)" else "x"}, margin $marginMode, position $positionMode")
+        appendLine("Universe: ${universe.size} symbols${if (autoUniverse) " · AUTO $autoRankBy · min ${autoMinVolumeUsd.toLong()} USDT 24h vol · refreshed each scan" else ""}: ${universe.joinToString(", ").take(120)}")
         if (live) {
             appendLine("Balance: ${balanceText()}")
             appendLine(
@@ -1568,6 +1648,49 @@ class TraderEngine(private val rest: BitunixRest) {
                     signalCacheAt = 0
                     configRev++
                     "Scanner picks the top $v symbols by volume."
+                }
+            }
+            t.startsWith("set auto universe") -> {
+                val v = t.removePrefix("set auto universe").trim().lowercase()
+                when {
+                    v in listOf("on", "true", "1", "yes") ->
+                        autoUniverse = true
+                    v in listOf("off", "false", "0", "no") ->
+                        autoUniverse = false
+                    else -> "Usage: set auto universe on|off"
+                }
+                signalCacheAt = 0
+                configRev++
+                "Auto-universe ${if (autoUniverse) "ON" else "OFF"} — " +
+                    (if (autoUniverse) "each scan refreshes the universe to the top $scanTop by $autoRankBy " +
+                    "(min ${autoMinVolumeUsd.toLong()} USDT 24h vol)" else "fixed universe from `set universe`")
+            }
+            t.startsWith("set min volume") -> {
+                val v = t.removePrefix("set min volume").trim().toDoubleOrNull()
+                if (v == null || v < 0.0) "Usage: set min volume <usdt> (e.g. 5000000)"
+                else {
+                    autoMinVolumeUsd = v
+                    signalCacheAt = 0
+                    configRev++
+                    "Min 24h volume for auto-universe: ${v.toLong()} USDT."
+                }
+            }
+            t.startsWith("set auto rank") -> {
+                val v = t.removePrefix("set auto rank").trim().lowercase()
+                if (v !in listOf("gainers", "volume")) {
+                    "Usage: set auto rank gainers|volume"
+                } else {
+                    autoRankBy = v
+                    signalCacheAt = 0
+                    configRev++
+                    "Auto-universe ranks by $v."
+                }
+            }
+            t.startsWith("refresh auto") -> {
+                if (!autoUniverse) {
+                    "Auto-universe is off. Turn it on with: set auto universe on"
+                } else {
+                    refreshAutoUniverse()
                 }
             }
             t.startsWith("set min agree") -> {

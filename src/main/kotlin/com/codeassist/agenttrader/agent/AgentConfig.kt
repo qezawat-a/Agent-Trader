@@ -136,6 +136,21 @@ class AgentConfig(context: Context) {
         get() = prefs.getFloat("tp_r", 0f)
         set(value) = prefs.edit().putFloat("tp_r", value).apply()
 
+    /** Auto-universe: pick the top symbols by 24h change/volume automatically. */
+    var autoUniverse: Boolean
+        get() = prefs.getBoolean("auto_universe", false)
+        set(value) = prefs.edit().putBoolean("auto_universe", value).apply()
+
+    /** Min 24h quote volume (USDT) for auto-universe candidates. */
+    var autoMinVolumeUsd: Double
+        get() = prefs.getLong("auto_min_volume_usd", 5_000_000L).toDouble()
+        set(value) = prefs.edit().putLong("auto_min_volume_usd", value.toLong()).apply()
+
+    /** Auto-universe ranking: "gainers" or "volume". */
+    var autoRankBy: String
+        get() = prefs.getString("auto_rank_by", "gainers") ?: "gainers"
+        set(value) = prefs.edit().putString("auto_rank_by", value.trim()).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }
