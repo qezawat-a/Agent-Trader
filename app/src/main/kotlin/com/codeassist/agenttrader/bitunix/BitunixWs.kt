@@ -167,10 +167,13 @@ class BitunixWs(
 
     private fun socketListener(state: SocketState) = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
-            state.attempt.set(0)
             if (state.privateChannel) {
+                // attempt resets only after a SUCCESSFUL login (see "login" branch) —
+                // otherwise a failing-login retry loop would retry at a fixed ~2s
+                // interval instead of backing off.
                 login(webSocket)
             } else {
+                state.attempt.set(0)
                 state.ready.set(true)
                 state.socket.set(webSocket)
                 listener.onOpen(false)
@@ -190,6 +193,7 @@ class BitunixWs(
                 "ping" -> webSocket.send(JSONObject().put("op", "pong").put("pong", msg.optLong("ping")).toString())
                 "login" -> {
                     if (msg.optInt("code", -1) == 0) {
+                        state.attempt.set(0)
                         state.ready.set(true)
                         state.socket.set(webSocket)
                         listener.onOpen(true)
@@ -197,6 +201,14 @@ class BitunixWs(
                     } else {
                         val reason = msg.optString("msg").ifBlank { msg.optString("message") }
                         listener.onError("Login failed (code ${msg.optInt("code", -1)}): ${reason.ifBlank { "no reason from server" }}")
+                        // Without this the socket sits connected but dead: the pump never
+                        // sends on it (ready=false) and nothing ever retries. Close and
+                        // reconnect with backoff — after an abnormal drop the server can
+                        // keep the previous session's slot briefly, so the next attempt
+                        // may also fail; the 1s→30s backoff rides that out.
+                        state.ready.set(false)
+                        webSocket.close(1000, "login failed")
+                        if (!state.manualClose.get()) scheduleReconnect(state)
                     }
                 }
                 else -> {
