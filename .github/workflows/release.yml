@@ -29,6 +29,16 @@ jobs:
         with:
           gradle-version: "8.14.3"
 
+      - name: Compute version from tag
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            V="${GITHUB_REF_NAME#v}"; V="${V#.}"
+            echo "VERSION_NAME=$V" >> "$GITHUB_ENV"
+          else
+            echo "VERSION_NAME=1.0.$(date +%Y%m%d%H%M)" >> "$GITHUB_ENV"
+          fi
+          echo "VERSION_CODE=$(( $(date +%s) / 60 ))" >> "$GITHUB_ENV"
+
       - name: Decode signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

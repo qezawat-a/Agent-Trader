@@ -14,8 +14,28 @@ android {
         applicationId = "com.codeassist.agenttrader"
         minSdk = 23
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // CI injects VERSION_CODE / VERSION_NAME per release tag (workflow "Compute version");
+        // local builds fall back to 1 / 1.0.
+        versionCode = System.getenv("VERSION_CODE")?.toIntOrNull() ?: 1
+        versionName = System.getenv("VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "1.0"
+    }
+
+    // Stable debug signing: the keystore is committed to the repo (debug keys are not
+    // secret — every Android dev machine uses the same well-known credentials), so
+    // every CI debug APK shares ONE signature and an update installs over the previous
+    // build WITHOUT wiping app data. Without this, CI falls back to the runner's
+    // ~/.android/debug.keystore which changes with runner images — forcing an
+    // uninstall (and a data wipe) on every update.
+    val debugKeystore = file("debug.keystore")
+    if (debugKeystore.exists()) {
+        signingConfigs {
+            create("debugStable") {
+                storeFile = debugKeystore
+                storePassword = "android"
+                keyAlias = "androiddebugkey"
+                keyPassword = "android"
+            }
+        }
     }
 
     // Release signing: CI injects KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD.
@@ -34,6 +54,7 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            if (debugKeystore.exists()) signingConfig = signingConfigs.getByName("debugStable")
         }
         release {
             isMinifyEnabled = false
