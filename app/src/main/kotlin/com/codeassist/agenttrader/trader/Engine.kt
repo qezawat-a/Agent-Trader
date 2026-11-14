@@ -720,6 +720,15 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         val lev = effectiveLeverage(symbol)
         val available = rest.availableUsdt()
+        // Hard safety: with a dust balance, fees + leverage + an illiquid coin make
+        // every trade a near-certain total loss (this is exactly what happened on
+        // the first live account). Block instead of quietly gambling the deposit.
+        if (available < MIN_LIVE_BALANCE) {
+            val line = "LIVE BLOCKED $symbol: available ${fmt(available)} USDT is below the ${MIN_LIVE_BALANCE} USDT minimum. " +
+                "With a dust balance any loss is total — deposit at least $MIN_LIVE_BALANCE USDT or use paper mode."
+            onEvent?.invoke(line)
+            return line
+        }
         val margin = available * marginFraction.coerceIn(0.0001, 1.0)
         // TP/SL triggers are LAST_PRICE per project rule, so plan the levels from
         // the signal price; fall back to the mark price when the exchange publishes one.
@@ -1465,6 +1474,9 @@ class TraderEngine(private val rest: BitunixRest) {
          * (verified live, 2026-11) is 200x for BTCUSDT and ETHUSDT.
          */
         const val MAX_LEVERAGE = 200
+
+        /** Live entries need at least this much USDT in the futures wallet (dust-balance guard). */
+        const val MIN_LIVE_BALANCE = 5.0
     }
 }
 
