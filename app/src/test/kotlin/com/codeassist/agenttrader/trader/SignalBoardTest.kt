@@ -71,7 +71,46 @@ class SignalBoardTest {
         )
         assertEquals(0, row.dir)
         assertEquals("no trade", row.status)
-        assertEquals("timeframes disagree", row.reasons.first())
+        assertEquals("only 1 of 2 timeframes share a side (all must agree — try: set tf agree 2)", row.reasons.first())
+    }
+
+    @Test
+    fun relaxed_tf_agree_lets_the_majority_side_trade() {
+        val gates = SignalAggregator.Gates(timeframes = listOf("1m", "5m", "15m"), minSideTfs = 2)
+        val row = SignalAggregator.evaluate(
+            "AKEUSDT", 1.0,
+            mapOf("1m" to tf("1m", -1, 72.0), "5m" to tf("5m", -1, 74.0), "15m" to tf("15m", 1, 70.0)),
+            gates,
+        )
+        assertEquals(-1, row.dir)
+        assertEquals("SHORT 73%", row.status)
+        // And combine agrees: majority side wins, minority timeframe ignored.
+        val sig = SignalAggregator.combine(
+            mapOf(
+                "1m" to TfSignal(-1, 72.0, 4),
+                "5m" to TfSignal(-1, 74.0, 4),
+                "15m" to TfSignal(1, 70.0, 4),
+            ),
+            gates,
+        )
+        requireNotNull(sig)
+        assertEquals(-1, sig.dir)
+        assertEquals(listOf("1m", "5m"), sig.timeframes)
+    }
+
+    @Test
+    fun a_tied_vote_is_still_no_trade() {
+        val gates = SignalAggregator.Gates(timeframes = listOf("1m", "5m", "15m", "1h"), minSideTfs = 2)
+        val sig = SignalAggregator.combine(
+            mapOf(
+                "1m" to TfSignal(1, 75.0, 4),
+                "5m" to TfSignal(1, 75.0, 4),
+                "15m" to TfSignal(-1, 75.0, 4),
+                "1h" to TfSignal(-1, 75.0, 4),
+            ),
+            gates,
+        )
+        assertNull(sig)
     }
 
     @Test
@@ -132,7 +171,7 @@ class SignalBoardTest {
         assertTrue(text.contains("BTCUSDT"), text)
         assertTrue(text.contains("LONG 78%"), text)
         assertTrue(text.contains("no trade"), text)
-        assertTrue(text.contains("why: timeframes disagree"), text)
+        assertTrue(text.contains("why: only 1 of 2 timeframes share a side"), text)
         assertTrue(text.contains("Best: BTCUSDT LONG 78%"), text)
     }
 

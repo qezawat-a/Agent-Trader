@@ -101,19 +101,37 @@ object SignalAggregator {
             val withSide = rows.filter { it.dir != 0 }
             verdict = when {
                 withSide.isEmpty() -> "no timeframe produced a side"
-                withSide.map { it.dir }.distinct().size > 1 -> "timeframes disagree"
                 else -> {
-                    val weak = withSide.filter { it.confidence < gates.minTfConfidence }
-                    if (weak.isNotEmpty()) {
-                        "${weak.joinToString { it.timeframe }} below the ${gates.minTfConfidence.toInt()}% timeframe gate"
-                    } else {
-                        val avg = rows.map { it.confidence }.average()
-                        if (avg < gates.minConfidence) {
-                            "combined confidence ${"%.0f".format(avg)}% is below ${gates.minConfidence.toInt()}%"
-                        } else {
-                            dir = rows.first().dir
-                            confidence = avg
-                            null
+                    // Mirrors [combine]: how many timeframes must share one side.
+                    val need = minOf(gates.minSideTfs, rows.size)
+                    val counts = withSide.groupingBy { it.dir }.eachCount()
+                    val qualifying = counts.entries.filter { it.value >= need }
+                    when {
+                        qualifying.size > 1 -> "timeframes split evenly between LONG and SHORT"
+                        qualifying.isEmpty() -> {
+                            val biggest = counts.maxByOrNull { it.value }?.value ?: 0
+                            "only $biggest of $need timeframes share a side" +
+                                if (need >= rows.size) " (all must agree — try: set tf agree 2)" else ""
+                        }
+                        else -> {
+                            val side = qualifying[0].key
+                            val team = withSide.filter { it.dir == side }
+                            val weak = team.filter { it.confidence < gates.minTfConfidence }
+                            val strong = team.filter { it.confidence >= gates.minTfConfidence }
+                            when {
+                                strong.size < need ->
+                                    "${weak.joinToString { it.timeframe }} below the ${gates.minTfConfidence.toInt()}% timeframe gate"
+                                else -> {
+                                    val avg = strong.map { it.confidence }.average()
+                                    if (avg < gates.minConfidence) {
+                                        "combined confidence ${"%.0f".format(avg)}% is below ${gates.minConfidence.toInt()}%"
+                                    } else {
+                                        dir = side
+                                        confidence = avg
+                                        null
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -127,23 +145,37 @@ object SignalAggregator {
     /**
      * The signal gates as the user configured them. The constants are defaults;
      * nothing is hard-capped — timeframes, vote counts and confidences all move.
+     *
+     * [minSideTfs]: how many timeframes must share ONE side before a trade is
+     * allowed. Default Int.MAX_VALUE = every timeframe must agree (the old strict
+     * rule). `set tf agree 3` / `set tf agree 2` relaxes it; minority timeframes
+     * are then ignored instead of vetoing the trade.
      */
     data class Gates(
         val timeframes: List<String> = TIMEFRAMES,
         val minAgreeing: Int = MIN_AGREEING,
         val minTfConfidence: Double = TIMEFRAME_CONFIDENCE,
         val minConfidence: Double = MIN_CONFIDENCE,
+        val minSideTfs: Int = Int.MAX_VALUE,
     )
 
-    /** Combines the configured timeframes; every one must pass its gate and agree in direction. */
+    /**
+     * Combines the configured timeframes into a trade decision. Default behavior
+     * (minSideTfs = all): every timeframe must pass its gate and agree in direction.
+     */
     fun combine(perTf: Map<String, TfSignal>, gates: Gates = Gates()): Signal? {
         if (perTf.size < gates.timeframes.size) return null
         val sigs = gates.timeframes.map { perTf[it] ?: return null }
-        if (sigs.any { it.dir == 0 || it.confidence < gates.minTfConfidence }) return null
-        if (sigs.map { it.dir }.distinct().size != 1) return null
-        val conf = sigs.map { it.confidence }.average()
+        val need = minOf(gates.minSideTfs, sigs.size)
+        val counts = sigs.filter { it.dir != 0 }.groupingBy { it.dir }.eachCount()
+        val qualifying = counts.entries.filter { it.value >= need }
+        // Both sides reaching the threshold = genuinely torn market: no trade.
+        val dir = if (qualifying.size == 1) qualifying[0].key else return null
+        val strong = sigs.filter { it.dir == dir && it.confidence >= gates.minTfConfidence }
+        if (strong.size < need) return null
+        val conf = strong.map { it.confidence }.average()
         if (conf < gates.minConfidence) return null
-        return Signal(sigs[0].dir, conf, gates.timeframes)
+        return Signal(dir, conf, strong.map { it.timeframe })
     }
 }
 

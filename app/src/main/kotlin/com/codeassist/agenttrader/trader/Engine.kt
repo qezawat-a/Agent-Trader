@@ -182,7 +182,12 @@ class TraderEngine(private val rest: BitunixRest) {
     var minTfConfidence: Double = SignalAggregator.TIMEFRAME_CONFIDENCE
     var minConfidence: Double = SignalAggregator.MIN_CONFIDENCE
 
-    private fun gates() = SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence)
+    /** How many timeframes must share one side before a trade is allowed.
+     *  Int.MAX_VALUE = all of them must agree (the old strict rule). */
+    var minSideTfs: Int = Int.MAX_VALUE
+
+    private fun gates() =
+        SignalAggregator.Gates(timeframes, minAgreeing, minTfConfidence, minConfidence, minSideTfs)
 
     // ---- Risk manager & exits (v1.1.7) — every value user-changeable. ----
 
@@ -504,7 +509,8 @@ class TraderEngine(private val rest: BitunixRest) {
     fun configLine(): String =
         "${if (live) "LIVE" else "PAPER"} · lev ${leverage}x · risk ${(riskFraction * 100).toInt()}% · " +
             "${timeframes.joinToString("+")} · universe ${universe.size} · " +
-            "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%"
+            "gates $minAgreeing/${minTfConfidence.toInt()}%/${minConfidence.toInt()}%" +
+                " · tf agree ${minSideTfs.coerceAtMost(timeframes.size)}/${timeframes.size}"
 
     /** Full settings dump the user and the agent can both read. */
     /** Balance the risk manager reasons about: WS live value when connected, else paper. */
@@ -569,13 +575,13 @@ class TraderEngine(private val rest: BitunixRest) {
         )
         appendLine("  universe (${universe.size}, scanner ${if (scanOn) "on" else "off"}, top $scanTop): ${universe.joinToString(", ")}")
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
-        appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined")
+        appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${"%.0f".format(risk.trailDistanceRoiPct)}% behind best · initial SL ${"%.0f".format(risk.stopFractionOfLiqPct)}% toward liq")
         appendLine("  risk manager: max open positions $maxOpenPositions · daily loss cap ${offable(maxDailyLossPct)} · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
-            "set min agree <n> · set min tf <pct> · set min conf <pct> · set leverage <n> · set risk <pct> · " +
+            "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
             "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set stop frac <pct> · " +
             "set max positions <n> · set daily loss <pct> · set guard <sec>")
     }.trim()
@@ -1344,6 +1350,17 @@ class TraderEngine(private val rest: BitunixRest) {
                     signalCacheAt = 0
                     configRev++
                     "Gate set: combined confidence must be ${v.toInt()}%."
+                }
+            }
+            t.startsWith("set tf agree") -> {
+                val v = t.removePrefix("set tf agree").trim().toIntOrNull()
+                if (v == null || v !in 1..timeframes.size)
+                    "Usage: set tf agree <1-${timeframes.size}> (how many timeframes must share one side)"
+                else {
+                    minSideTfs = v
+                    signalCacheAt = 0
+                    configRev++
+                    "Gate set: $v of ${timeframes.size} timeframes must share one side."
                 }
             }
             t.startsWith("settings trade") -> settingsTradeText()
