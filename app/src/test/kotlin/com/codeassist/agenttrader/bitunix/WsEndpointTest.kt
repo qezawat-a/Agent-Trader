@@ -28,8 +28,15 @@ class WsEndpointTest {
     }
 
     @Test
+    fun server_side_drops_become_a_reconnecting_line() {
+        assertEquals("WS closed by server — reconnecting", wsErrorText("EOFException"))
+        assertEquals("WS closed by server — reconnecting", wsErrorText("Connection reset"))
+        assertEquals("WS closed by server — reconnecting", wsErrorText("broken pipe"))
+        assertEquals("WS closed by server — reconnecting", wsErrorText("Socket closed"))
+    }
+
+    @Test
     fun other_errors_are_passed_through() {
-        assertEquals("Connection reset", wsErrorText("Connection reset"))
         assertEquals("WS connection failed", wsErrorText(null))
         assertEquals("WS connection failed", wsErrorText("  "))
         assertTrue(wsErrorText("timeout").contains("timeout", ignoreCase = true))

@@ -311,6 +311,14 @@ internal fun wsErrorText(raw: String?): String {
             "WS unreachable (DNS) — check this device's internet connection"
         m.contains("timeout", ignoreCase = true) || m.contains("timed out", ignoreCase = true) ->
             "WS timeout — reconnecting"
+        // Server/network closed the TCP stream mid-session (EOFException, reset,
+        // broken pipe...). Routine: the client reconnects automatically with backoff.
+        m.contains("EOF", ignoreCase = true) ||
+            m.contains("Connection reset", ignoreCase = true) ||
+            m.contains("broken pipe", ignoreCase = true) ||
+            m.contains("Socket closed", ignoreCase = true) ||
+            m.contains("Software caused connection abort", ignoreCase = true) ->
+            "WS closed by server — reconnecting"
         m.isEmpty() -> "WS connection failed"
         else -> m
     }
