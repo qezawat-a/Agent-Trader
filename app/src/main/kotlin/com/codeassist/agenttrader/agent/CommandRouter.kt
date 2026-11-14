@@ -30,6 +30,7 @@ object CommandRouter {
         "/check_system" to "Check the trader engine, scanner and agent code",
         "/autopsy" to "Analyse the last failure step by step",
         "/diagnose" to "Collect logs and diagnostics for an issue",
+        "/ws on|off|status" to "Connect or disconnect the Bitunix private WebSocket feed",
     )
 
     sealed class Parsed {

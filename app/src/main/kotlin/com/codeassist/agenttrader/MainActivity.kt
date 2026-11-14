@@ -3,7 +3,6 @@ package com.codeassist.agenttrader
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -249,7 +248,7 @@ fun AgentApp(
 
     fun toggleNotifications(on: Boolean) {
         config.notifications = on
-        if (on && Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+        if (on && android.os.Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                 appContext, Manifest.permission.POST_NOTIFICATIONS,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -443,7 +442,7 @@ fun AgentApp(
 
     // Ask for the status-bar notification permission once (Android 13+).
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
+        if (android.os.Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(
                 appContext, Manifest.permission.POST_NOTIFICATIONS,
             ) != PackageManager.PERMISSION_GRANTED
         ) {
@@ -684,6 +683,23 @@ fun AgentApp(
                             "1. Captured error: $err\n" +
                             "2. Likely stage: ${if (err.contains("HTTP")) "network/API call" else if (err.contains("Exception")) "logic/exception" else "unknown"}\n" +
                             "3. Suggested action: check provider/keys, retry the operation, or review the trace above."
+                        )
+                    }
+                }
+                "/ws" -> {
+                    when (parsed.args.trim().lowercase()) {
+                        "on" -> say(
+                            if (config.bitunixApiKey.isBlank() || config.bitunixSecret.isBlank())
+                                "WS needs Bitunix API keys — add them in Settings first."
+                            else engine.startLiveFeed(config.bitunixApiKey, config.bitunixSecret)
+                        )
+                        "off" -> {
+                            engine.stopLiveFeed()
+                            say("WS feed disconnected.")
+                        }
+                        else -> say(
+                            "WS feed: ${if (engine.liveFeedOn) "connected" else "off"}. " +
+                                "Usage: /ws on | /ws off"
                         )
                     }
                 }

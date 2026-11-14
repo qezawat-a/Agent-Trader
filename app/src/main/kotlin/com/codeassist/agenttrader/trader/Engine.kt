@@ -236,6 +236,8 @@ class TraderEngine(private val rest: BitunixRest) {
     private var signalCache: List<SignalRow> = emptyList()
     private var signalCacheAt = 0L
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
+    // Latest private "tpsl" event per orderId, so the tpsl command can show live TP/SL state.
+    private val wsTpSl = java.util.Collections.synchronizedMap(LinkedHashMap<String, org.json.JSONObject>())
 
     // Public WS market data (no keys needed): "tickers" last prices, "price" market/index/funding.
     private var marketFeed: BitunixWs? = null
@@ -322,6 +324,14 @@ class TraderEngine(private val rest: BitunixRest) {
                             if (qty == 0.0) wsPositions.remove(sym) else wsPositions[sym] = data
                         }
                     }
+                    "tpsl" -> {
+                        val id = data.optString("orderId")
+                        if (id.isNotBlank()) {
+                            wsTpSl.remove(id)
+                            wsTpSl[id] = data
+                            while (wsTpSl.size > 50) wsTpSl.remove(wsTpSl.keys.first())
+                        }
+                    }
                 }
                 val line = feedEventLine(ch, data, symbol)
                 if (line.isNotEmpty()) onEvent?.invoke(line)
@@ -348,7 +358,11 @@ class TraderEngine(private val rest: BitunixRest) {
         ws = null
         wsBalance.set(null)
         wsPositions.clear()
+        wsTpSl.clear()
     }
+
+    /** TP/SL events received on the private WS feed, newest last. */
+    fun feedTpSl(): List<org.json.JSONObject> = synchronized(wsTpSl) { wsTpSl.values.toList() }
 
     /** True when the private WebSocket feed is connected. */
     val liveFeedOn: Boolean get() = ws != null
@@ -1100,7 +1114,13 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("tpsl") -> if (live) {
-                try {
+                val fromWs = feedTpSl()
+                if (liveFeedOn && fromWs.isNotEmpty()) {
+                    "TP/SL (live WS, ${fromWs.size} events):\n" + fromWs.joinToString("\n") { o ->
+                        "${o.optString("symbol")} ${o.optString("event")} ${o.optString("status")} " +
+                            "tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} id ${o.optString("orderId")}"
+                    }
+                } else try {
                     val arr = rest.pendingTpSlOrders(limit = 10)
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
@@ -1111,7 +1131,18 @@ class TraderEngine(private val rest: BitunixRest) {
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
                 }
-            } else "Paper mode: TP/SL orders are simulated."
+            } else if (broker.positions.isEmpty()) "No open paper positions, so no TP/SL plan yet."
+            else broker.positions.values.joinToString("\n") { p ->
+                val ladder = p.plan.ladder.mapIndexed { i, (price, frac) ->
+                    val state = if (i < p.nextRung) "hit" else "open"
+                    "${i + 1}R ${fmt(price)} (${"%.0f".format(frac * 100)}%, $state)"
+                }.joinToString(", ")
+                "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} entry ${fmt(p.entry)} " +
+                    "stop ${fmt(p.stop)} liq ${fmt(p.plan.liquidation)}\n" +
+                    "  TP ladder: $ladder\n" +
+                    "  breakeven ${if (p.breakeven) "done" else "pending"}, " +
+                    "paper TP/SL is simulated locally"
+            }
             t.startsWith("history orders") -> if (live) {
                 try {
                     val arr = rest.historyOrders(limit = 10)
