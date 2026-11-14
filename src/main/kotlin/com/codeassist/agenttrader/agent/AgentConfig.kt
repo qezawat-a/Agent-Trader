@@ -106,6 +106,36 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("min_conf", 70)
         set(value) = prefs.edit().putInt("min_conf", value).apply()
 
+    /** How many timeframes must share one side. 0 = all must agree (strict default). */
+    var minSideTfs: Int
+        get() = prefs.getInt("min_side_tfs", 0)
+        set(value) = prefs.edit().putInt("min_side_tfs", value).apply()
+
+    /** Risk manager: SL→entry trigger ROI % (0 = off). Persisted since v.2.2.6. */
+    var breakevenRoiPct: Int
+        get() = prefs.getInt("breakeven_roi", 0)
+        set(value) = prefs.edit().putInt("breakeven_roi", value).apply()
+
+    /** Trailing trigger ROI % (0 = off). */
+    var trailTriggerRoiPct: Int
+        get() = prefs.getInt("trail_trigger", 0)
+        set(value) = prefs.edit().putInt("trail_trigger", value).apply()
+
+    /** Trailing distance behind best ROI %. */
+    var trailDistanceRoiPct: Int
+        get() = prefs.getInt("trail_distance", 0)
+        set(value) = prefs.edit().putInt("trail_distance", value).apply()
+
+    /** Initial stop as % of the way to liquidation (0 = use engine default). */
+    var stopFracPct: Int
+        get() = prefs.getInt("stop_frac", 0)
+        set(value) = prefs.edit().putInt("stop_frac", value).apply()
+
+    /** TP distance as R-multiple of the stop distance (0 = use engine default). */
+    var tpR: Float
+        get() = prefs.getFloat("tp_r", 0f)
+        set(value) = prefs.edit().putFloat("tp_r", value).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }

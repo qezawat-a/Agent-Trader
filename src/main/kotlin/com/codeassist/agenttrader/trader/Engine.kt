@@ -6,6 +6,9 @@ import com.codeassist.agenttrader.bitunix.BitunixWs
 import com.codeassist.agenttrader.bitunix.Candle
 import org.json.JSONArray
 import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -492,8 +495,8 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** UTC day stamp used to reset the daily-loss baseline at midnight UTC. */
     internal fun todayStamp(): String =
-        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply {
-            timeZone = java.util.TimeZone.getTimeZone("UTC")
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
         }.format(java.util.Date())
 
     /**
@@ -1355,12 +1358,18 @@ internal fun netPositionPnl(realized: Double, fee: Double, funding: Double): Dou
 internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): String = when (ch) {
     // Public channels push every ~500ms — cached by the engine, never shown in chat.
     "tickers", "ticker", "price", "trade", "depth_book1", "depth_book5", "depth_book15", "depth_books" -> ""
+    // Balance pushes land in the chat but stay out of the notifications
+    // (the notifier only wakes the user for order/TP-SL/position events).
     "balance" -> "WS balance ${data.optString("coin")} available ${data.optString("available")} " +
         "margin ${data.optString("margin")}"
     "position" -> {
-        val sym = data.optString("symbol").ifBlank { symbol ?: "" }
-        "WS position $sym ${data.optString("side")} qty ${data.optString("qty")} " +
-            "pnl ${data.optString("unrealizedPNL")}"
+        // UPDATE fires on every position tick — only the lifecycle events
+        // (OPEN / CLOSE) are worth a line.
+        if (data.optString("event").uppercase() == "UPDATE") "" else {
+            val sym = data.optString("symbol").ifBlank { symbol ?: "" }
+            "WS position $sym ${data.optString("side")} qty ${data.optString("qty")} " +
+                "pnl ${data.optString("unrealizedPNL")}"
+        }
     }
     "order" -> "WS order ${data.optString("symbol")} ${data.optString("event")} " +
         "${data.optString("type")} qty ${data.optString("qty")} ${data.optString("orderStatus")} " +

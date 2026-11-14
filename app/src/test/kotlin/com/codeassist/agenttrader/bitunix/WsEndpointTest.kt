@@ -20,6 +20,38 @@ class WsEndpointTest {
     }
 
     @Test
+    fun heartbeat_frames_are_acks_and_must_not_be_answered() {
+        // Docs: the server replies to our ping with {"op":"ping","pong":...}.
+        assertTrue(BitunixWs.isHeartbeat("ping"))
+        assertTrue(BitunixWs.isHeartbeat("pong"))
+        assertTrue(!BitunixWs.isHeartbeat("login"))
+        assertTrue(!BitunixWs.isHeartbeat("subscribe"))
+        // A frame with NO "op" is a DATA push ({"ch":"tickers","ts":...,"data":[...]}),
+        // never a heartbeat — treating it as one would drop the whole feed.
+        assertTrue(!BitunixWs.isHeartbeat(""))
+    }
+
+    @Test
+    fun login_success_reads_data_result_not_top_level_code() {
+        // Live failure frame observed from wss://fapi.bitunix.com/private/:
+        // {"op":"login","data":{"msg":"invalid params，Authorize: Token invalid","result":false}}
+        val reject = org.json.JSONObject(
+            """{"op":"login","data":{"msg":"invalid params，Authorize: Token invalid","nonce":"abc","result":false}}""",
+        )
+        assertTrue(!BitunixWs.isLoginSuccess(reject))
+        assertTrue(BitunixWs.loginReason(reject)!!.contains("Token invalid"))
+
+        // Success carries no top-level code — must NOT be rejected.
+        val ok = org.json.JSONObject("""{"op":"login","data":{"result":true}}""")
+        assertTrue(BitunixWs.isLoginSuccess(ok))
+
+        // Legacy/alternate shapes still work.
+        assertTrue(BitunixWs.isLoginSuccess(org.json.JSONObject("{\"op\":\"login\",\"code\":0}")))
+        assertTrue(!BitunixWs.isLoginSuccess(org.json.JSONObject("{\"op\":\"login\",\"code\":10007}")))
+        assertTrue(BitunixWs.loginReason(org.json.JSONObject("{\"op\":\"login\",\"msg\":\"bad sign\"}")) == "bad sign")
+    }
+
+    @Test
     fun dns_failure_becomes_an_actionable_line() {
         val raw = "Unable to resolve host \"fapi.bitunix.com\": No address associated with hostname"
         val text = wsErrorText(raw)

@@ -1,5 +1,6 @@
 package com.codeassist.agenttrader.bitunix
 
+import com.codeassist.agenttrader.notify.notifiable
 import com.codeassist.agenttrader.trader.feedEventLine
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,6 +40,30 @@ class WsChannelsTest {
         assertEquals("", feedEventLine("ticker", data, "BTCUSDT"))
         assertEquals("", feedEventLine("price", JSONObject().put("mp", "10000"), "BTCUSDT"))
         assertEquals("", feedEventLine("trade", JSONObject(), "BTCUSDT"))
+    }
+
+    @Test
+    fun balance_pushes_stay_out_of_the_notifications() {
+        // Balance pushes land in the chat but never wake the user.
+        val data = JSONObject().put("coin", "USDT").put("available", "1000").put("margin", "10")
+        val line = feedEventLine("balance", data, null)
+        assertTrue(line.isNotEmpty(), line)
+        assertTrue(!notifiable(line), "balance pushes must not notify: $line")
+    }
+
+    @Test
+    fun only_position_lifecycle_events_are_announced() {
+        val open = JSONObject().put("event", "OPEN").put("symbol", "BTCUSDT")
+            .put("side", "LONG").put("qty", "0.5").put("unrealizedPNL", "1.5")
+        assertTrue(feedEventLine("position", open, null).contains("BTCUSDT"))
+
+        val close = JSONObject().put("event", "CLOSE").put("symbol", "BTCUSDT")
+            .put("side", "LONG").put("qty", "0")
+        assertTrue(feedEventLine("position", close, null).contains("BTCUSDT"))
+
+        // UPDATE fires on every position tick — it must not reach the chat.
+        val update = JSONObject().put("event", "UPDATE").put("symbol", "BTCUSDT").put("qty", "0.5")
+        assertEquals("", feedEventLine("position", update, null))
     }
 
     @Test

@@ -94,7 +94,7 @@ jobs:
             echo "- Verify: \`sha256sum -c SHA256SUMS.txt\`"
             echo
             echo "### Highlights"
-            echo "- Bitunix futures engine: signed REST (marginCoin, retry/throttle), WS on wss://fstream.bitunix.com/ws, live order path with TP/SL"
+            echo "- Bitunix futures engine: signed REST (marginCoin, per-endpoint rate limits, retry), WS on wss://fapi.bitunix.com/public + /private, live order path with TP/SL"
             echo "- Agentic chat: multi-turn LLM memory, wired slash commands, provider tester"
             echo "- Dark trading theme with chat bubbles and quick actions"
           } > release-notes.md

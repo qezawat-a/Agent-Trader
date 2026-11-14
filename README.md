@@ -134,44 +134,76 @@ positions, it asks the engine.
 Verified against the live API and the official docs (2026-11):
 
 - **Signed REST** — `digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)`,
-  `sign = SHA256(digest + secretKey)`; 8 req/s throttle; retries on 10001 / 10005 / 10006 /
-  40007; keys never logged.
+  `sign = SHA256(digest + secretKey)`; 8 req/s global throttle plus the per-endpoint
+  limits the docs state; retries on 10001 / 10005 / 10006 / 10009 / 40007; keys never logged.
 - **Orders** — `place_order` always sends the required `marginCoin`; `side` names the
   *position* (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with
   `LAST_PRICE` stop type and `MARKET` order type per project rule.
-- **Market data** — kline (closed candles only, `endTime`/`startTime` paging, LAST/MARK
+- **Market data** — kline (closed candles only, `endTime`+`limit` paging backwards, LAST/MARK
   price), tickers, trading pairs (precision, min volume, max leverage), funding rate and
-  batch funding rates, depth.
+  batch funding rates, depth (fixed gears `1|5|15|50|max`).
 - **Account & risk** — account, available balance, per-symbol trading settings (margin mode
   and leverage are synced to the account before a live order), position tiers (risk bands),
   isolated-margin adjustment, leverage/margin/position mode.
 - **Positions & orders** — pending/history positions, pending/history orders, order detail,
   flash close, close-all, cancel one / cancel all, batch orders, modify order.
 - **TP/SL** — position-level and partial TP/SL (place, modify, cancel, pending, history).
+  Of the four methods Bitunix documents (Position · Partial · Trailing · Account), the API
+  exposes the first two: position TP/SL via `tpsl/position/place_order` and partial TP/SL
+  via `tpsl/place_order` with `tpQty`/`slQty`. Trailing is implemented app-side (the risk
+  manager rewrites the exchange SL), and account-level TP/SL has no endpoint.
 - **Notifications** — autonomous events reach the status bar: positions opening/closing,
   SL/TP moves, breakeven steps, order updates and the periodic report. The Control screen
   has a toggle; Android 13+ asks for the permission at first launch (and again from the
   toggle). WS balance pushes and connection noise stay silent.
 - **WebSocket** — `wss://fapi.bitunix.com/public/` for market channels and
   `wss://fapi.bitunix.com/private/` for account channels, app-level ping (Unix seconds)
-  every 3s, 250ms send pump (4 msg/s under the 5 msg/s cap), reconnect with backoff and
-  resubscribe.
+  every 3s, one rate gate for every outgoing frame (≥210 ms apart, under the 5 msg/s cap),
+  reconnect with backoff and resubscribe.
   In LIVE mode the app subscribes to `balance`, `position`, `order` and `tpsl` in a single frame.
   The public market feed runs in every mode (no keys needed): `tickers` (24h stats, last
   price) and `price` (market/index price + funding rate) for the whole universe, cached
   silently — public channels never spam the chat, and the engine prefers WS prices over
   REST quotes. All documented channel names are wired and ready:
-  `tickers` / `ticker` / `price` / `trade` / `depth_books|book1|book5|book15` on the public
-  socket, and klines as `market_kline_*` (e.g. `1m→market_kline_1min`, `1h→market_kline_60min`,
-  `1d→market_kline_1day`, `1w→market_kline_1week`, `1M→market_kline_1month`,
-  `mark_kline_*` for MARK_PRICE).
+  `tickers` / `ticker` / `price` / `trade` / `depth_books` / `depth_book1` / `depth_book5` /
+  `depth_book15` on the public socket, and klines as `market_kline_*`
+  (e.g. `1m→market_kline_1min`, `1h→market_kline_60min`, `1d→market_kline_1day`,
+  `1w→market_kline_1week`, `1M→market_kline_1month`, `mark_kline_*` for MARK_PRICE).
+  Push frames carry **no `op` field** — only `ch`/`ts`/`data` — so only a real `ping`/`pong`
+  counts as a heartbeat; treating "no op" as a heartbeat silently drops the whole feed.
+
+### Endpoint ↔ documentation parity
+
+Every endpoint of the official OpenAPI set is implemented in
+`bitunix/BitunixRest.kt` / `bitunix/BitunixWs.kt`, and every request carries the
+parameter set the docs list for it — no more, no less.
+
+| Group | Endpoints | Documented parameters, all sent |
+|---|---|---|
+| Market | `tickers`, `trading_pairs`, `depth`, `funding_rate`, `funding_rate/batch`, `get_funding_rate_history`, `kline` | `symbols`; `symbol`+`limit`; `symbol`; `symbol`+`startTime`+`endTime`+`limit`; `symbol`+`interval`+`limit`+`endTime`+`type` |
+| Account | `account`, `change_leverage`, `change_margin_mode`, `change_position_mode`, `get_leverage_margin_mode`, `position_mode`, `trading_settings`, `adjust_position_margin` | `marginCoin`; `symbol`+`leverage`; `marginMode`; `positionMode`; `symbol`+`marginCoin`; `symbols`; `symbol`+`marginCoin`+`amount`+`side`/`positionId` |
+| Position | `get_pending_positions`, `get_history_positions`, `get_position_tiers` | `symbol`+`positionId`+`subAccountId`+`includeSubAccounts`; `+startTime`+`endTime`+`skip`+`limit`; `symbol` |
+| Trade | `place_order`, `batch_order`, `cancel_orders`, `cancel_all_orders`, `close_all_position`, `flash_close_position`, `get_order_detail`, `get_pending_orders`, `get_history_orders`, `get_history_trades`, `modify_order` | see `placeOrder` / `batchOrderItem` / `OrderRef` — every documented field, incl. `positionId`, `price`, `tpOrderPrice`, `slOrderPrice`, `clientId`, `queryCanceled`, `subAccountId`, `type` |
+| TP/SL | `tpsl/place_order`, `tpsl/modify_order`, `tpsl/position/place_order`, `tpsl/position/modify_order`, `tpsl/cancel_order`, `tpsl/get_pending_orders`, `tpsl/get_history_orders` | `symbol`+`positionId`+`tp*`+`sl*` (+`tpQty`/`slQty` for partial); `orderId`; `side`/`positionMode` as int32; `startTime`/`endTime`/`skip`/`limit` |
+| CopyTrading | `cp/asset/query`, `cp/asset/transfer-to-sub-account`, `cp/asset/transfer-to-main-account` | `amount`+`assetType` |
+| WebSocket | `ping`, `subscribe`, `unsubscribe`, `login` + public/private channels | `op`+`args[{ch,symbol}]`; `apiKey`+`timestamp` (seconds)+`nonce`+`sign` |
+
+Guards that mirror the docs: `place_order` needs `positionId` when `tradeSide` is
+`CLOSE`, `get_order_detail` / `modify_order` need an `orderId` or `clientId`,
+`cancel_orders` entries need one of the two, `batch_order` takes at most 5 orders and
+`cancel_orders` at most 20, `depth` only accepts the documented gears, and every paged
+endpoint clamps `limit` to the documented maximum.
 
 ### Quirks worth knowing (found by testing, not by reading)
 
 | Quirk | Consequence |
 |---|---|
-| `tickers` ignores the `symbols` filter | Results are filtered client-side, otherwise `/price BTCUSDT` returns another symbol's price |
+| `tickers` used to ignore the `symbols` filter | Results are still filtered client-side, so `/price BTCUSDT` can never return another symbol's price (the filter is honoured again as of 2026-11) |
 | `mark_price` / `index_price` are not served (404) | Mark and index price come from the single-symbol funding endpoint |
+| Get Kline dropped `startTime` (changelog 2026-10-27) | The endpoint silently ignores it, so history pages backwards with `endTime` + `limit` only |
+| `depth` only accepts `1`, `5`, `15`, `50`, `max` | Any other gear is rejected with 10008, so it is validated before the call |
+| `trade` pushes carry the side in `s` | The symbol comes from the frame header — only `tickers` carries it per element |
+| Push frames have no `op` field | Only a real `ping`/`pong` is a heartbeat; "no op" is a data push, not an ack |
 | History positions return `{positionList:[…]}` | The array reader falls back to `positionList` / `list` |
 | `realizedPNL` excludes fees and funding | Net result is `realizedPNL − fee + funding` |
 | Quantities below the exchange minimum | Skipped, never silently upsized |
