@@ -524,22 +524,18 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /**
      * Risk-manager gate evaluated before EVERY new entry. Returns the blocking
-     * reason (also announced as an event) or null when a new entry is allowed.
+     * reason (every caller surfaces it in chat) or null when a new entry is allowed.
      * Order: guard interval → max open positions (paper) → daily loss cap.
      */
     internal fun riskBlock(): String? {
         if (guardIntervalSec > 0 && lastEntryAt > 0) {
             val leftMs = guardIntervalSec * 1000 - (System.currentTimeMillis() - lastEntryAt)
             if (leftMs > 0) {
-                val reason = "Risk manager: guard interval — next entry allowed in ${"%.0f".format(leftMs / 1000.0)}s"
-                onEvent?.invoke(reason)
-                return reason
+                return "Risk manager: guard interval — next entry allowed in ${"%.0f".format(leftMs / 1000.0)}s"
             }
         }
         if (!live && maxOpenPositions > 0 && broker.positions.size >= maxOpenPositions) {
-            val reason = "Risk manager: max open positions ($maxOpenPositions) reached — close one or raise the cap"
-            onEvent?.invoke(reason)
-            return reason
+            return "Risk manager: max open positions ($maxOpenPositions) reached — close one or raise the cap"
         }
         // Daily loss cap: the baseline re-arms when the UTC day rolls over.
         val today = todayStamp()
@@ -550,9 +546,7 @@ class TraderEngine(private val rest: BitunixRest) {
         if (maxDailyLossPct > 0 && dayStartBalance > 0) {
             val drop = (dayStartBalance - currentBalance()) / dayStartBalance * 100.0
             if (drop >= maxDailyLossPct) {
-                val reason = "Risk manager: daily loss cap hit (-${"%.2f".format(drop)}% >= ${"%.0f".format(maxDailyLossPct)}%) — new entries blocked until tomorrow"
-                onEvent?.invoke(reason)
-                return reason
+                return "Risk manager: daily loss cap hit (-${"%.2f".format(drop)}% >= ${"%.0f".format(maxDailyLossPct)}%) — new entries blocked until tomorrow"
             }
         }
         return null
