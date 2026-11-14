@@ -260,7 +260,9 @@ class BitunixWs(
 
     private fun login(ws: WebSocket) {
         val nonce = UUID.randomUUID().toString().replace("-", "").take(32)
-        val timestamp = System.currentTimeMillis() / 1000
+        // Milliseconds — same unit the REST signing uses and the WS docs expect;
+        // seconds made every private login fail with "code -1: no reason".
+        val timestamp = System.currentTimeMillis()
         // Private WS login: digest = SHA256(nonce + timestamp + apiKey); sign = SHA256(digest + secretKey)
         val digest = sha256Hex(nonce + timestamp + apiKey)
         val sign = sha256Hex(digest + secretKey)

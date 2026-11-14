@@ -8,10 +8,14 @@ import okhttp3.WebSocketListener
 import org.json.JSONArray
 import org.json.JSONObject
 import java.security.MessageDigest
+import java.util.Collections
 import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Bitunix futures WebSocket client.
@@ -57,21 +61,21 @@ class BitunixWs(
     }
 
     private class SocketState(val privateChannel: Boolean) {
-        val socket = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        val channels = java.util.Collections.synchronizedSet(LinkedHashSet<Pair<String, String?>>())
+        val socket = AtomicReference<WebSocket?>(null)
+        val channels = Collections.synchronizedSet(LinkedHashSet<Pair<String, String?>>())
         val queue = ConcurrentLinkedQueue<String>()
-        val ready = java.util.concurrent.atomic.AtomicBoolean(false)
-        val manualClose = java.util.concurrent.atomic.AtomicBoolean(false)
-        val attempt = java.util.concurrent.atomic.AtomicLong(0)
+        val ready = AtomicBoolean(false)
+        val manualClose = AtomicBoolean(false)
+        val attempt = AtomicLong(0)
     }
 
-    private val public = SocketState(privateChannel = false)
-    private val private = SocketState(privateChannel = true)
+    private val pubState = SocketState(privateChannel = false)
+    private val privState = SocketState(privateChannel = true)
 
-    fun connectPublic() = connect(public)
+    fun connectPublic() = connect(pubState)
 
     /** Opens the private socket. Subscriptions are sent only after the login reply succeeds. */
-    fun connectPrivate() = connect(private)
+    fun connectPrivate() = connect(privState)
 
     private fun connect(state: SocketState) {
         ensurePumps()
@@ -94,7 +98,7 @@ class BitunixWs(
     private fun startPumps() {
         // 250ms send pump keeps outgoing traffic under the 5 msg/s limit.
         pump.scheduleWithFixedDelay({
-            for (state in listOf(public, private)) {
+            for (state in listOf(pubState, privState)) {
                 val ws = state.socket.get()
                 if (ws != null && state.ready.get()) {
                     val frame = state.queue.poll()
@@ -105,7 +109,7 @@ class BitunixWs(
         // Application-level ping every 3s (official client heartbeat): the server
         // drops silent sessions.
         pump.scheduleWithFixedDelay({
-            for (state in listOf(public, private)) {
+            for (state in listOf(pubState, privState)) {
                 val ws = state.socket.get()
                 if (ws != null && state.ready.get()) {
                     ws.send(pingFrame(System.currentTimeMillis()))
@@ -116,28 +120,28 @@ class BitunixWs(
 
     /** Subscribe a public market channel, e.g. ("market_kline_15min", "BTCUSDT"). */
     fun subscribePublic(ch: String, symbol: String) {
-        public.channels.add(ch to symbol)
-        send(public, "subscribe", ch, symbol)
+        pubState.channels.add(ch to symbol)
+        send(pubState, "subscribe", ch, symbol)
     }
 
     /** Subscribes several public channels in ONE frame (the docs allow an args list). */
     fun subscribePublicBatch(items: List<Pair<String, String>>) {
         if (items.isEmpty()) return
-        items.forEach { public.channels.add(it) }
+        items.forEach { pubState.channels.add(it) }
         val args = JSONArray()
         items.forEach { (ch, sym) -> args.put(JSONObject().put("ch", ch).put("symbol", sym)) }
-        public.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
+        pubState.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
     }
 
     fun unsubscribePublic(ch: String, symbol: String) {
-        public.channels.remove(ch to symbol)
-        send(public, "unsubscribe", ch, symbol)
+        pubState.channels.remove(ch to symbol)
+        send(pubState, "unsubscribe", ch, symbol)
     }
 
     /** Private channels: "order", "position", "tpsl", "balance" (no symbol). */
     fun subscribePrivate(ch: String) {
-        private.channels.add(ch to null)
-        send(private, "subscribe", ch, null)
+        privState.channels.add(ch to null)
+        send(privState, "subscribe", ch, null)
     }
 
     /**
@@ -146,17 +150,17 @@ class BitunixWs(
      */
     fun subscribePrivateAll(channels: List<String>) {
         if (channels.isEmpty()) return
-        channels.forEach { private.channels.add(it to null) }
+        channels.forEach { privState.channels.add(it to null) }
         val args = JSONArray()
         channels.forEach { args.put(JSONObject().put("ch", it)) }
-        private.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
+        privState.queue.add(JSONObject().put("op", "subscribe").put("args", args).toString())
     }
 
     fun close() {
-        public.manualClose.set(true)
-        private.manualClose.set(true)
-        public.socket.get()?.close(1000, "bye")
-        private.socket.get()?.close(1000, "bye")
+        pubState.manualClose.set(true)
+        privState.manualClose.set(true)
+        pubState.socket.get()?.close(1000, "bye")
+        privState.socket.get()?.close(1000, "bye")
         pump.shutdownNow()
         client.dispatcher.executorService.shutdown()
     }
@@ -195,7 +199,8 @@ class BitunixWs(
                         listener.onOpen(true)
                         resubscribe(state)
                     } else {
-                        listener.onError("Login failed: ${msg.optString("msg")}")
+                        val reason = msg.optString("msg").ifBlank { msg.optString("message") }
+                        listener.onError("Login failed (code ${msg.optInt("code", -1)}): ${reason.ifBlank { "no reason from server" }}")
                         // Without this the socket sits connected but dead: the pump never
                         // sends on it (ready=false) and nothing ever retries. Close and
                         // reconnect with backoff — after an abnormal drop the server can
@@ -255,7 +260,9 @@ class BitunixWs(
 
     private fun login(ws: WebSocket) {
         val nonce = UUID.randomUUID().toString().replace("-", "").take(32)
-        val timestamp = System.currentTimeMillis() / 1000
+        // Milliseconds — same unit the REST signing uses and the WS docs expect;
+        // seconds made every private login fail with "code -1: no reason".
+        val timestamp = System.currentTimeMillis()
         // Private WS login: digest = SHA256(nonce + timestamp + apiKey); sign = SHA256(digest + secretKey)
         val digest = sha256Hex(nonce + timestamp + apiKey)
         val sign = sha256Hex(digest + secretKey)
