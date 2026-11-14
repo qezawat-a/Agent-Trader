@@ -63,11 +63,28 @@ object Notifier {
 }
 
 /**
- * True for engine events worth waking the user for — WS balance pushes and
- * connection noise stay silent (they fire every time the account changes).
+ * True for lines worth waking the user for: opens, failed opens, live errors,
+ * fills/partials, closes, SL moves and periodic reports. WS balance pushes,
+ * connection noise and plain command answers stay silent.
  */
-internal fun notifiable(line: String): Boolean = line.isNotBlank() &&
-    !line.startsWith("WS balance") && !line.startsWith("WS:") && !line.startsWith("WS closed")
+private val NOTIFIABLE_PREFIXES = listOf(
+    "live open",   // filled, failed and rejected orders
+    "live error",
+    "open",        // paper opens ("OPEN …", "Opened …")
+    "partial",
+    "close",       // paper + live closes and close failures
+    "sl moved",
+    "breakeven",
+    "periodic report",
+    "ws order",
+    "ws tpsl",
+    "ws position",
+)
+
+internal fun notifiable(line: String): Boolean {
+    val l = line.trim().lowercase()
+    return l.isNotEmpty() && NOTIFIABLE_PREFIXES.any { l.startsWith(it) }
+}
 
 /** Short notification title matched to the event kind. */
 internal fun notificationTitle(line: String): String = when {

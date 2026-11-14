@@ -143,6 +143,7 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             minTfConfidence = config.minTfConfidence.toDouble()
             minConfidence = config.minConfidence.toDouble()
             parseTimeframesCsv(config.timeframes)?.let { timeframes = it }
+            minSideTfs = config.minSideTfs.takeIf { it in 1..timeframes.size } ?: Int.MAX_VALUE
             parseSymbolsCsv(config.universe)?.let { csv ->
                 universe.clear(); universe.addAll(csv)
             }
@@ -202,6 +203,7 @@ fun AgentApp(
         config.minAgreeing = engine.minAgreeing
         config.minTfConfidence = engine.minTfConfidence.toInt()
         config.minConfidence = engine.minConfidence.toInt()
+        config.minSideTfs = if (engine.minSideTfs == Int.MAX_VALUE) 0 else engine.minSideTfs
     }
 
     fun say(text: String) {
@@ -209,6 +211,13 @@ fun AgentApp(
             override fun run() {
                 runCatching { persistEngine() }
                 messages.add(ChatMsg(text, false, now()))
+                // Every bot line — engine event OR command response (manual open,
+                // close, etc.) — gets one chance to notify; notifiable() filters
+                // the chatter. Previously manual entries never notified because
+                // only the event sink posted.
+                if (config.notifications && notifiable(text)) {
+                    Notifier.post(appContext, notificationTitle(text), text)
+                }
             }
         })
     }
@@ -433,12 +442,7 @@ fun AgentApp(
 
     // One event sink for the engine (loop, reports, live WebSocket feed).
     LaunchedEffect(engineVersion) {
-        engine.setEventSink { msg ->
-            say(msg)
-            if (config.notifications && notifiable(msg)) {
-                Notifier.post(appContext, notificationTitle(msg), msg)
-            }
-        }
+        engine.setEventSink { msg -> say(msg) }
     }
 
     // Ask for the status-bar notification permission once (Android 13+).
