@@ -136,6 +136,11 @@ class AgentConfig(context: Context) {
         get() = prefs.getFloat("tp_r", 0f)
         set(value) = prefs.edit().putFloat("tp_r", value).apply()
 
+    /** Live-entry minimum futures balance in USDT (0 = off). */
+    var minLiveBalance: Float
+        get() = prefs.getFloat("min_live_balance", 5f)
+        set(value) = prefs.edit().putFloat("min_live_balance", value).apply()
+
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
     fun skillNames(): List<String> = prefs.all.keys.filter { it.startsWith("skill_") }.map { it.removePrefix("skill_") }

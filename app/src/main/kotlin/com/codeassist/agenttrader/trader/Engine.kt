@@ -203,6 +203,12 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Minimum seconds between two entries (0 = off). */
     var guardIntervalSec = 300L
 
+    /**
+     * Live entries refuse when the futures wallet holds less than this (USDT).
+     * Default 5; 0 = check off (dust balances can then trade — user's own choice).
+     */
+    var minLiveBalance = MIN_LIVE_BALANCE
+
     /** Take-profit distance as an R-multiple of the stop distance (live orders attach
      *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
     var tpR: Double = 1.0
@@ -723,9 +729,9 @@ class TraderEngine(private val rest: BitunixRest) {
         // Hard safety: with a dust balance, fees + leverage + an illiquid coin make
         // every trade a near-certain total loss (this is exactly what happened on
         // the first live account). Block instead of quietly gambling the deposit.
-        if (available < MIN_LIVE_BALANCE) {
-            val line = "LIVE BLOCKED $symbol: available ${fmt(available)} USDT is below the ${MIN_LIVE_BALANCE} USDT minimum. " +
-                "With a dust balance any loss is total — deposit at least $MIN_LIVE_BALANCE USDT or use paper mode."
+        if (minLiveBalance > 0 && available < minLiveBalance) {
+            val line = "LIVE BLOCKED $symbol: available ${fmt(available)} USDT is below the ${fmt(minLiveBalance)} USDT minimum. " +
+                "With a dust balance any loss is total — deposit more, or disable with: set min balance 0"
             onEvent?.invoke(line)
             return line
         }
@@ -1331,6 +1337,16 @@ class TraderEngine(private val rest: BitunixRest) {
                     risk = risk.copy(trailDistanceRoiPct = v)
                     configRev++
                     "Trailing distance set to ${"%.0f".format(v)}% ROI behind the best price."
+                }
+            }
+            t.startsWith("set min balance") || t.startsWith("set minbalance") -> {
+                val v = t.removePrefix("set min balance").removePrefix("set minbalance").trim().toDoubleOrNull()
+                if (v == null || v !in 0.0..1000.0) "Usage: set min balance <usdt> (0 = off) — live entries block below this futures balance"
+                else {
+                    minLiveBalance = v
+                    configRev++
+                    if (v > 0) "Live minimum balance set to ${fmt(v)} USDT (entries block below it)."
+                    else "Live minimum balance check OFF — dust balances can now trade. Be careful: any loss is total."
                 }
             }
             t.startsWith("set tp r") || t.startsWith("set tp ") || t.startsWith("set tpR") -> {

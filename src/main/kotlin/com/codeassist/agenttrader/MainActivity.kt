@@ -117,7 +117,7 @@ private data class ChatMsg(val text: String, val isUser: Boolean, val time: Stri
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /diagnose /repair /autopsy /verify /code_review /bug_fix /simplify /team_spawn
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-21>, set min tf <1-100>, set min conf <1-100>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <n>, set max positions <1-20>, set daily loss <pct>, set guard <sec>
+Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-21>, set min tf <1-100>, set min conf <1-100>, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <n>, set min balance <usdt> (0=off), set max positions <1-20>, set daily loss <pct>, set guard <sec>
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
 
@@ -153,6 +153,7 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             if (config.trailDistanceRoiPct > 0) risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct.toDouble())
             if (config.stopFracPct > 0) risk = risk.copy(stopFractionOfLiqPct = config.stopFracPct.toDouble())
             if (config.tpR > 0f) tpR = config.tpR.toDouble()
+            minLiveBalance = config.minLiveBalance.toDouble()
             trading = false // the trading loop never auto-resumes on launch (safety)
         }
     }
@@ -215,6 +216,7 @@ fun AgentApp(
         config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct.toInt()
         config.stopFracPct = engine.risk.stopFractionOfLiqPct.toInt()
         config.tpR = engine.tpR.toFloat()
+        config.minLiveBalance = engine.minLiveBalance.toFloat()
     }
 
     fun say(text: String) {
