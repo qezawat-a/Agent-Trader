@@ -756,11 +756,27 @@ class TraderEngine(private val rest: BitunixRest) {
             val orderId = order.optString("orderId")
             val status = waitForFill(orderId)
             val conf = if (confidence != null) " conf ${"%.0f".format(confidence)}" else ""
-            noteEntry()
-            return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                "| order $orderId $status"
+            if (status == "FILLED" || status == "PART_FILLED") {
+                noteEntry()
+                return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
+                    "| order $orderId $status"
+            }
+            // Accepted but never filled (min qty, insufficient margin, TP/SL
+            // rejected — the exchange cancels right after placement). The old code
+            // armed the guard interval HERE, locking entries out for 5 minutes
+            // after every dead order — the "no trades ever" spiral. Surface why.
+            val line = "LIVE OPEN FAILED $symbol: order ${orderId.ifBlank { "?" }} ended $status"
+            onEvent?.invoke(line)
+            return line
         } catch (e: BitunixApiException) {
-            return "LIVE ERROR $symbol: ${e.message}"
+            val line = "LIVE ERROR $symbol: ${e.message}"
+            onEvent?.invoke(line)
+            return line
+        } catch (e: Exception) {
+            // Retryable/network paths that outlive the API-internal retries.
+            val line = "LIVE ERROR $symbol: ${e.message ?: e.javaClass.simpleName}"
+            onEvent?.invoke(line)
+            return line
         }
     }
 
@@ -1074,7 +1090,11 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("positions history") -> if (live) {
                 try {
                     val arr = rest.historyPositions(limit = 10)
-                    if (arr.length() == 0) "No closed positions yet."
+                    if (arr.length() == 0) {
+                        val open = runCatching { rest.pendingPositions().length() }.getOrDefault(-1)
+                        "No closed positions yet — history fills only after a trade opens AND closes." +
+                            (if (open > 0) " Open now: $open." else if (open == 0) " Nothing open right now." else "")
+                    }
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val p = arr.getJSONObject(i)
                         val realized = p.optString("realizedPNL").toDoubleOrNull() ?: 0.0
