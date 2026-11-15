@@ -57,6 +57,10 @@ jobs:
             echo "ERROR: src/ is out of sync with app/src/main — copy it and commit."
             exit 1
           fi
+          if ! diff -rq app/src/test src/test; then
+            echo "ERROR: src/test is out of sync with app/src/test — copy it and commit."
+            exit 1
+          fi
 
       - name: Test and build debug APK
         run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace

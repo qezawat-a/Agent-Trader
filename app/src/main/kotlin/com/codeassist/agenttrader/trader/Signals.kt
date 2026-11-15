@@ -187,6 +187,11 @@ object SignalAggregator {
  *  - Partial take-profit ladder: 1R, 2R, 3R, 4R, each closing 25%. R is the entry-to-stop distance.
  *  - Breakeven: once ROI reaches 10%, the stop moves to entry.
  *  - Trailing stop: once in profit, the stop trails the best price at a 15% ROI distance.
+ *
+ * Liquidation-aware: the stop is NEVER allowed to reach or pass the liquidation price.
+ * A safety margin keeps the stop inside liquidation even when the user pushes
+ * `set stop frac` high. If a stop cannot fit at the configured leverage, the
+ * trade is refused rather than opened with a stop that liquidation would hit first.
  */
 data class TpSlPlan(
     val entry: Double,
@@ -202,14 +207,86 @@ object TpSlPlanner {
     const val TRAIL_ROI = 0.15
     const val STOP_FRACTION_OF_LIQ = 0.5
 
-    fun plan(entry: Double, dir: Int, leverage: Int, stopFraction: Double = STOP_FRACTION_OF_LIQ): TpSlPlan {
-        val liqDist = entry / leverage
+    /** The stop must stay at least this share of the liquidation distance away
+     *  from the liquidation price, so liquidation never beats the stop. */
+    const val LIQ_SAFETY_FRACTION = 0.05
+
+    /** The user-visible stop fraction may not exceed this — beyond it the stop
+     *  is inside the safety margin and the trade is refused. */
+    const val MAX_STOP_FRACTION = 0.90
+
+    /**
+     * Maintenance margin rate used when the symbol's tier table is not
+     * available (paper mode, or the tier query failed).
+     *
+     * Bitunix's own liquidation formula is
+     *   Liq = Entry × (1 − 1/Leverage + MMR)   (long; mirrored for a short),
+     * so the MMR term eats INTO the liquidation distance. Ignoring it made
+     * every distance in the app look safer than it was: at 100x with MMR 0.5%
+     * the app saw 1.0% of room where the exchange had 0.5%. The default errs
+     * on the safe side — 0.5% is the tier-1 rate of the majors, and the live
+     * path reads the real value from the tier table.
+     */
+    const val DEFAULT_MMR = 0.005
+
+    /**
+     * The liquidation distance from the entry, in price units:
+     *   Entry × (1/leverage − MMR)
+     *
+     * Zero when the leverage is too low for the MMR to leave any room — such
+     * an entry is refused rather than opened.
+     */
+    fun liqDistance(entry: Double, leverage: Int, mmr: Double = DEFAULT_MMR): Double {
+        if (entry <= 0.0 || leverage <= 0) return 0.0
+        return maxOf(0.0, entry * (1.0 / leverage - mmr.coerceIn(0.0, 0.5)))
+    }
+
+    /** The liquidation price — the official Bitunix formula. */
+    fun liqPrice(entry: Double, dir: Int, leverage: Int, mmr: Double = DEFAULT_MMR): Double {
+        val d = liqDistance(entry, leverage, mmr)
+        return if (dir > 0) entry - d else entry + d
+    }
+
+    /**
+     * Builds a TP/SL plan where [stop] is guaranteed inside [liquidation] with
+     * the safety margin. [stopFraction] is clamped to [MAX_STOP_FRACTION].
+     */
+    fun plan(
+        entry: Double, dir: Int, leverage: Int,
+        stopFraction: Double = STOP_FRACTION_OF_LIQ,
+        mmr: Double = DEFAULT_MMR,
+    ): TpSlPlan {
+        val liqDist = liqDistance(entry, leverage, mmr)
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
-        val stop = if (dir > 0) entry - stopFraction * (entry - liq)
-        else entry + stopFraction * (liq - entry)
+        val frac = stopFraction.coerceIn(0.01, MAX_STOP_FRACTION)
+        val stop = if (dir > 0) {
+            val s = entry - frac * (entry - liq)
+            // Keep the stop inside liquidation with the safety margin.
+            val floor = liq + LIQ_SAFETY_FRACTION * liqDist
+            maxOf(s, floor)
+        } else {
+            val s = entry + frac * (liq - entry)
+            val ceil = liq - LIQ_SAFETY_FRACTION * liqDist
+            minOf(s, ceil)
+        }
         val r = abs(entry - stop)
         val ladder = LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
         return TpSlPlan(entry, stop, liq, ladder)
+    }
+
+    /** True when a stop at [stopFraction] of the liquidation distance still fits
+     *  inside liquidation with the safety margin at [leverage]. No coercion — the
+     *  raw user value is checked, so a setting of 100%+ correctly returns false. */
+    fun stopFits(
+        entry: Double, dir: Int, leverage: Int, stopFraction: Double,
+        mmr: Double = DEFAULT_MMR,
+    ): Boolean {
+        if (leverage <= 0 || entry <= 0) return false
+        val liqDist = liqDistance(entry, leverage, mmr)
+        if (liqDist <= 0.0) return false // no room at all: refuse the entry
+        val liq = if (dir > 0) entry - liqDist else entry + liqDist
+        val stop = if (dir > 0) entry - stopFraction * liqDist else entry + stopFraction * liqDist
+        return if (dir > 0) stop > liq + LIQ_SAFETY_FRACTION * liqDist else stop < liq - LIQ_SAFETY_FRACTION * liqDist
     }
 
     /** ROI of a position at a price, including leverage. */
@@ -338,8 +415,83 @@ internal fun extractAmount(raw: String): Double? {
     return num.value * mult
 }
 
-/** Result of checking a user-typed universe against the exchange's symbol list. */
-internal data class UniverseCheck(
+/**
+ * One contract in the candidate pool: what the exchange reports about it.
+ *
+ * @param quoteVol 24h quote volume in USDT — the liquidity floor works on this.
+ * @param changePct 24h change % against the ticker's own open.
+ * @param rangePct 24h high-low range in % — the tie-breaker in VOLUME mode.
+ */
+internal data class UniverseCandidate(
+    val symbol: String,
+    val quoteVol: Double,
+    val changePct: Double,
+    val rangePct: Double,
+    val price: Double,
+)
+
+/**
+ * Turns the exchange's ticker list into a candidate pool.
+ *
+ * Only contracts the exchange actually trades are kept ([tradable], when the
+ * trading_pairs list is available) — the ticker list also carries pairs that
+ * are closed or not API-traded, and scanning those burns requests for nothing.
+ */
+internal fun buildCandidates(
+    tickers: org.json.JSONArray,
+    tradable: Set<String>? = null,
+): List<UniverseCandidate> {
+    val out = mutableListOf<UniverseCandidate>()
+    for (i in 0 until tickers.length()) {
+        val o = tickers.optJSONObject(i) ?: continue
+        val symbol = o.optString("symbol", "").trim().uppercase()
+        if (symbol.isBlank()) continue
+        if (tradable != null && symbol !in tradable) continue
+        val vol = o.optString("quoteVol", "0").toDoubleOrNull() ?: 0.0
+        val open = o.optString("open", "0").toDoubleOrNull() ?: 0.0
+        val last = o.optString("lastPrice", "0").toDoubleOrNull() ?: 0.0
+        val high = o.optString("high", "0").toDoubleOrNull() ?: 0.0
+        val low = o.optString("low", "0").toDoubleOrNull() ?: 0.0
+        if (vol <= 0.0 || last <= 0.0) continue
+        val change = if (open > 0) (last - open) / open * 100.0 else 0.0
+        val range = if (low > 0 && high > 0) (high - low) / low * 100.0 else 0.0
+        out.add(UniverseCandidate(symbol, vol, change, range, last))
+    }
+    return out
+}
+
+/**
+ * Ranks a candidate pool into the pick order for the given universe mode.
+ *
+ * Ported from the Telegram trader so both apps pick the same coins:
+ *   VOLUME   deepest books first; 24h movement is only a tie-breaker. The score
+ *            is liquidity-dominated (0.75), so a thin coin with a huge range
+ *            can never outrank BTC — that is how you end up long a microcap
+ *            with 10x leverage.
+ *   GAINERS  only coins that are actually UP on the day (change > 0), biggest
+ *            gain first. A coin that is flat or red is not a gainer and is
+ *            dropped, even when the pool is smaller than the requested size:
+ *            the size is a ceiling, not a quota.
+ *   LOSERS   the mirror: only change < 0, biggest fall first.
+ *   MOVERS   biggest move in EITHER direction.
+ */
+internal fun rankUniverse(pool: List<UniverseCandidate>, mode: String): List<UniverseCandidate> {
+    return when (mode.lowercase()) {
+        "gainers" -> pool.filter { it.changePct > 0.0 }.sortedByDescending { it.changePct }
+        "losers" -> pool.filter { it.changePct < 0.0 }.sortedBy { it.changePct }
+        "movers" -> pool.sortedByDescending { kotlin.math.abs(it.changePct) }
+        else -> {
+            val maxVol = pool.maxOfOrNull { it.quoteVol } ?: 0.0
+            pool.sortedByDescending { c ->
+                val liquidity = if (maxVol > 0) c.quoteVol / maxVol else 0.0
+                val movement = kotlin.math.min(c.rangePct / 25.0, 1.0)
+                liquidity * 0.75 + movement * 0.25
+            }
+        }
+    }
+}
+
+/** Result of checking a user-typed universe against the exchange's symbol list. */internal data class UniverseCheck(
     /** Symbols that exist on the exchange (bare names are mapped to the USDT pair). */
     val accepted: List<String>,
     /** Symbols the exchange does not list — stock tickers like RANK or MOVERS. */

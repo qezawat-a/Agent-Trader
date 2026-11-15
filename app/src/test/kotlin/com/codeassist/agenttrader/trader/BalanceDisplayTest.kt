@@ -4,7 +4,6 @@ import com.codeassist.agenttrader.bitunix.BitunixRest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -81,20 +80,6 @@ class BalanceDisplayTest {
         assertTrue("exchange" in reply, reply)
         assertFalse("PAPER (demo)" in reply, reply)
         assertFalse("1000.00" in reply, reply)
-    }
-
-    @Test
-    fun daily_loss_cap_uses_the_live_balance() {
-        val e = engine()
-        e.live = true
-        e.dayStamp = e.todayStamp()
-        e.dayStartBalance = 1000.0
-        e.maxDailyLossPct = 5.0
-        e.seedLiveBalance(900.0) // -10% on the exchange
-
-        val blocked = e.riskBlock()
-        assertNotNull(blocked)
-        assertTrue("daily loss cap" in blocked, blocked)
     }
 
     @Test

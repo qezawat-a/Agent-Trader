@@ -9,8 +9,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Risk manager & exits (v1.1.7): guard interval, max open positions, daily loss
- * cap, user-configurable breakeven/trailing/initial stop, and live routing.
+ * Risk manager & exits (v1.1.7): guard interval, max open positions,
+ * user-configurable breakeven/trailing/initial stop, the liquidation guard
+ * (closes before the exchange can liquidate) and the entry-side liq buffer.
  */
 class RiskManagerTest {
 
@@ -57,28 +58,110 @@ class RiskManagerTest {
         assertTrue("max open positions" in blocked, blocked)
     }
 
-    // ---- daily loss cap ----
+    // ---- liquidation guard (paper broker) ----
 
     @Test
-    fun daily_loss_cap_blocks_new_entries_for_the_day() {
+    fun liq_guard_closes_a_crashing_position_before_its_stop() {
         val e = engine()
-        e.dayStamp = e.todayStamp() // today already baselined
-        e.dayStartBalance = 1000.0
-        e.broker.balance = 900.0 // -10%
-        e.maxDailyLossPct = 5.0
-        val blocked = e.riskBlock()
-        assertNotNull(blocked)
-        assertTrue("daily loss cap" in blocked, blocked)
+        // Stop far toward liquidation (would fire at -90% ROI); the guard floor
+        // sits at -60% — the guard must close FIRST, at the market price.
+        e.risk = e.risk.copy(stopFractionOfLiqPct = 90.0, liqGuardRoiPct = 60.0)
+        val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)!!
+        val balanceBefore = e.broker.balance
+
+        // -120% ROI at 10x: past the guard, past the stop.
+        val events = e.broker.manage("BTCUSDT", 88.0, e.risk)
+        assertTrue(events.any { it.startsWith("LIQ GUARD closed BTCUSDT") }, events.toString())
+        assertNull(e.broker.positions["BTCUSDT"])
+        // Closed at the market price, not at the optimistic stop price:
+        // margin 80 (10% of 1000, minus the fee buffer) → qty 8 at 10x,
+        // so the loss is 8 * (100 - 88) = 96 USDT.
+        assertTrue(e.broker.balance < balanceBefore, "the loss must be realized")
+        assertEquals(904.0, e.broker.balance, 0.01)
+        assertTrue(e.broker.history.any { it.startsWith("PARTIAL BTCUSDT -") }, e.broker.history.toString())
+        assertTrue(pos.qty <= 1e-12)
     }
 
     @Test
-    fun daily_loss_baseline_resets_when_the_utc_day_rolls() {
+    fun liq_guard_warns_once_then_closes() {
         val e = engine()
-        e.dayStamp = "2000-01-01" // stale stamp → baseline re-arms from current balance
-        e.dayStartBalance = 1000.0
-        e.broker.balance = 900.0
-        assertNull(e.riskBlock())
+        e.risk = e.risk.copy(stopFractionOfLiqPct = 95.0, liqGuardRoiPct = 60.0)
+        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
+
+        // -48% ROI: inside the warn zone (-45%..-60%) — one warning, no close.
+        val warn = e.broker.manage("BTCUSDT", 95.2, e.risk)
+        assertTrue(warn.any { it.startsWith("LIQ GUARD WARNING") }, warn.toString())
+        assertNotNull(e.broker.positions["BTCUSDT"])
+
+        // The warning fires once; a second tick at the same price stays silent.
+        val again = e.broker.manage("BTCUSDT", 95.2, e.risk)
+        assertTrue(again.none { it.startsWith("LIQ GUARD") }, again.toString())
+
+        // -61% ROI: the guard closes at market, before the exchange could.
+        val close = e.broker.manage("BTCUSDT", 93.9, e.risk)
+        assertTrue(close.any { it.startsWith("LIQ GUARD closed BTCUSDT") }, close.toString())
+        assertNull(e.broker.positions["BTCUSDT"])
     }
+
+    @Test
+    fun liq_guard_off_leaves_the_stop_in_charge() {
+        val e = engine()
+        e.risk = e.risk.copy(liqGuardRoiPct = 0.0)
+        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
+        val events = e.broker.manage("BTCUSDT", 88.0, e.risk)
+        assertTrue(events.none { it.startsWith("LIQ GUARD") }, events.toString())
+        // The ordinary stop took the position out at its own price.
+        assertTrue(events.any { it.startsWith("CLOSE BTCUSDT") }, events.toString())
+    }
+
+    @Test
+    fun a_healthy_stop_fires_before_the_guard() {
+        val e = engine()
+        // Default stop frac 30 (-30% ROI) vs guard 60 (-60% ROI): the stop wins.
+        e.risk = e.risk.copy(stopFractionOfLiqPct = 30.0, liqGuardRoiPct = 60.0)
+        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
+        // The stop sits at 30% of the liq distance (100 × (1/10 − 0.005) = 9.5)
+        // → 97.15. The price crosses it.
+        val events = e.broker.manage("BTCUSDT", 97.0, e.risk)
+        assertTrue(events.none { it.startsWith("LIQ GUARD") }, events.toString())
+        assertTrue(events.any { it.startsWith("CLOSE BTCUSDT @ 97.15") }, events.toString())
+    }
+
+    // ---- entry-side liquidation buffer ----
+
+    @Test
+    fun liq_buffer_caps_entry_leverage() {
+        val e = engine()
+        e.liqBufferPct = 2.0
+        e.leverage = 125
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        // 2% of room + MMR 0.5% → 1/leverage ≥ 2.5% → at most 40x.
+        assertEquals(40, lev)
+        assertNotNull(note)
+        assertTrue("clamped 125x → 40x" in note, note)
+    }
+
+    @Test
+    fun liq_buffer_leaves_low_leverage_alone() {
+        val e = engine()
+        e.liqBufferPct = 2.0
+        e.leverage = 20
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        assertEquals(20, lev)
+        assertNull(note)
+    }
+
+    @Test
+    fun liq_buffer_off_means_no_clamp() {
+        val e = engine()
+        e.liqBufferPct = 0.0
+        e.leverage = 200
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        assertEquals(200, lev)
+        assertNull(note)
+    }
+
+    // ---- chat commands & routing ----
 
     // ---- breakeven & trailing (paper broker) ----
 
@@ -118,11 +201,12 @@ class RiskManagerTest {
 
     @Test
     fun stop_fraction_is_user_configurable() {
-        // 30% of the way to liquidation: liq at 90 → stop at 97.
-        assertEquals(97.0, TpSlPlanner.plan(100.0, 1, 10, 0.30).stop, 1e-9)
-        assertEquals(103.0, TpSlPlanner.plan(100.0, -1, 10, 0.30).stop, 1e-9)
+        // The liq distance is Entry × (1/leverage − MMR) = 100 × (0.1 − 0.005) = 9.5,
+        // so liq is at 90.5 and 30% of the way to it is 97.15.
+        assertEquals(97.15, TpSlPlanner.plan(100.0, 1, 10, 0.30).stop, 1e-9)
+        assertEquals(102.85, TpSlPlanner.plan(100.0, -1, 10, 0.30).stop, 1e-9)
         // Defaults keep the long-standing 50% behavior.
-        assertEquals(95.0, TpSlPlanner.plan(100.0, 1, 10).stop, 1e-9)
+        assertEquals(95.25, TpSlPlanner.plan(100.0, 1, 10).stop, 1e-9)
     }
 
     // ---- chat commands & routing ----
@@ -136,7 +220,8 @@ class RiskManagerTest {
         assertTrue(e.handle("set trail distance 5").contains("5"))
         assertTrue(e.handle("set stop frac 30").contains("30"))
         assertTrue(e.handle("set max positions 4").contains("4"))
-        assertTrue(e.handle("set daily loss 5").contains("5"))
+        assertTrue(e.handle("set liq guard 70").contains("70"))
+        assertTrue(e.handle("set liq buffer 3").contains("3"))
         assertTrue(e.handle("set guard 120").contains("120"))
         assertTrue(e.configRev > before, "configRev must bump")
         assertEquals(5.0, e.risk.breakevenRoiPct)
@@ -144,15 +229,26 @@ class RiskManagerTest {
         assertEquals(5.0, e.risk.trailDistanceRoiPct)
         assertEquals(30.0, e.risk.stopFractionOfLiqPct)
         assertEquals(4, e.maxOpenPositions)
-        assertEquals(5.0, e.maxDailyLossPct)
+        assertEquals(70.0, e.risk.liqGuardRoiPct)
+        assertEquals(3.0, e.liqBufferPct)
         assertEquals(120L, e.guardIntervalSec)
+    }
+
+    @Test
+    fun liq_guard_can_be_turned_off() {
+        val e = engine()
+        assertTrue(e.handle("set liq guard 0").contains("off"))
+        assertEquals(0.0, e.risk.liqGuardRoiPct)
+        assertTrue(e.handle("set liq buffer 0").contains("off"))
+        assertEquals(0.0, e.liqBufferPct)
     }
 
     @Test
     fun risk_prefixes_route_to_the_engine_not_the_llm() {
         val cmds = listOf(
             "set breakeven 5", "set trail trigger 8", "set trail distance 5",
-            "set stop frac 30", "set max positions 4", "set daily loss 5", "set guard 120",
+            "set stop frac 30", "set max positions 4", "set liq guard 60",
+            "set liq buffer 2", "set guard 120",
         )
         for (cmd in cmds) {
             assertTrue(CommandRouter.parse(cmd) is CommandRouter.Parsed.Trader, cmd)

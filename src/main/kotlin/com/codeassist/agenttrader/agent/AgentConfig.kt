@@ -148,10 +148,20 @@ class AgentConfig(context: Context) {
         get() = prefs.getLong("auto_min_volume_usd", 5_000_000L).toDouble()
         set(value) = prefs.edit().putLong("auto_min_volume_usd", value.toLong()).apply()
 
-    /** Auto-universe ranking: "gainers" or "volume". */
+    /** Auto-universe ranking: "gainers", "losers", "movers" or "volume". */
     var autoRankBy: String
         get() = prefs.getString("auto_rank_by", "gainers") ?: "gainers"
         set(value) = prefs.edit().putString("auto_rank_by", value.trim()).apply()
+
+    /** Liquidation guard: close a position when its loss reaches this % of margin (stored as positive, e.g. 60 = -60% ROI). 0 = off. */
+    var liqGuardRoiPct: Int
+        get() = prefs.getInt("liq_guard_roi", 60)
+        set(value) = prefs.edit().putInt("liq_guard_roi", value.coerceIn(0, 100)).apply()
+
+    /** Liquidation buffer: keep estimated liquidation at least this % from entry (caps leverage). */
+    var liqBufferPct: Float
+        get() = prefs.getFloat("liq_buffer_pct", 5f)
+        set(value) = prefs.edit().putFloat("liq_buffer_pct", value.coerceIn(0f, 100f)).apply()
 
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
@@ -199,6 +209,8 @@ class AgentConfig(context: Context) {
         "auto_universe" to autoUniverse,
         "auto_min_volume_usd" to autoMinVolumeUsd,
         "auto_rank_by" to autoRankBy,
+        "liq_guard_roi" to liqGuardRoiPct,
+        "liq_buffer_pct" to liqBufferPct,
         "last_plan" to lastPlan,
     )
 
@@ -243,6 +255,8 @@ class AgentConfig(context: Context) {
         bool("auto_universe")?.let { autoUniverse = it }
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }
         str("auto_rank_by")?.let { autoRankBy = it }
+        int("liq_guard_roi")?.let { liqGuardRoiPct = it }
+        num("liq_buffer_pct")?.let { liqBufferPct = it.toFloat() }
         str("last_plan")?.let { lastPlan = it }
     }
 

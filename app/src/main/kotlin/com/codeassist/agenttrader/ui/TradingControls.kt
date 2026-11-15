@@ -277,15 +277,46 @@ fun ControlScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
-                    var uniText by remember(engine.configRev) { mutableStateOf(engine.universe.joinToString(",")) }
+                    var uniText by remember(engine.configRev) {
+                        mutableStateOf(if (engine.autoUniverse) "AUTO" else engine.universe.joinToString(","))
+                    }
                     OutlinedTextField(
                         uniText, { uniText = it.uppercase() },
-                        label = { Text("Universe (comma-separated)") },
+                        label = { Text("Symbols (comma-separated, or AUTO)") },
                         singleLine = true, modifier = Modifier.fillMaxWidth(),
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { onAction("set universe $uniText") }) { Text("Apply universe") }
+                        OutlinedButton(onClick = { onAction("set universe $uniText") }) { Text("Apply symbols") }
                         OutlinedButton(onClick = { uniText = engine.universe.joinToString(",") }) { Text("Reset") }
+                    }
+                    Text(
+                        if (engine.autoUniverse) {
+                            "AUTO is on — the app picks the symbols itself: top ${engine.scanTop} by " +
+                                "${engine.autoRankBy}, min ${engine.autoMinVolumeUsd.toLong()} USDT 24h volume. " +
+                                "Current: ${engine.universe.joinToString(", ")}"
+                        } else {
+                            "Fixed list (${engine.universe.size} symbols). Type AUTO and apply to hand the picking " +
+                                "back to the app."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf("gainers", "volume", "losers", "movers").forEach { mode ->
+                            OutlinedButton(
+                                onClick = { onAction("auto $mode") },
+                                modifier = Modifier.weight(1f),
+                            ) { Text(mode, fontSize = 11.sp, maxLines = 1) }
+                        }
+                    }
+                    var volText by remember(engine.configRev) { mutableStateOf(engine.autoMinVolumeUsd.toLong().toString()) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            volText, { volText = it.filter { ch -> ch.isDigit() }.take(12) },
+                            label = { Text("Min 24h volume (USDT)") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set min volume $volText") }) { Text("Apply") }
                     }
                     var tfText by remember(engine.configRev) { mutableStateOf(engine.timeframes.joinToString(",")) }
                     OutlinedTextField(
@@ -321,7 +352,8 @@ fun ControlScreen(
                     Text("Risk manager & exits", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
                         "Breakeven ${num(engine.risk.breakevenRoiPct)}% · trail trigger ${num(engine.risk.trailingTriggerRoiPct)}% · " +
-                            "SL ${num(engine.risk.stopFractionOfLiqPct)}% toward liq · max ${engine.maxOpenPositions} positions · " +
+                            "SL ${num(engine.risk.stopFractionOfLiqPct)}% toward liq · liq guard ${num(engine.risk.liqGuardRoiPct)}% ROI · " +
+                            "max ${engine.maxOpenPositions} positions · " +
                             "guard ${if (engine.guardIntervalSec > 0) "${engine.guardIntervalSec}s" else "off"}",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
@@ -364,8 +396,23 @@ fun ControlScreen(
                         )
                         OutlinedButton(onClick = { onAction("set guard $guardText") }) { Text("Apply") }
                     }
+                    var lgText by remember(engine.configRev) { mutableStateOf(num(engine.risk.liqGuardRoiPct)) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            lgText, { lgText = it },
+                            label = { Text("Liq guard % ROI (0 off)") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set liq guard $lgText") }) { Text("Apply") }
+                    }
                     Text(
-                        "Also via chat: set trail distance 15 · set stop frac 50 · set daily loss 5 — or ask: settings trade",
+                        "Liq guard closes a position before the exchange can liquidate it (warn at ${num(-(engine.risk.liqGuardRoiPct + 15.0))}% ROI). " +
+                            "Liq buffer ${num(engine.liqBufferPct)}% caps new entries' leverage the same way.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    Text(
+                        "Also via chat: set trail distance 15 · set stop frac 50 · set liq buffer 2 — or ask: settings trade",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )

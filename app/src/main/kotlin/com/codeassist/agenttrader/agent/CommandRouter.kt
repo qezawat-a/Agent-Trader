@@ -59,15 +59,19 @@ object CommandRouter {
         // v1.1.7 risk manager & exits — same lesson: route to the engine, never the LLM
         "set breakeven", "set trail trigger", "set trail distance",
         "set stop frac", "set stop fraction",
-        "set max positions", "set maxpos", "set daily loss", "set guard",
+        "set max positions", "set maxpos", "set guard",
+        "set liq guard", "set liq buffer",
         // v2.2.x TP distance + majority-side gate — both engine commands, both were
         // missing here, so they fell through to the LLM and never changed anything.
         // Note: the router matches lower-cased text, so "set tpR" is spelled "set tp r".
         "set tp r", "set tp ", "set tf agree",
-        // v.2.4.4 — the user types commands the way he talks ("min volume 24h
-        // usd 10000"). Without these prefixes such a line fell through to the
-        // LLM, which answered in prose and changed nothing.
+        // v.2.4.4 — the auto-universe commands were MISSING here, so "set auto
+        // universe on" fell through to the LLM, which answered in prose and
+        // changed nothing: the app looked like it ignored the command.
+        // Both the "set ..." form and the spoken form are routed to the engine.
+        "set auto universe", "set min volume", "set auto rank",
         "min volume", "auto universe", "auto rank", "auto on", "auto off",
+        "auto gainers", "auto volume", "auto losers", "auto movers",
         "refresh auto", "scan top", "set live", "live mode", "paper mode",
     )
 

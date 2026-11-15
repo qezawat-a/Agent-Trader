@@ -35,5 +35,14 @@ jobs:
             exit 1
           fi
 
+      - name: Verify the root test mirror is in sync
+        run: |
+          # Same for the tests: the on-device build compiles src/test, so a stale
+          # copy asserts yesterday's numbers and fails there, not here.
+          if ! diff -rq app/src/test src/test; then
+            echo "ERROR: src/test is out of sync with app/src/test — copy it and commit."
+            exit 1
+          fi
+
       - name: Run the unit tests
         run: gradle :app:testDebugUnitTest --stacktrace

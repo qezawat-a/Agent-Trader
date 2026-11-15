@@ -22,9 +22,10 @@ with what actually happened.
 
 The trading side is not a toy: 37 strategies across six groups (Classic, Risk, Reversal,
 Breakout, Trend, Additional) plus the exact-spec names from the strategy spec, a 15m + 1h
-consensus gate, a TP/SL plan built around liquidation distance, signed REST calls verified
-against the live Bitunix API, and a private WebSocket feed that streams balance, position,
-order and TP/SL updates into the chat,
+consensus gate, a TP/SL plan built around the **official** liquidation formula
+(`Liq = Entry × (1 − 1/Leverage + MMR)`, MMR read from the tier table), signed REST calls
+verified against the live Bitunix API, and a private WebSocket feed that streams balance,
+position, order and TP/SL updates into the chat,
 and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
 
 ## The four screens
@@ -111,7 +112,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 
 **Risk manager & exits**
 
-`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set stop frac <10-90>` · `set max positions <1-20>` · `set daily loss <pct>` (0 = off) · `set guard <sec>` (0 = off)
+`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set stop frac <10-90>` · `set max positions <1-20>` · `set liq guard <pct>` (0 = off) · `set liq buffer <pct>` (0 = off) · `set guard <sec>` (0 = off)
 
 ## How the brain works
 
@@ -245,12 +246,13 @@ or by asking the agent:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `set breakeven <pct>` | 10% | Once ROI reaches it, the stop moves to entry (0 = off) |
-| `set trail trigger <pct>` | 15% | Trailing starts once ROI reaches it (0 = off) |
-| `set trail distance <pct>` | 15% | Trailing keeps this much ROI behind the best price |
-| `set stop frac <10-90>` | 50% | Initial stop sits this % of the way toward liquidation |
+| `set breakeven <pct>` | 25% | Once ROI reaches it, the stop moves to entry (0 = off) |
+| `set trail trigger <pct>` | 40% | Trailing starts once ROI reaches it (0 = off) |
+| `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
+| `set stop frac <10-90>` | 30% | Initial stop sits this % of the way toward liquidation |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
-| `set daily loss <pct>` | 5% | Blocks new entries for the rest of the UTC day beyond it (0 = off) |
+| `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off) |
+| `set liq buffer <pct>` | 5% | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off) |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
 The risk manager gates **every** entry path: the scanner, manual entry and one-tap live
@@ -259,19 +261,32 @@ and live moves announce themselves in chat and in the status-bar notifications
 (`Breakeven BTCUSDT: SL moved to entry …`, `SL moved to 100.3060 — Trailing BTCUSDT (ROI 8.1%)`).
 Live positions are managed mid-trade every tick (`mid management`): the engine reads each
 position's mark price, applies breakeven/trailing, and updates the exchange stop with
-`modify_position_tpsl`. `riskBlock()` checks guard interval → max open positions → daily
-loss cap before any entry; `tpsl_history` and `settings trade` always show the current
-configured values.
+`modify_position_tpsl`. Management keeps running while the engine is on — switching
+**trading** off stops new entries, it does not abandon the positions that are already open.
+`riskBlock()` checks guard interval → max open positions before any entry; `tpsl_history`
+and `settings trade` always show the current configured values.
 - Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to
   200x for BTCUSDT/ETHUSDT, 20–125x for most other contracts); quantities floored to the
   symbol's base precision and skipped when below the minimum volume.
+- **Liquidation protection, two sides.** `set liq buffer` keeps a new entry's estimated
+  liquidation price at least that % away from entry (which caps the leverage the entry may
+  use); `set liq guard` is the backstop on an open position — if its loss reaches the floor,
+  the engine warns once and then closes it at market, so the exchange's liquidation engine
+  never gets the chance. With a healthy stop the guard stays quiet: the stop sits at 30% of
+  the liquidation distance and fires long before the floor at −60% ROI.
+- **The liquidation math is the exchange's own.** Bitunix liquidates at
+  `Liq = Entry × (1 − 1/Leverage + MMR)`, so the maintenance margin rate is read from
+  `get_position_tiers` and subtracted from the room — at 100x with MMR 0.5% the real room is
+  0.5%, not the 1.0% a naive `entry/leverage` suggests. The stop is triggered on
+  **MARK_PRICE** (the same series the exchange liquidates against), so a fast move cannot
+  jump past the stop to the liquidation price.
 
 ## Development
 
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 236 JVM unit tests
+gradle :app:testDebugUnitTest   # 301 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```

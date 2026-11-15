@@ -462,8 +462,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      *  - marginCoin is REQUIRED by the exchange even though docs list it as optional.
      *  - side names the POSITION: BUY opens long, SELL opens short.
      *  - tradeSide ("OPEN"/"CLOSE") is only sent in hedge mode; pass null in one-way mode.
-     *  - tpPrice/slPrice attach a position-level TP/SL on fill; all TPSL orders use
-     *    LAST_PRICE stop type and MARKET order type per project rule.
+     *  - tpPrice/slPrice attach a position-level TP/SL on fill; TP uses LAST_PRICE
+     *    and MARKET order type per project rule.
+     *  - the STOP triggers on MARK_PRICE, not LAST_PRICE: the exchange liquidates
+     *    against the MARK price, so a stop that watches the LAST price can be
+     *    bypassed in a fast move (mark reaches the liquidation price before the
+     *    last price ever touches the stop). Same price series for the stop and
+     *    for the liquidation → the stop always gets there first.
      */
     fun placeMarketOrder(
         symbol: String, qty: String, side: String, tradeSide: String?,
@@ -477,7 +482,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         reduceOnly = reduceOnly.takeIf { it },
         tpPrice = tpPrice, tpStopType = tpPrice?.let { "LAST_PRICE" },
         tpOrderType = tpPrice?.let { "MARKET" },
-        slPrice = slPrice, slStopType = slPrice?.let { "LAST_PRICE" },
+        slPrice = slPrice, slStopType = slPrice?.let { "MARK_PRICE" },
         slOrderType = slPrice?.let { "MARKET" },
         marginCoin = marginCoin,
     )
@@ -665,17 +670,27 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     // ---- TP/SL ----
 
-    /** Position-level TP/SL: closes the whole position at market when triggered. */
+    /**
+     * Position-level TP/SL: closes the whole position at market when triggered.
+     *
+     * The STOP defaults to MARK_PRICE on purpose — the exchange liquidates
+     * against the mark price, so a stop watching the last price can be
+     * bypassed in a fast move. The TP keeps the project's LAST_PRICE rule.
+     */
     fun placePositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
-        tpStopType: String = "LAST_PRICE", slStopType: String = "LAST_PRICE",
+        tpStopType: String = "LAST_PRICE", slStopType: String = "MARK_PRICE",
     ): JSONObject = positionTpSlBody(
         "/api/v1/futures/tpsl/position/place_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
 
-    /** Modifies an existing position-level TP/SL. */
+    /**
+     * Modifies an existing position-level TP/SL. The stop moves on MARK_PRICE
+     * (same reason as [placePositionTpSl]) so a trailing/breakeven stop can
+     * never be slower than the exchange's liquidation check.
+     */
     fun modifyPositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
-        tpStopType: String = "LAST_PRICE", slStopType: String = "LAST_PRICE",
+        tpStopType: String = "LAST_PRICE", slStopType: String = "MARK_PRICE",
     ): JSONObject = positionTpSlBody(
         "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
 

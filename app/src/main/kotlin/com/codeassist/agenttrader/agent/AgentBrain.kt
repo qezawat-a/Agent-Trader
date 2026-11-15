@@ -30,7 +30,10 @@ object AgentBrain {
         "set tf agree",
         // risk manager & exits — nothing is hard-capped
         "set breakeven", "set trail trigger", "set trail distance", "set stop frac",
-        "set max positions", "set daily loss", "set guard", "set tp r",
+        "set max positions", "set guard", "set tp r",
+        // liquidation backstop: close before the exchange can liquidate, and
+        // keep new entries' liquidation far enough from entry
+        "set liq guard", "set liq buffer",
         // money-moving — only with an explicit request from the user
         "close position", "diagnose", "repair",
     )
