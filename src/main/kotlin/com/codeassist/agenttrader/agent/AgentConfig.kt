@@ -158,10 +158,35 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("liq_guard_roi", 60)
         set(value) = prefs.edit().putInt("liq_guard_roi", value.coerceIn(0, 100)).apply()
 
-    /** Liquidation buffer: keep estimated liquidation at least this % from entry (caps leverage). 0 = off (default). */
+    /**
+     * Liquidation buffer: keep estimated liquidation at least this % from
+     * entry (caps leverage). 0 = off (the default).
+     *
+     * The stored VALUE only counts once the user has chosen it themselves
+     * ([liqBufferPctSet]) — or once it differs from the 5% that the versions
+     * before v2.5.0 shipped as a default and wrote into the settings on every
+     * chat message. An install that never chose a buffer still carried that
+     * inherited 5, which silently capped the leverage (75x became 17x);
+     * reading the raw value would have kept the cap alive after the default
+     * went to 0.
+     */
     var liqBufferPct: Float
-        get() = prefs.getFloat("liq_buffer_pct", 0f)
-        set(value) = prefs.edit().putFloat("liq_buffer_pct", value.coerceIn(0f, 100f)).apply()
+        get() = effectiveLiqBuffer(
+            if (prefs.contains(KEY_LIQ_BUFFER_PCT)) prefs.getFloat(KEY_LIQ_BUFFER_PCT, 0f) else null,
+            liqBufferPctSet,
+            LEGACY_LIQ_BUFFER_DEFAULT,
+        )
+        set(value) {
+            prefs.edit()
+                .putFloat(KEY_LIQ_BUFFER_PCT, value.coerceIn(0f, 100f))
+                .putBoolean(KEY_LIQ_BUFFER_PCT_SET, true)
+                .apply()
+        }
+
+    /** True once the user has chosen a liquidation buffer themselves. */
+    var liqBufferPctSet: Boolean
+        get() = prefs.getBoolean(KEY_LIQ_BUFFER_PCT_SET, false)
+        set(value) { prefs.edit().putBoolean(KEY_LIQ_BUFFER_PCT_SET, value).apply() }
 
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
@@ -211,6 +236,7 @@ class AgentConfig(context: Context) {
         "auto_rank_by" to autoRankBy,
         "liq_guard_roi" to liqGuardRoiPct,
         "liq_buffer_pct" to liqBufferPct,
+        "liq_buffer_pct_set" to liqBufferPctSet,
         "last_plan" to lastPlan,
     )
 
@@ -256,7 +282,16 @@ class AgentConfig(context: Context) {
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }
         str("auto_rank_by")?.let { autoRankBy = it }
         int("liq_guard_roi")?.let { liqGuardRoiPct = it }
-        num("liq_buffer_pct")?.let { liqBufferPct = it.toFloat() }
+        num("liq_buffer_pct")?.let { v ->
+            val f = v.toFloat().coerceIn(0f, 100f)
+            // An old backup carries no "chosen" flag: the legacy 5% default
+            // inside it was never the user's choice, anything else was.
+            val chosen = bool(KEY_LIQ_BUFFER_PCT_SET) ?: (f != LEGACY_LIQ_BUFFER_DEFAULT)
+            prefs.edit()
+                .putFloat(KEY_LIQ_BUFFER_PCT, f)
+                .putBoolean(KEY_LIQ_BUFFER_PCT_SET, chosen)
+                .apply()
+        }
         str("last_plan")?.let { lastPlan = it }
     }
 
@@ -273,5 +308,26 @@ class AgentConfig(context: Context) {
         const val DEFAULT_SOUL =
             "You are CodeAssist's agent. Be precise, admit uncertainty, never invent results, " +
                 "and ask before changing files unless auto-accept is on."
+
+        /** The buffer default the versions before v2.5.0 shipped and persisted. */
+        const val LEGACY_LIQ_BUFFER_DEFAULT = 5f
+
+        const val KEY_LIQ_BUFFER_PCT = "liq_buffer_pct"
+        const val KEY_LIQ_BUFFER_PCT_SET = "liq_buffer_pct_set"
     }
+}
+
+/**
+ * The effective liquidation buffer.
+ *
+ * A stored value only counts when the user chose it ([chosen]) or when it is
+ * not the legacy default that the versions before v2.5.0 shipped and wrote
+ * into the settings on every chat message. That inherited 5% was never the
+ * user's choice, and it silently capped the leverage — 75x became 17x.
+ */
+internal fun effectiveLiqBuffer(stored: Float?, chosen: Boolean, legacyDefault: Float): Float = when {
+    chosen -> stored ?: 0f
+    stored == null -> 0f
+    stored == legacyDefault -> 0f
+    else -> stored
 }

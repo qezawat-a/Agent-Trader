@@ -292,6 +292,12 @@ and `settings trade` always show the current configured values.
   the engine warns once and then closes it at market, so the exchange's liquidation engine
   never gets the chance. With a healthy stop the guard stays quiet: the stop sits at 30% of
   the liquidation distance and fires long before the floor at −60% ROI.
+
+  The versions before v2.5.1 shipped the buffer at 5% *and* wrote that value into the
+  settings on every chat message, so an install that never chose a buffer still carried an
+  inherited 5 that kept the cap alive. The stored value now only counts once you have
+  chosen it yourself (or once it differs from that inherited 5) — so upgrading clears the
+  cap, while a buffer you did pick is kept.
 - **The liquidation math is the exchange's own.** Bitunix liquidates at
   `Liq = Entry × (1 − 1/Leverage + MMR)`, so the maintenance margin rate is read from
   `get_position_tiers` and subtracted from the room — at 75x with MMR 0.65% the real room is
@@ -304,7 +310,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 307 JVM unit tests
+gradle :app:testDebugUnitTest   # 312 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```
