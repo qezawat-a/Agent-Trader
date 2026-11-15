@@ -181,26 +181,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         return null
     }
 
-    private companion object {
-        /**
-         * Documented list wrappers, in preference order. Bitunix does NOT use one
-         * key everywhere — this is why the previous fixed list silently returned
-         * an empty array for tickers (`data.tickerList`), which starved the
-         * auto-universe and the signal board.
-         */
-        val DOCUMENTED_LIST_KEYS = listOf(
-            "orderList",
-            "positionList",
-            "tradeList",
-            "tickerList",
-            "tradingPairList",
-            "fundingRateList",
-            "tierList",
-            "positionTierList",
-            "list",
-        )
-    }
-
     // ---- Market data (public) ----
 
     /**
@@ -864,6 +844,24 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     companion object {
+        /**
+         * Documented list wrappers, in preference order. Bitunix does NOT use one
+         * key everywhere — this is why the previous fixed list silently returned
+         * an empty array for tickers (`data.tickerList`), which starved the
+         * auto-universe and the signal board.
+         */
+        private val DOCUMENTED_LIST_KEYS = listOf(
+            "orderList",
+            "positionList",
+            "tradeList",
+            "tickerList",
+            "tradingPairList",
+            "fundingRateList",
+            "tierList",
+            "positionTierList",
+            "list",
+        )
+
         /**
          * Codes the docs mark retryable:
          *  10001 network error · 10005 too many requests · 10006 request too
