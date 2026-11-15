@@ -15,6 +15,7 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
+import kotlin.math.ceil
 import kotlin.math.floor
 
 /** An open position, paper or live. dir is 1 for long and -1 for short. */
@@ -336,8 +337,14 @@ class TraderEngine(private val rest: BitunixRest) {
      * Liquidation buffer for NEW entries, % from the entry (0 = off): the
      * estimated liquidation price must stay at least this far away, which caps
      * the leverage an entry may use ("set liq buffer <pct>").
+     *
+     * OFF by default. This is a POLICY, not a safety rule: it silently
+     * downgrades the leverage the user chose (5% buffer + 0.65% MMR → 17x
+     * instead of the 75x the account and the exchange both allow). The
+     * safety rules — the stop inside the real liquidation price, and the
+     * refusal to open a position with no room — do not depend on it.
      */
-    var liqBufferPct: Double = 5.0
+    var liqBufferPct: Double = 0.0
         set(value) { field = value; configRev++ }
 
     // Live-position mid-management state, keyed by symbol.
@@ -348,9 +355,13 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Symbols the liquidation guard already warned about (warn once per position). */
     private val liqGuardWarned = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
-    /** Maintenance margin rate per symbol (symbol → (mmr, fetchedAt)); the tier
-     *  table changes rarely, so it is cached for [MMR_CACHE_MS]. */
-    private val mmrCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Double, Long>>()
+    /**
+     * The exchange's tiered risk limit table per symbol
+     * (symbol → (tiers, fetchedAt)). The TABLE changes rarely, so it is cached
+     * for [MMR_CACHE_MS] — the rate is NOT cached, because it depends on the
+     * position's notional and the notional changes with every entry.
+     */
+    private val tierCache = java.util.concurrent.ConcurrentHashMap<String, Pair<List<RiskTier>, Long>>()
 
     /** Last seen live positions (symbol → "side|qty") — the diff announces opens/closes. */
     private val seenLive = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -616,35 +627,112 @@ class TraderEngine(private val rest: BitunixRest) {
         pairs[symbol] = info
     }
 
+    /** Test hook: seeds the tier table without network. */
+    internal fun seedRiskTiers(symbol: String, tiers: List<RiskTier>) {
+        tierCache[symbol] = tiers to System.currentTimeMillis()
+    }
+
     /**
-     * Leverage a NEW entry may use: the user's setting, clamped by the symbol's
-     * exchange cap and then by the liquidation buffer — the estimated
-     * liquidation price must stay at least [liqBufferPct]% from the entry
-     * ("set liq buffer <pct>", 0 = off). Returns the leverage and, when it was
-     * reduced, the line that says so.
+     * Leverage a NEW entry may use.
      *
-     * The cap uses the OFFICIAL liquidation formula
-     *   Liq = Entry × (1 − 1/Leverage + MMR),
-     * so the maintenance margin rate comes out of the room: a 5% buffer with
-     * MMR 0.5% means 1/leverage ≥ 5.5%, i.e. at most 18x — not 20x.
+     * Two caps, both taken from the exchange's own tiered risk limit table
+     * (`get_position_tiers`), which carries per tier the nominal value range,
+     * the MAXIMUM LEVERAGE the tier allows, and the maintenance margin rate:
+     *
+     *   BTCUSDT (read live):    0 – 100 000        → 200x, MMR 0.30%
+     *                          100 000 – 400 000  → 150x, MMR 0.40%
+     *                          400 000 – 1 000 000 → 100x, MMR 0.50%
+     *                        1 000 000 – 4 000 000 →  75x, MMR 0.65%
+     *
+     *  - the tier the position occupies allows at most that tier's maximum
+     *    leverage — the exchange rejects an order above it, so the app must
+     *    not ask for one;
+     *  - the optional liquidation buffer ("set liq buffer <pct>", 0 = off)
+     *    demands that the estimated liquidation price stays at least that %
+     *    away from the entry. With the official formula
+     *        Liq = Entry × (1 − 1/Leverage + MMR)
+     *    that means 1/leverage ≥ buffer/100 + MMR.
+     *
+     * The buffer is OFF by default: it is a policy, not a safety rule, and any
+     * non-zero value silently downgrades the leverage the user asked for
+     * (5% buffer + 0.65% MMR → 17x instead of 75x).
+     *
+     * The tier depends on the notional, the notional on the leverage, and the
+     * leverage on the tier's MMR — so this settles on a fixed point rather
+     * than reading the tier of the PRE-CAP notional, which is a tier too high
+     * and therefore too pessimistic.
      */
     internal fun entryLeverage(symbol: String): Pair<Int, String?> {
         val wanted = effectiveLeverage(symbol)
-        val mmr = mmrFor(symbol, plannedNotional(symbol, wanted))
-        val cap = if (liqBufferPct > 0.0) {
-            (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1)
-        } else MAX_LEVERAGE
-        val clamped = cap.coerceAtMost(MAX_LEVERAGE)
-        if (wanted <= clamped) return wanted to null
-        return clamped to "leverage clamped ${wanted}x → ${clamped}x so the estimated liquidation " +
-            "stays ≥${fmt0(liqBufferPct)}% from entry (MMR ${fmt1(mmr * 100)}%, set liq buffer <pct> to change)"
+        val tiers = riskTiers(symbol)
+        val margin = marginForEntry()
+        if (tiers.isEmpty() || margin <= 0.0) {
+            // No tier table (paper mode, or the query failed): the buffer is the
+            // only cap, and it uses the simulated default rate.
+            val mmr = TpSlPlanner.DEFAULT_MMR
+            val cap = if (liqBufferPct > 0.0) {
+                (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1)
+            } else MAX_LEVERAGE
+            val lev = minOf(wanted, cap).coerceAtLeast(1)
+            if (lev >= wanted) return wanted to null
+            return lev to "leverage clamped ${wanted}x → ${lev}x · liquidation buffer ${fmt0(liqBufferPct)}% " +
+                "needs 1/lev ≥ ${fmt1(liqBufferPct / 100.0 + mmr)} (MMR ${fmt1(mmr * 100)}%) " +
+                "(set liq buffer <pct> to change)"
+        }
+        // The largest leverage whose position would land in a tier that ALLOWS
+        // it — the exchange rejects an order above its tier's maximum, so the
+        // app must not ask for one. Then the optional buffer on top.
+        var lev = maxTierLeverage(tiers, margin, wanted)
+        var tier: RiskTier? = null
+        var mmr = TpSlPlanner.DEFAULT_MMR
+        repeat(2) {
+            val t = tierFor(tiers, margin * lev)
+            tier = t
+            mmr = t?.mmr ?: TpSlPlanner.DEFAULT_MMR
+            if (liqBufferPct > 0.0) {
+                lev = minOf(lev, (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1))
+            }
+        }
+        if (lev >= wanted) return wanted to null
+        val why = buildString {
+            val t = tier
+            if (t != null && t.maxLeverage < wanted) {
+                append("tier ${t.level} (${fmt(t.startValue)}–${fmt(t.endValue)} notional) allows ${t.maxLeverage}x")
+                if (liqBufferPct > 0.0) append(" · ")
+            }
+            if (liqBufferPct > 0.0) {
+                append("liquidation buffer ${fmt0(liqBufferPct)}% needs 1/lev ≥ " +
+                    "${fmt1(liqBufferPct / 100.0 + mmr)} (MMR ${fmt1(mmr * 100)}%)")
+            }
+        }
+        return lev to "leverage clamped ${wanted}x → ${lev}x · $why (set liq buffer <pct> to change)"
     }
 
-    /** Rough notional of the position an entry would open (for the tier lookup). */
-    private fun plannedNotional(symbol: String, leverage: Int): Double {
+    /** The margin one entry commits: the configured share of the available balance. */
+    private fun marginForEntry(): Double {
         val available = runCatching { rest.availableUsdt() }.getOrNull()
             ?: liveBalanceSnapshot() ?: broker.balance
-        return available * riskFraction * leverage
+        return available * riskFraction
+    }
+
+    /**
+     * The exchange's tier table for a symbol, cached for [MMR_CACHE_MS].
+     *
+     * The TABLE is cached, not the rate: the rate depends on the position's
+     * notional, so caching the rate froze the first position's tier onto every
+     * later one — a position ten times the size kept the small position's
+     * (lower) maintenance margin rate and the app believed it had more room
+     * between entry and liquidation than the exchange would allow.
+     */
+    internal fun riskTiers(symbol: String): List<RiskTier> {
+        tierCache[symbol]?.let { (tiers, at) ->
+            if (System.currentTimeMillis() - at < MMR_CACHE_MS) return tiers
+        }
+        // The paper book has no exchange tiers: the simulated default applies.
+        if (!live) return emptyList()
+        val tiers = runCatching { parseRiskTiers(rest.positionTiers(symbol)) }.getOrDefault(emptyList())
+        tierCache[symbol] = tiers to System.currentTimeMillis()
+        return tiers
     }
 
     /**
@@ -654,15 +742,8 @@ class TraderEngine(private val rest: BitunixRest) {
      * that is too low would place the stop outside the real liquidation price.
      */
     internal fun mmrFor(symbol: String, notional: Double): Double {
-        // The paper book has no exchange tiers: the simulated default applies.
-        if (!live) return TpSlPlanner.DEFAULT_MMR
-        val cached = mmrCache[symbol]
-        if (cached != null && System.currentTimeMillis() - cached.second < MMR_CACHE_MS) return cached.first
-        val mmr = runCatching {
-            tierFor(rest.positionTiers(symbol), notional)?.optString("maintenanceMarginRate")?.toDoubleOrNull()
-        }.getOrNull()?.coerceIn(0.0, 0.05) ?: TpSlPlanner.DEFAULT_MMR
-        mmrCache[symbol] = mmr to System.currentTimeMillis()
-        return mmr
+        tierFor(riskTiers(symbol), notional)?.let { return it.mmr.coerceIn(0.0, 0.5) }
+        return TpSlPlanner.DEFAULT_MMR
     }
 
     /** Formats qty to the symbol's base precision, floored, never below minTradeVolume. */
@@ -1275,10 +1356,10 @@ class TraderEngine(private val rest: BitunixRest) {
                     val qty = posQty(p).toDoubleOrNull() ?: continue
                     val entry = posEntry(p).toDoubleOrNull() ?: continue
                     val notional = qty * entry
-                    val tier = runCatching { tierFor(rest.positionTiers(sym), notional) }.getOrNull()
+                    val tier = runCatching { tierFor(parseRiskTiers(rest.positionTiers(sym)), notional) }.getOrNull()
                     if (tier != null) {
-                        appendLine("  tier $sym: notional ${fmt(notional)} lev ${tier.optInt("leverage")} " +
-                            "mmr ${tier.optString("maintenanceMarginRate")}")
+                        appendLine("  tier $sym: notional ${fmt(notional)} tier ${tier.level} " +
+                            "max lev ${tier.maxLeverage}x mmr ${fmt1(tier.mmr * 100)}%")
                     }
                 }
             }
@@ -2250,13 +2331,95 @@ internal fun liqText(raw: String): String {
     return if (v <= 0.0) "— (low risk)" else raw
 }
 
-internal fun tierFor(tiers: org.json.JSONArray, notional: Double): org.json.JSONObject? {
+/**
+ * One row of the exchange's tiered risk limit (`get_position_tiers`).
+ *
+ * The official table carries four factors per tier: the tier number, the
+ * nominal value range, the MAXIMUM LEVERAGE the tier allows, and the
+ * maintenance margin rate. Both directions matter:
+ *
+ *  - the MMR RISES with the tier, so the room between entry and liquidation
+ *    SHRINKS as the position grows;
+ *  - the allowed leverage FALLS, so a large position may not use a large
+ *    leverage — the exchange rejects the order otherwise.
+ *
+ * BTCUSDT, read live from the exchange:
+ *
+ *   level 1:      0 –   100 000 → 200x, MMR 0.30%
+ *   level 2: 100 000 –   400 000 → 150x, MMR 0.40%
+ *   level 3: 400 000 – 1 000 000 → 100x, MMR 0.50%
+ *   level 4: 1 000 000 – 4 000 000 →  75x, MMR 0.65%
+ *
+ * So the 75x tier carries 0.65% MMR, and at 75x the real room between entry
+ * and liquidation is 1/75 − 0.0065 = 0.68% — not the 1.33% a naive
+ * Entry/Leverage suggests.
+ */
+internal data class RiskTier(
+    val level: Int,
+    val startValue: Double,
+    val endValue: Double,
+    /** The tier's maximum leverage. The response field is named "leverage". */
+    val maxLeverage: Int,
+    val mmr: Double,
+)
+
+/**
+ * Parses the tier table. A row without a usable range or rate is skipped
+ * rather than guessed at.
+ */
+internal fun parseRiskTiers(tiers: org.json.JSONArray): List<RiskTier> {
+    val out = ArrayList<RiskTier>()
     for (i in 0 until tiers.length()) {
         val t = tiers.optJSONObject(i) ?: continue
         val start = t.optString("startValue").toDoubleOrNull() ?: continue
         val end = t.optString("endValue").toDoubleOrNull() ?: Double.MAX_VALUE
-        if (notional >= start && notional < end) return t
+        val mmr = t.optString("maintenanceMarginRate").toDoubleOrNull() ?: continue
+        out += RiskTier(
+            level = t.optInt("level", out.size + 1),
+            startValue = start,
+            endValue = end,
+            maxLeverage = t.optInt("leverage", TraderEngine.MAX_LEVERAGE),
+            mmr = mmr,
+        )
+    }
+    return out
+}
+
+/** The tier a position of [notional] occupies. */
+internal fun tierFor(tiers: List<RiskTier>, notional: Double): RiskTier? {
+    for (t in tiers) {
+        if (notional >= t.startValue && notional < t.endValue) return t
     }
     return null
+}
+
+/**
+ * The largest leverage whose position would land in a tier that ALLOWS it.
+ *
+ * The position's notional is margin × leverage, so the leverage that keeps it
+ * inside tier T is
+ *
+ *   ceil(T.startValue / margin) ≤ L ≤ ceil(T.endValue / margin) − 1
+ *
+ * and the tier additionally caps it at [RiskTier.maxLeverage] — the exchange
+ * rejects an order above it. The answer is the largest such L over all tiers,
+ * never above [wanted].
+ *
+ * Worked example (BTCUSDT, margin 26 666.67 USDT): the 1M–4M tier allows 75x
+ * and a 75x position is worth 2M, so 75x is allowed and is the answer — the
+ * 4M–10M tier allows only 50x, and it would need a 4M notional that 75x does
+ * not reach.
+ */
+internal fun maxTierLeverage(tiers: List<RiskTier>, margin: Double, wanted: Int): Int {
+    if (margin <= 0.0 || wanted <= 0) return 1
+    var best = 1
+    for (t in tiers) {
+        val lo = if (t.startValue <= 0.0) 1 else ceil(t.startValue / margin).toInt().coerceAtLeast(1)
+        val hi = if (!t.endValue.isFinite()) Int.MAX_VALUE
+        else ceil(t.endValue / margin).toInt() - 1
+        val lev = minOf(t.maxLeverage, hi, wanted)
+        if (lev >= lo && lev > best) best = lev
+    }
+    return best.coerceAtLeast(1)
 }
 

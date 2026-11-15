@@ -158,9 +158,9 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("liq_guard_roi", 60)
         set(value) = prefs.edit().putInt("liq_guard_roi", value.coerceIn(0, 100)).apply()
 
-    /** Liquidation buffer: keep estimated liquidation at least this % from entry (caps leverage). */
+    /** Liquidation buffer: keep estimated liquidation at least this % from entry (caps leverage). 0 = off (default). */
     var liqBufferPct: Float
-        get() = prefs.getFloat("liq_buffer_pct", 5f)
+        get() = prefs.getFloat("liq_buffer_pct", 0f)
         set(value) = prefs.edit().putFloat("liq_buffer_pct", value.coerceIn(0f, 100f)).apply()
 
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)

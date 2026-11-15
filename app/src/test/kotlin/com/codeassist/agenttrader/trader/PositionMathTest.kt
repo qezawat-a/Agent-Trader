@@ -24,30 +24,50 @@ class PositionMathTest {
         assertEquals(-10.5, netPositionPnl(-10.0, 1.5, 1.0))
     }
 
-    private val tiers = JSONArray(
-        """[{"level":1,"startValue":"0","endValue":"50000","leverage":125,"maintenanceMarginRate":"0.005"},
-            {"level":2,"startValue":"50000","endValue":"250000","leverage":100,"maintenanceMarginRate":"0.01"},
-            {"level":3,"startValue":"250000","endValue":"1000000","leverage":50,"maintenanceMarginRate":"0.02"}]""",
+    /**
+     * The live BTCUSDT tier table, read from the exchange
+     * (GET /api/v1/futures/position/get_position_tiers?symbol=BTCUSDT).
+     *
+     * The rate RISES with the tier and the allowed leverage FALLS, so the
+     * 75x tier is the one that carries 0.65% MMR.
+     */
+    private val btcTiers = JSONArray(
+        """[{"symbol":"BTCUSDT","level":1,"startValue":"0","endValue":"100000","leverage":200,"maintenanceMarginRate":"0.003"},
+            {"symbol":"BTCUSDT","level":2,"startValue":"100000","endValue":"400000","leverage":150,"maintenanceMarginRate":"0.004"},
+            {"symbol":"BTCUSDT","level":3,"startValue":"400000","endValue":"1000000","leverage":100,"maintenanceMarginRate":"0.005"},
+            {"symbol":"BTCUSDT","level":4,"startValue":"1000000","endValue":"4000000","leverage":75,"maintenanceMarginRate":"0.0065"},
+            {"symbol":"BTCUSDT","level":5,"startValue":"4000000","endValue":"10000000","leverage":50,"maintenanceMarginRate":"0.01"}]""",
     )
 
     @Test
     fun tier_lookup_picks_the_band_containing_the_notional() {
-        assertEquals(1, tierFor(tiers, 1000.0)?.optInt("level"))
-        assertEquals(2, tierFor(tiers, 50000.0)?.optInt("level"))
-        assertEquals(2, tierFor(tiers, 249999.0)?.optInt("level"))
-        assertEquals(3, tierFor(tiers, 250000.0)?.optInt("level"))
+        val tiers = parseRiskTiers(btcTiers)
+        assertEquals(1, tierFor(tiers, 1000.0)?.level)
+        assertEquals(1, tierFor(tiers, 99_999.0)?.level)
+        assertEquals(2, tierFor(tiers, 100_000.0)?.level)
+        assertEquals(3, tierFor(tiers, 400_000.0)?.level)
+        assertEquals(4, tierFor(tiers, 2_000_000.0)?.level)
+        assertEquals(5, tierFor(tiers, 5_000_000.0)?.level)
+    }
+
+    @Test
+    fun the_75x_tier_carries_the_065_percent_rate() {
+        val tier = tierFor(parseRiskTiers(btcTiers), 2_000_000.0)!!
+        assertEquals(75, tier.maxLeverage)
+        assertEquals(0.0065, tier.mmr, 1e-9)
     }
 
     @Test
     fun tier_lookup_is_null_outside_the_table() {
-        assertNull(tierFor(tiers, 5_000_000.0))
-        assertNull(tierFor(JSONArray("[]"), 1000.0))
+        assertNull(tierFor(parseRiskTiers(btcTiers), 50_000_000.0))
+        assertNull(tierFor(parseRiskTiers(JSONArray("[]")), 1000.0))
     }
 
     @Test
     fun tier_lookup_skips_rows_without_numbers() {
+        // No startValue, and no maintenance margin rate: neither row is usable.
         val broken = JSONArray("""[{"level":1},{"level":2,"startValue":"0","endValue":"100","leverage":10}]""")
-        assertEquals(2, tierFor(broken, 50.0)?.optInt("level"))
+        assertNull(tierFor(parseRiskTiers(broken), 50.0))
     }
 
     @Test
@@ -110,12 +130,13 @@ class PositionMathTest {
 
     @Test
     fun doc_tier_table_bounds_are_half_open() {
-        assertEquals(1, tierFor(docTiers, 0.0)?.optInt("level"))
-        assertEquals(1, tierFor(docTiers, 49_999.0)?.optInt("level"))
-        assertEquals(2, tierFor(docTiers, 50_000.0)?.optInt("level"))
-        assertEquals(2, tierFor(docTiers, 199_999.0)?.optInt("level"))
-        assertNull(tierFor(docTiers, 200_000.0))
-        assertEquals(125, tierFor(docTiers, 1000.0)?.optInt("leverage"))
-        assertEquals("0.004", tierFor(docTiers, 1000.0)?.optString("maintenanceMarginRate"))
+        val tiers = parseRiskTiers(docTiers)
+        assertEquals(1, tierFor(tiers, 0.0)?.level)
+        assertEquals(1, tierFor(tiers, 49_999.0)?.level)
+        assertEquals(2, tierFor(tiers, 50_000.0)?.level)
+        assertEquals(2, tierFor(tiers, 199_999.0)?.level)
+        assertNull(tierFor(tiers, 200_000.0))
+        assertEquals(125, tierFor(tiers, 1000.0)?.maxLeverage)
+        assertEquals(0.004, tierFor(tiers, 1000.0)?.mmr!!, 1e-9)
     }
 }

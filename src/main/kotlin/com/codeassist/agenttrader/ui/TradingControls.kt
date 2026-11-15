@@ -407,7 +407,7 @@ fun ControlScreen(
                     }
                     Text(
                         "Liq guard closes a position before the exchange can liquidate it (warn at ${num(-(engine.risk.liqGuardRoiPct + 15.0))}% ROI). " +
-                            "Liq buffer ${num(engine.liqBufferPct)}% caps new entries' leverage the same way.",
+                            "Liq buffer ${num(engine.liqBufferPct)}% caps new entries' leverage the same way — off by default, because any value silently lowers the leverage you asked for.",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )

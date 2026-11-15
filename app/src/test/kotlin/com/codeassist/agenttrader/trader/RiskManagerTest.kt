@@ -2,6 +2,7 @@ package com.codeassist.agenttrader.trader
 
 import com.codeassist.agenttrader.agent.CommandRouter
 import com.codeassist.agenttrader.bitunix.BitunixRest
+import org.json.JSONArray
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -130,6 +131,14 @@ class RiskManagerTest {
     // ---- entry-side liquidation buffer ----
 
     @Test
+    fun the_liq_buffer_is_off_by_default() {
+        // A default that silently lowers the leverage the user chose is wrong:
+        // 5% buffer + 0.65% MMR capped a 75x account at 17x without asking.
+        val e = engine()
+        assertEquals(0.0, e.liqBufferPct, 1e-9)
+    }
+
+    @Test
     fun liq_buffer_caps_entry_leverage() {
         val e = engine()
         e.liqBufferPct = 2.0
@@ -159,6 +168,85 @@ class RiskManagerTest {
         val (lev, note) = e.entryLeverage("BTCUSDT")
         assertEquals(200, lev)
         assertNull(note)
+    }
+
+    // ---- the tiered risk limit: the exchange's own leverage ceiling ----
+
+    /** The live BTCUSDT tier table (read from the exchange). */
+    private fun btcTiers() = parseRiskTiers(
+        JSONArray(
+            """[{"level":1,"startValue":"0","endValue":"100000","leverage":200,"maintenanceMarginRate":"0.003"},
+                {"level":2,"startValue":"100000","endValue":"400000","leverage":150,"maintenanceMarginRate":"0.004"},
+                {"level":3,"startValue":"400000","endValue":"1000000","leverage":100,"maintenanceMarginRate":"0.005"},
+                {"level":4,"startValue":"1000000","endValue":"4000000","leverage":75,"maintenanceMarginRate":"0.0065"},
+                {"level":5,"startValue":"4000000","endValue":"10000000","leverage":50,"maintenanceMarginRate":"0.01"}]""",
+        ),
+    )
+
+    @Test
+    fun the_75x_tier_leaves_a_75x_entry_alone() {
+        // The case that bit the user: 75x available, and the position lands in
+        // the tier that ALLOWS 75x. Nothing may downgrade it.
+        val e = engine()
+        e.seedRiskTiers("BTCUSDT", btcTiers())
+        e.broker.balance = 266_666.67
+        e.riskFraction = 0.1
+        e.liqBufferPct = 0.0
+        e.leverage = 75
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        // 266 666.67 × 10% × 75 = 2 000 000 notional → the 1M–4M tier.
+        assertEquals(75, lev)
+        assertNull(note)
+    }
+
+    @Test
+    fun a_tier_that_forbids_the_leverage_is_respected() {
+        // 200x on a 2M notional: the 4M–10M tier (the notional 200x would
+        // reach) allows only 50x, and the 1M–4M tier allows 75x — so 75x is
+        // the largest the exchange accepts for this margin.
+        val e = engine()
+        e.seedRiskTiers("BTCUSDT", btcTiers())
+        e.broker.balance = 266_666.67
+        e.riskFraction = 0.1
+        e.liqBufferPct = 0.0
+        e.leverage = 200
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        assertEquals(75, lev)
+        assertNotNull(note)
+        assertTrue("clamped 200x → 75x" in note, note)
+    }
+
+    @Test
+    fun a_small_position_may_use_the_symbol_maximum() {
+        val e = engine()
+        e.seedRiskTiers("BTCUSDT", btcTiers())
+        e.broker.balance = 1000.0
+        e.riskFraction = 0.1
+        e.liqBufferPct = 0.0
+        e.leverage = 200
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        // 1000 × 10% × 200 = 20 000 notional → the first tier, which allows 200x.
+        assertEquals(200, lev)
+        assertNull(note)
+    }
+
+    @Test
+    fun the_rate_comes_from_the_tier_the_position_occupies() {
+        // 5% buffer, 75x wanted. The PRE-CAP notional (2M) sits in the tier
+        // with MMR 0.65%, but the position that actually opens (17x → 453k)
+        // sits in the tier with MMR 0.50%. The rate must be the one the
+        // position occupies — reading the pre-cap tier made the app believe
+        // it had less room than it has, and capped the leverage one step too low.
+        val e = engine()
+        e.seedRiskTiers("BTCUSDT", btcTiers())
+        e.broker.balance = 266_666.67
+        e.riskFraction = 0.1
+        e.liqBufferPct = 5.0
+        e.leverage = 75
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        assertEquals(17, lev)
+        assertNotNull(note)
+        assertTrue("MMR 0.5%" in note, note)
     }
 
     // ---- chat commands & routing ----
@@ -262,13 +350,15 @@ class RiskManagerTest {
         e.handle("set trail trigger 8")
         e.handle("set trail distance 5")
         val text = e.handle("tpsl_history")
-        assertTrue("5% ROI" in text, text)
-        assertTrue("8% ROI" in text, text)
-        assertTrue("off" !in text, text)
+        assertTrue("breakeven at 5% ROI" in text, text)
+        assertTrue("trail at 8% ROI, 5% behind" in text, text)
+        assertTrue("breakeven off" !in text, text)
         // Turning them off shows it honestly.
         e.handle("set breakeven 0")
         e.handle("set trail trigger 0")
-        assertTrue("off" in e.handle("tpsl_history"))
+        val off = e.handle("tpsl_history")
+        assertTrue("breakeven off" in off, off)
+        assertTrue("trail off" in off, off)
     }
 
     @Test

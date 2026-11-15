@@ -252,7 +252,7 @@ or by asking the agent:
 | `set stop frac <10-90>` | 30% | Initial stop sits this % of the way toward liquidation |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
 | `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off) |
-| `set liq buffer <pct>` | 5% | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off) |
+| `set liq buffer <pct>` | 0% (off) | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off, the default) |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
 The risk manager gates **every** entry path: the scanner, manual entry and one-tap live
@@ -268,16 +268,34 @@ and `settings trade` always show the current configured values.
 - Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to
   200x for BTCUSDT/ETHUSDT, 20–125x for most other contracts); quantities floored to the
   symbol's base precision and skipped when below the minimum volume.
+- **The leverage ceiling is the exchange's tier table, not a guess.** Bitunix runs a tiered
+  risk limit: each tier of `get_position_tiers` carries a nominal-value range, the **maximum
+  leverage** the tier allows, and the **maintenance margin rate** that applies there. Both
+  directions matter — the rate rises with the tier and the allowed leverage falls, so the
+  75x tier of BTCUSDT is the one that carries 0.65% MMR:
+
+  | tier | notional | max leverage | MMR |
+  | --- | --- | --- | --- |
+  | 1 | 0 – 100 000 | 200x | 0.30% |
+  | 2 | 100 000 – 400 000 | 150x | 0.40% |
+  | 3 | 400 000 – 1 000 000 | 100x | 0.50% |
+  | 4 | 1 000 000 – 4 000 000 | 75x | 0.65% |
+  | 5 | 4 000 000 – 10 000 000 | 50x | 1.00% |
+
+  The engine reads the tier the position would actually occupy, takes that tier's rate for the
+  liquidation math, and never asks for more leverage than the tier allows.
 - **Liquidation protection, two sides.** `set liq buffer` keeps a new entry's estimated
   liquidation price at least that % away from entry (which caps the leverage the entry may
-  use); `set liq guard` is the backstop on an open position — if its loss reaches the floor,
+  use); it is **off by default** — it is a policy, not a safety rule, and any value silently
+  lowers the leverage you asked for (5% buffer + 0.65% MMR → 17x instead of 75x).
+  `set liq guard` is the backstop on an open position — if its loss reaches the floor,
   the engine warns once and then closes it at market, so the exchange's liquidation engine
   never gets the chance. With a healthy stop the guard stays quiet: the stop sits at 30% of
   the liquidation distance and fires long before the floor at −60% ROI.
 - **The liquidation math is the exchange's own.** Bitunix liquidates at
   `Liq = Entry × (1 − 1/Leverage + MMR)`, so the maintenance margin rate is read from
-  `get_position_tiers` and subtracted from the room — at 100x with MMR 0.5% the real room is
-  0.5%, not the 1.0% a naive `entry/leverage` suggests. The stop is triggered on
+  `get_position_tiers` and subtracted from the room — at 75x with MMR 0.65% the real room is
+  0.68%, not the 1.33% a naive `entry/leverage` suggests. The stop is triggered on
   **MARK_PRICE** (the same series the exchange liquidates against), so a fast move cannot
   jump past the stop to the liquidation price.
 
@@ -286,7 +304,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 301 JVM unit tests
+gradle :app:testDebugUnitTest   # 307 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```
