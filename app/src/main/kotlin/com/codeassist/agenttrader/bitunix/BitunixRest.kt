@@ -169,10 +169,36 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     private fun firstList(obj: JSONObject): JSONArray? {
-        for (key in listOf("orderList", "positionList", "tradeList", "list")) {
-            obj.optJSONArray(key)?.let { return it }
+        for (key in DOCUMENTED_LIST_KEYS) obj.optJSONArray(key)?.let { return it }
+        // Fallback: any array-valued field. Bitunix names the wrapper per
+        // endpoint (tickerList, tradingPairList, fundingRateList, tierList...),
+        // so a missing key must never blank the whole response.
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            obj.optJSONArray(k)?.let { return it }
         }
         return null
+    }
+
+    private companion object {
+        /**
+         * Documented list wrappers, in preference order. Bitunix does NOT use one
+         * key everywhere — this is why the previous fixed list silently returned
+         * an empty array for tickers (`data.tickerList`), which starved the
+         * auto-universe and the signal board.
+         */
+        val DOCUMENTED_LIST_KEYS = listOf(
+            "orderList",
+            "positionList",
+            "tradeList",
+            "tickerList",
+            "tradingPairList",
+            "fundingRateList",
+            "tierList",
+            "positionTierList",
+            "list",
+        )
     }
 
     // ---- Market data (public) ----
