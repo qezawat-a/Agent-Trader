@@ -111,8 +111,8 @@ jobs:
             echo "- Verify: \`sha256sum -c SHA256SUMS.txt\`"
             echo
             echo "### Highlights"
-            echo "- Liquidation protection, both sides: \`set liq buffer\` keeps a new entry's estimated liquidation away from entry (and caps the leverage it may use), \`set liq guard\` closes an open position at market before the exchange can liquidate it"
-            echo "- The liquidation math is the exchange's own: \`Liq = Entry × (1 − 1/Leverage + MMR)\`, with the maintenance margin rate read from Bitunix's own tier table. Stops trigger on MARK_PRICE — the same series the exchange liquidates against — so a fast move cannot jump past the stop"
+            echo "- The leverage is the exchange's, not the app's: the tiered risk limit table sets both the maximum leverage per tier and the maintenance margin rate. 75x stays 75x — the app no longer caps it behind your back — and the stop is placed inside the REAL liquidation price"
+            echo "- Liquidation protection: \`set liq guard\` closes an open position at market before the exchange can liquidate it, and the stop triggers on MARK_PRICE — the same series the exchange liquidates against"
             echo "- The app picks the trading universe itself: every scan refreshes it to the top symbols by 24h gainers or volume, filtered by minimum 24h volume"
             echo "- Commands read plain sentences (\"min volume 24h usd 10000\"), and \`set universe\` checks the symbols against Bitunix"
             echo "- \`/cert\` shows the signing key, \`/backup\` / \`/restore\` save and restore every setting"
