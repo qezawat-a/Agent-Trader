@@ -43,6 +43,30 @@ object NetworkErrors {
         "handshake",
     )
 
+    /**
+     * A connection that died mid-response: the stream ended before the body
+     * was complete. Android's HTTP client reports this as an EOFException
+     * ("End of input"), and a WebSocket that loses its TCP stream reports the
+     * same class. It is a NETWORK fault, not a broken app or a bad request —
+     * the request itself was fine.
+     */
+    private val STREAM_MARKERS = listOf(
+        "eofexception",
+        "end of input",
+        "unexpected end of stream",
+        "stream was reset",
+        "stream was cut",
+        "dropped mid-response",
+        "closed by peer",
+        "premature",
+    )
+
+    /** True when the failure is a connection that dropped mid-response. */
+    fun isStreamDrop(raw: String?): Boolean {
+        val m = raw?.lowercase().orEmpty()
+        return m.isNotBlank() && STREAM_MARKERS.any { m.contains(it) }
+    }
+
     /** True when the failure is a DNS lookup failure. */
     fun isDns(raw: String?): Boolean {
         val m = raw?.lowercase().orEmpty()
@@ -52,7 +76,7 @@ object NetworkErrors {
     /** True when the failure is any kind of network/connectivity failure. */
     fun isNetwork(raw: String?): Boolean {
         val m = raw?.lowercase().orEmpty()
-        return m.isNotBlank() && NETWORK_MARKERS.any { m.contains(it) }
+        return m.isNotBlank() && (NETWORK_MARKERS.any { m.contains(it) } || isStreamDrop(m))
     }
 
     /** Walks the cause chain so a wrapped DNS failure is still recognised. */
@@ -74,12 +98,23 @@ object NetworkErrors {
         return text.contains("bitunix") || text.contains("fapi.")
     }
 
-    /** The most specific message in the cause chain, with the class as a fallback. */
+    /**
+     * The most specific message in the cause chain, with the class as a fallback.
+     *
+     * An EOFException carries "End of input" at best and nothing at all at
+     * worst, so the CLASS NAME is kept in the text — that is what identifies
+     * the fault ("EOFException") when the message is blank.
+     */
     fun rawMessage(error: Throwable): String {
         val chain = generateSequence(error) { it.cause }.toList()
-        return chain.firstOrNull { isNetwork(it.message) }?.message
-            ?.takeIf { it.isNotBlank() }
-            ?: chain.firstOrNull { !it.message.isNullOrBlank() }?.message
+        val described = chain.firstOrNull { isNetwork(it.message) }
+        if (described != null) {
+            val m = described.message?.trim().orEmpty()
+            if (m.isNotEmpty()) return m
+            return described.javaClass.simpleName
+        }
+        return chain.firstOrNull { !it.message.isNullOrBlank() }?.message
+            ?: chain.firstOrNull { it is java.io.EOFException }?.javaClass?.simpleName
             ?: error.javaClass.simpleName
     }
 
@@ -94,6 +129,8 @@ object NetworkErrors {
         return when {
             isDns(m) ->
                 "Bitunix unreachable (DNS) — check this device's internet connection; $retry"
+            isStreamDrop(m) ->
+                "Bitunix connection dropped mid-response — the request was fine, the stream was cut; $retry"
             isNetwork(m) ->
                 "Bitunix unreachable (network) — check this device's internet connection; $retry"
             m.isBlank() -> "unknown error; $retry"
@@ -163,5 +200,23 @@ object EngineRuntimeError {
         lastAt = 0L
         repeats = 0
         network = false
+    }
+
+    /**
+     * Clears the error only when it has been quiet for longer than the repeat
+     * window.
+     *
+     * Clearing on EVERY successful tick made an INTERMITTENT failure look new
+     * every time: one bad response, then a good one (which cleared the state),
+     * then the next bad response was reported again — an endless stream of the
+     * same "Loop error" line. The error now survives until the window has
+     * passed, so a flaky line is reported once per window instead of once per
+     * cycle.
+     */
+    fun clearIfStale(now: Long = System.currentTimeMillis()): Boolean {
+        if (last.isBlank()) return false
+        if (now - lastAt < REPEAT_WINDOW_MS) return false
+        clear()
+        return true
     }
 }

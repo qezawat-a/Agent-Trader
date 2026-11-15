@@ -1,5 +1,6 @@
 package com.codeassist.agenttrader.trader
 
+import java.io.EOFException
 import java.io.IOException
 import java.net.UnknownHostException
 import kotlin.test.AfterTest
@@ -98,5 +99,68 @@ class NetworkErrorsTest {
         EngineRuntimeError.clear()
         assertEquals("", EngineRuntimeError.last)
         assertFalse(EngineRuntimeError.network)
+    }
+
+    // ---- a stream that dies mid-response ----
+
+    @Test
+    fun an_eof_is_recognised_as_a_dropped_stream() {
+        assertTrue(NetworkErrors.isStreamDrop("EOFException"))
+        assertTrue(NetworkErrors.isStreamDrop("End of input"))
+        assertTrue(NetworkErrors.isStreamDrop("unexpected end of stream"))
+        assertTrue(NetworkErrors.isNetwork("EOFException"))
+    }
+
+    @Test
+    fun an_eof_is_not_mistaken_for_a_bad_request() {
+        // The request itself was fine; the connection was cut. That is a
+        // network fault, not an exchange error and not a provider error.
+        assertFalse(NetworkErrors.isExchange(EOFException("End of input")))
+        assertFalse(NetworkErrors.isDns("EOFException"))
+    }
+
+    @Test
+    fun describe_an_eof_says_the_stream_was_cut() {
+        val text = NetworkErrors.describe(NetworkErrors.rawMessage(EOFException("End of input")), retrySec = 30)
+        assertTrue(text.contains("dropped mid-response"), text)
+        assertTrue(text.contains("30s"), text)
+        // The friendly text must itself stay classifiable for /diagnose.
+        assertTrue(NetworkErrors.isNetwork(text), text)
+    }
+
+    @Test
+    fun an_eof_without_a_message_still_names_the_fault() {
+        // EOFException carries "End of input" at best and nothing at all at
+        // worst — the class name is what identifies it.
+        val raw = NetworkErrors.rawMessage(EOFException())
+        assertTrue(raw.contains("EOF"), raw)
+        assertTrue(NetworkErrors.isStreamDrop(raw), raw)
+    }
+
+    @Test
+    fun an_intermittent_failure_is_not_reported_again_after_a_good_tick() {
+        // The bug this fixes: a flaky line failed, the next tick succeeded and
+        // CLEARED the error state, so the next failure looked brand new and
+        // printed the same line again — an endless stream of "Loop error".
+        val t0 = 3_000_000L
+        val msg = NetworkErrors.describe(NetworkErrors.rawMessage(EOFException("End of input")), 30)
+
+        assertTrue(EngineRuntimeError.record(msg, t0))
+        // A successful tick right after: the state must SURVIVE it.
+        assertFalse(EngineRuntimeError.clearIfStale(t0 + 1_000))
+        assertFalse(EngineRuntimeError.clearIfStale(t0 + 2_000))
+        assertEquals(msg, EngineRuntimeError.last)
+        // So the same failure is still suppressed.
+        assertFalse(EngineRuntimeError.record(msg, t0 + 3_000))
+    }
+
+    @Test
+    fun a_stale_error_is_cleared_once_the_window_passed() {
+        val t0 = 4_000_000L
+        EngineRuntimeError.record("some failure", t0)
+        assertTrue(EngineRuntimeError.clearIfStale(t0 + 6 * 60_000))
+        assertEquals("", EngineRuntimeError.last)
+        // And with the state gone, the next failure is reported again.
+        assertTrue(EngineRuntimeError.record("some failure", t0 + 6 * 60_000 + 1))
     }
 }

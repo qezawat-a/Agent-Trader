@@ -1034,12 +1034,23 @@ class TraderEngine(private val rest: BitunixRest) {
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
     fun scanOnce(): List<String> {
         val out = mutableListOf<String>()
+        // One balance check for the whole scan. An empty futures wallet cannot
+        // fund anything, so the scan stops here instead of sending one order
+        // per symbol per tick — every one of them rejected by the exchange.
+        if (live) {
+            val available = runCatching { rest.availableUsdt() }.getOrNull()
+            if (available != null && available < MIN_FUTURES_BALANCE_USDT) {
+                return listOf("SKIP scan: ${emptyFuturesWalletNote(available)}")
+            }
+        }
         val symbols = runCatching {
             if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
             if (scanOn) rankUniverse(scanTop) else universe.toList()
         }.getOrElse { universe.toList() }
+        // The open positions are ONE account-wide query for the whole scan.
+        val openPositions = if (live) runCatching { rest.pendingPositions() }.getOrNull() else null
         for (sym in symbols) {
-            // Risk manager: guard interval / max open positions.
+            // Risk manager: guard interval → max open positions.
             riskBlock()?.let { out.add(it); break }
             // One kline fetch per timeframe; the price reuses the 15m series
             // instead of asking the exchange for the very same candles twice.
@@ -1049,7 +1060,7 @@ class TraderEngine(private val rest: BitunixRest) {
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
             if (live) {
-                out.add(openLive(sym, sig.dir, price, sig.confidence) ?: continue)
+                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions) ?: continue)
             } else {
                 if (broker.positions.containsKey(sym)) continue
                 val (lev, levNote) = entryLeverage(sym)
@@ -1066,8 +1077,13 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /** Places a real market order with TP/SL attached. Returns a status line, or null to skip. */
-    private fun openLive(symbol: String, dir: Int, price: Double, confidence: Double): String? =
-        placeLive(symbol, dir, price, riskFraction, confidence)
+    private fun openLive(
+        symbol: String,
+        dir: Int,
+        price: Double,
+        confidence: Double,
+        openPositions: JSONArray? = null,
+    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
 
     /**
      * One-tap manual entry (paper or live).
@@ -1168,6 +1184,7 @@ class TraderEngine(private val rest: BitunixRest) {
         price: Double,
         marginFraction: Double,
         confidence: Double?,
+        openPositions: JSONArray? = null,
     ): String {
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
@@ -1175,7 +1192,17 @@ class TraderEngine(private val rest: BitunixRest) {
         exchangeBalance.set(available)
         exchangeBalanceAt.set(System.currentTimeMillis())
         riskBlock()?.let { return it }
-        val livePositions = rest.pendingPositions(symbol)
+        // An empty futures wallet cannot fund anything. Without this the loop
+        // kept trying, once per symbol and once per tick, and the exchange
+        // rejected every attempt — an error line every cycle for a condition
+        // the user can fix in one tap. Say it once, clearly.
+        if (available < MIN_FUTURES_BALANCE_USDT) {
+            return "SKIP $symbol: ${emptyFuturesWalletNote(available)}"
+        }
+        // The open positions are ONE account-wide query, not one per symbol:
+        // the scan asks for it once and hands it down. Asking again for every
+        // symbol doubled the request rate of every tick.
+        val livePositions = openPositions ?: rest.pendingPositions()
         for (i in 0 until livePositions.length()) {
             if (livePositions.getJSONObject(i).optString("symbol") == symbol) {
                 return "SKIP $symbol: live position already open."
@@ -1196,7 +1223,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 "of the liquidation distance (${lev}x leverage, MMR ${fmt1(mmr * 100)}%). " +
                 "Lower stop frac or lower leverage.$levLine"
         }
-        val openCount = runCatching { rest.pendingPositions().length() }.getOrDefault(0)
+        val openCount = runCatching { livePositions.length() }.getOrDefault(0)
         // Margin sizing: the configured share, capped by what the free position
         // slots can carry, minus the fee/margin buffer (committing 100% of the
         // balance makes Bitunix answer 20003 "insufficient balance").
@@ -1681,8 +1708,11 @@ class TraderEngine(private val rest: BitunixRest) {
                 if (!trading && !engineOn && !hasOpenPositions()) return@scheduleWithFixedDelay
                 val events = tick() + if (trading) scanOnce() else emptyList()
                 // A successful poll means the exchange is reachable again, so a
-                // stale DNS failure must not keep showing in /diagnose.
-                EngineRuntimeError.clear()
+                // stale DNS failure must not keep showing in /diagnose. The
+                // error state is NOT wiped outright though: a flaky line that
+                // fails once in a while must not look "new" every time and
+                // print the same line every cycle.
+                EngineRuntimeError.clearIfStale()
                 events.forEach(onEvent)
             } catch (e: Exception) {
                 // Exchange/network failures are engine errors, never provider
@@ -2260,8 +2290,29 @@ class TraderEngine(private val rest: BitunixRest) {
 
         /** How long a symbol's maintenance margin rate is cached (10 min). */
         const val MMR_CACHE_MS = 10 * 60 * 1000L
+
+        /**
+         * Below this the futures wallet cannot fund an entry, so the engine
+         * stops trying instead of sending an order per symbol per tick.
+         */
+        const val MIN_FUTURES_BALANCE_USDT = 1.0
     }
 }
+
+/**
+ * The one-line explanation of an empty futures wallet, or null when the
+ * balance can fund an entry.
+ *
+ * An empty futures wallet cannot fund anything: the exchange rejects every
+ * order. Without this check the loop kept trying — once per symbol, once per
+ * tick — and printed an error line every cycle for a condition the user can
+ * fix in one tap. Funds sitting in the Funding wallet do not pay for futures
+ * orders, which is the usual reason.
+ */
+internal fun emptyFuturesWalletNote(available: Double): String? =
+    if (available >= TraderEngine.MIN_FUTURES_BALANCE_USDT) null
+    else "the futures wallet is empty (${fmt2(available)} USDT) — funds in the Funding wallet do not pay " +
+        "for futures orders (transfer them to the Futures wallet, or trade paper: set live off)"
 
 /** Fixed-point formatting without scientific notation. */
 object BigDecimalFormat {
