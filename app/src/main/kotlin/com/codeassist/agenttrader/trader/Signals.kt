@@ -211,6 +211,15 @@ object TpSlPlanner {
      *  from the liquidation price, so liquidation never beats the stop. */
     const val LIQ_SAFETY_FRACTION = 0.05
 
+    /**
+     * The fraction of the liquidation distance at which the liquidation guard
+     * closes.
+     *
+     * The stop sits at 30% of that distance by default, so the guard stays a
+     * BACKSTOP: it fires late, but before the exchange can liquidate.
+     */
+    const val LIQ_GUARD_ROOM_FRACTION = 0.85
+
     /** The user-visible stop fraction may not exceed this — beyond it the stop
      *  is inside the safety margin and the trade is refused. */
     const val MAX_STOP_FRACTION = 0.90
@@ -293,6 +302,39 @@ object TpSlPlanner {
     fun roi(entry: Double, price: Double, dir: Int, leverage: Int): Double =
         dir * (price - entry) / entry * leverage
 
+    /**
+     * The ROI (negative, percent) at which the liquidation guard must close.
+     *
+     * The user sets a flat ROI — "close at −60% ROI" — but a flat ROI is only
+     * safe at LOW leverage. The liquidation ROI is −(1 − L·MMR): at 75x with
+     * MMR 0.65% the exchange liquidates at −51.25%, so a −60% guard would only
+     * fire AFTERWARDS and the backstop would never run.
+     *
+     * So the guard has a distance floor as well: it closes at
+     * [LIQ_GUARD_ROOM_FRACTION] of the distance from the entry to the
+     * liquidation price, whichever trigger comes first. That is before the
+     * liquidation at EVERY leverage, and it always stays behind the stop
+     * (30% of that distance by default).
+     *
+     * [liqPrice] is the exchange's own liquidation price when it publishes
+     * one, else the official formula.
+     */
+    fun guardThresholdRoiPct(
+        userRoiPct: Double,
+        entry: Double,
+        liqPrice: Double,
+        leverage: Int,
+    ): Double {
+        if (entry <= 0.0 || leverage <= 0) return -abs(userRoiPct)
+        val liqDist = abs(entry - liqPrice)
+        // The distance the user's ROI asks for, in price units.
+        val userDistance = entry * (abs(userRoiPct) / 100.0) / leverage
+        // The safety floor: a fixed share of the way to liquidation.
+        val floorDistance = liqDist * LIQ_GUARD_ROOM_FRACTION
+        // The closer to the entry wins — that is the earlier trigger.
+        val distance = minOf(userDistance, floorDistance)
+        return -distance / entry * leverage * 100.0
+    }
     /** Trailing stop price for the best price seen so far, [trailRoi] distance behind it. */
     fun trailStop(best: Double, dir: Int, leverage: Int, trailRoi: Double = TRAIL_ROI): Double {
         val dist = trailRoi / leverage

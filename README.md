@@ -254,7 +254,7 @@ or by asking the agent:
 | `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
 | `set stop frac <10-90>` | 30% | Initial stop sits this % of the way toward liquidation |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
-| `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off) |
+| `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off). Always also fires at 85% of the way to the liquidation price |
 | `set liq buffer <pct>` | 0% (off) | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off, the default) |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
@@ -296,6 +296,13 @@ and `settings trade` always show the current configured values.
   never gets the chance. With a healthy stop the guard stays quiet: the stop sits at 30% of
   the liquidation distance and fires long before the floor at −60% ROI.
 
+  The guard's floor is anchored to the **distance to the liquidation price**, not to a flat
+  ROI — a flat ROI only works at low leverage. The liquidation ROI is `−(1 − L·MMR)`, so at
+  75x with MMR 0.65% the exchange liquidates at −51.25% and a flat −60% guard would only
+  fire *after* the exchange had already taken the position. The guard therefore also closes
+  at 85% of the way to the liquidation price, whichever trigger comes first. The ordering is
+  always the same: **stop → guard → liquidation**.
+
   The versions before v2.5.1 shipped the buffer at 5% *and* wrote that value into the
   settings on every chat message, so an install that never chose a buffer still carried an
   inherited 5 that kept the cap alive. The stored value now only counts once you have
@@ -313,7 +320,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 323 JVM unit tests
+gradle :app:testDebugUnitTest   # 328 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```
