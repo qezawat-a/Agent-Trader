@@ -253,6 +253,7 @@ or by asking the agent:
 | `set trail trigger <pct>` | 40% | Trailing starts once ROI reaches it (0 = off) |
 | `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
 | `set stop frac <10-90>` | 30% | Initial stop sits this % of the way toward liquidation |
+| `set stop atr <n>` | 1.5 | The stop must also sit this many ATRs from the entry, so it is never inside the symbol's own noise (0 = off) |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
 | `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off). Always also fires at 85% of the way to the liquidation price |
 | `set liq buffer <pct>` | 0% (off) | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off, the default) |
@@ -287,6 +288,32 @@ and `settings trade` always show the current configured values.
 
   The engine reads the tier the position would actually occupy, takes that tier's rate for the
   liquidation math, and never asks for more leverage than the tier allows.
+- **The stop is sized on volatility, and the leverage is derived from it.** A stop placed at
+  30% of the liquidation distance sits **0.21%** from the entry at 75x, while a 15m bar on
+  that symbol routinely moves **1.7%** — the market gaps through it and the realised loss is
+  three to five times the intended one. The stop must therefore sit at least **1.5 × ATR**
+  away (`set stop atr <n>`), and the leverage is capped so that stop still fits inside the
+  liquidation distance:
+
+  ```
+  1/leverage − MMR ≥ stop distance + safety   →   leverage ≤ 1/(stop + MMR + safety)
+  ```
+
+  Measured on the symbols that were actually traded (live 15m ATR):
+
+  | symbol | ATR(14) | stop at 1.5×ATR | max leverage that fits | the app used |
+  |---|---|---|---|---|
+  | FFUSDT | 1.73% | 2.59% | **29x** | 75x |
+  | XPLUSDT | 0.95% | 1.43% | **44x** | 50x |
+  | AKEUSDT | 2.86% | 4.30% | **19x** | 40x |
+  | KAVAUSDT | 2.50% | 3.75% | **21x** | 25x |
+  | BTCUSDT | 0.32% | 0.48% | 78x | 75x |
+
+  At 75x on FFUSDT **no stop can exist** — the liquidation distance is 0.68% and a
+  noise-sized stop needs 2.59% — so the leverage has to come down. On BTCUSDT the 75x
+  stands: a 0.48% stop fits inside the 0.68% of room. Your leverage setting is the
+  **ceiling**; the app lowers it only when a stop could not otherwise exist, and says so
+  in the chat line.
 - **Liquidation protection, two sides.** `set liq buffer` keeps a new entry's estimated
   liquidation price at least that % away from entry (which caps the leverage the entry may
   use); it is **off by default** — it is a policy, not a safety rule, and any value silently
@@ -320,7 +347,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 328 JVM unit tests
+gradle :app:testDebugUnitTest   # 334 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```

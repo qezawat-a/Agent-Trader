@@ -131,6 +131,16 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("stop_frac", 0)
         set(value) = prefs.edit().putInt("stop_frac", value).apply()
 
+    /**
+     * How many ATRs away the stop must sit from the entry (0 = off).
+     *
+     * The stop has to be outside the symbol's own noise, or the market gaps
+     * through it. The default is 1.5 ATRs.
+     */
+    var stopAtrMultiple: Float
+        get() = prefs.getFloat("stop_atr", com.codeassist.agenttrader.trader.TpSlPlanner.STOP_ATR_MULTIPLE.toFloat())
+        set(value) = prefs.edit().putFloat("stop_atr", value.coerceIn(0f, 10f)).apply()
+
     /** TP distance as R-multiple of the stop distance (0 = use engine default). */
     var tpR: Float
         get() = prefs.getFloat("tp_r", 0f)
@@ -230,6 +240,7 @@ class AgentConfig(context: Context) {
         "trail_trigger" to trailTriggerRoiPct,
         "trail_distance" to trailDistanceRoiPct,
         "stop_frac" to stopFracPct,
+        "stop_atr" to stopAtrMultiple,
         "tp_r" to tpR,
         "auto_universe" to autoUniverse,
         "auto_min_volume_usd" to autoMinVolumeUsd,
@@ -277,6 +288,7 @@ class AgentConfig(context: Context) {
         int("trail_trigger")?.let { trailTriggerRoiPct = it }
         int("trail_distance")?.let { trailDistanceRoiPct = it }
         int("stop_frac")?.let { stopFracPct = it }
+        num("stop_atr")?.let { stopAtrMultiple = it.toFloat() }
         num("tp_r")?.let { tpR = it.toFloat() }
         bool("auto_universe")?.let { autoUniverse = it }
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }

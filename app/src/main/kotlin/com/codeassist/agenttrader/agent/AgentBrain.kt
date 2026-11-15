@@ -30,6 +30,9 @@ object AgentBrain {
         "set tf agree",
         // risk manager & exits — nothing is hard-capped
         "set breakeven", "set trail trigger", "set trail distance", "set stop frac",
+        // the volatility floor: the stop sits this many ATRs from the entry, so
+        // it is never inside the symbol's own noise
+        "set stop atr",
         "set max positions", "set guard", "set tp r",
         // liquidation backstop: close before the exchange can liquidate, and
         // keep new entries' liquidation far enough from entry

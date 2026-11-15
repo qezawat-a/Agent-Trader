@@ -220,6 +220,20 @@ object TpSlPlanner {
      */
     const val LIQ_GUARD_ROOM_FRACTION = 0.85
 
+    /**
+     * How many ATRs away the stop must sit from the entry.
+     *
+     * The stop has to be outside the symbol's own noise, or the market gaps
+     * through it and the loss is several times the intended one.
+     */
+    const val STOP_ATR_MULTIPLE = 1.5
+
+    /**
+     * The room left between the stop and the liquidation price, as a fraction
+     * of the price. The leverage is capped so this room always exists.
+     */
+    const val LIQ_STOP_SAFETY_PCT = 0.0015
+
     /** The user-visible stop fraction may not exceed this — beyond it the stop
      *  is inside the safety margin and the trade is refused. */
     const val MAX_STOP_FRACTION = 0.90
@@ -259,22 +273,37 @@ object TpSlPlanner {
     /**
      * Builds a TP/SL plan where [stop] is guaranteed inside [liquidation] with
      * the safety margin. [stopFraction] is clamped to [MAX_STOP_FRACTION].
+     *
+     * The stop distance has TWO floors:
+     *  - [stopFraction] of the liquidation distance (the historical rule);
+     *  - [atrMultiple] × the symbol's ATR — the VOLATILITY floor.
+     *
+     * The volatility floor is what keeps the stop outside the noise. A stop
+     * at 30% of the liquidation distance sits 0.21% from the entry at 75x,
+     * while a 15m bar on that symbol routinely moves 1.7% — the market gaps
+     * through it and the realised loss is three to five times the intended
+     * one. The ATR floor says: never place a stop closer than the symbol's
+     * own noise.
      */
     fun plan(
         entry: Double, dir: Int, leverage: Int,
         stopFraction: Double = STOP_FRACTION_OF_LIQ,
         mmr: Double = DEFAULT_MMR,
+        atr: Double? = null,
+        atrMultiple: Double = STOP_ATR_MULTIPLE,
     ): TpSlPlan {
         val liqDist = liqDistance(entry, leverage, mmr)
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
         val frac = stopFraction.coerceIn(0.01, MAX_STOP_FRACTION)
+        val volDist = if (atr != null && atr > 0) atrMultiple * atr else 0.0
+        val dist = maxOf(frac * liqDist, volDist)
         val stop = if (dir > 0) {
-            val s = entry - frac * (entry - liq)
+            val s = entry - dist
             // Keep the stop inside liquidation with the safety margin.
             val floor = liq + LIQ_SAFETY_FRACTION * liqDist
             maxOf(s, floor)
         } else {
-            val s = entry + frac * (liq - entry)
+            val s = entry + dist
             val ceil = liq - LIQ_SAFETY_FRACTION * liqDist
             minOf(s, ceil)
         }
@@ -283,18 +312,40 @@ object TpSlPlanner {
         return TpSlPlan(entry, stop, liq, ladder)
     }
 
+    /**
+     * The largest leverage at which a stop of [stopDistPct] (a fraction of the
+     * price) still fits inside the liquidation distance, with [safetyPct] of
+     * the price to spare.
+     *
+     *   1/L − MMR ≥ stopDist + safety   →   L ≤ 1/(stopDist + MMR + safety)
+     *
+     * This is the rule that makes the leverage DERIVED rather than assumed: a
+     * symbol whose volatility needs a 2.6% stop cannot be traded at 75x,
+     * because 75x leaves only 0.68% of room to the liquidation price.
+     */
+    fun maxLeverageForStop(stopDistPct: Double, mmr: Double, safetyPct: Double = LIQ_STOP_SAFETY_PCT): Int {
+        if (stopDistPct <= 0.0) return Int.MAX_VALUE
+        val lev = 1.0 / (stopDistPct + mmr + safetyPct)
+        if (!lev.isFinite() || lev >= Int.MAX_VALUE) return Int.MAX_VALUE
+        return lev.toInt().coerceAtLeast(1)
+    }
+
     /** True when a stop at [stopFraction] of the liquidation distance still fits
      *  inside liquidation with the safety margin at [leverage]. No coercion — the
      *  raw user value is checked, so a setting of 100%+ correctly returns false. */
     fun stopFits(
         entry: Double, dir: Int, leverage: Int, stopFraction: Double,
         mmr: Double = DEFAULT_MMR,
+        atr: Double? = null,
+        atrMultiple: Double = STOP_ATR_MULTIPLE,
     ): Boolean {
         if (leverage <= 0 || entry <= 0) return false
         val liqDist = liqDistance(entry, leverage, mmr)
         if (liqDist <= 0.0) return false // no room at all: refuse the entry
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
-        val stop = if (dir > 0) entry - stopFraction * liqDist else entry + stopFraction * liqDist
+        val volDist = if (atr != null && atr > 0) atrMultiple * atr else 0.0
+        val dist = maxOf(stopFraction * liqDist, volDist)
+        val stop = if (dir > 0) entry - dist else entry + dist
         return if (dir > 0) stop > liq + LIQ_SAFETY_FRACTION * liqDist else stop < liq - LIQ_SAFETY_FRACTION * liqDist
     }
 

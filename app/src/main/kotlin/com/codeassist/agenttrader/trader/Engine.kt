@@ -47,6 +47,17 @@ data class RiskSettings(
     /** Initial stop sits this % of the way toward liquidation. */
     val stopFractionOfLiqPct: Double = 30.0,
     /**
+     * The stop must also sit this many ATRs away from the entry, so it is
+     * never inside the symbol's own noise (0 = off, the historical rule).
+     *
+     * A stop at 30% of the liquidation distance sits 0.21% from the entry at
+     * 75x, while a 15m bar on that symbol routinely moves 1.7% — the market
+     * gaps through it and the realised loss is three to five times the
+     * intended one. With this floor the stop is placed outside the noise and
+     * the leverage is derived to make room for it.
+     */
+    val stopAtrMultiple: Double = TpSlPlanner.STOP_ATR_MULTIPLE,
+    /**
      * Liquidation backstop: close the position once the loss reaches this % of
      * its margin (0 = off). The exchange SL normally fires first (it sits at
      * stopFractionOfLiqPct of the liq distance); this guard closes the position
@@ -73,7 +84,8 @@ class PaperBroker(var balance: Double = 1000.0) {
         symbol: String, dir: Int, price: Double, leverage: Int,
         risk: RiskSettings = RiskSettings(),
         mmr: Double = TpSlPlanner.DEFAULT_MMR,
-    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk, mmr = mmr)
+        atr: Double? = null,
+    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk, mmr = mmr, atr = atr)
 
     /** Opens a position committing [marginFraction] of the balance as margin. */
     fun openSized(
@@ -81,6 +93,7 @@ class PaperBroker(var balance: Double = 1000.0) {
         marginFraction: Double, risk: RiskSettings = RiskSettings(),
         maxPositions: Int = 5,
         mmr: Double = TpSlPlanner.DEFAULT_MMR,
+        atr: Double? = null,
     ): Position? {
         if (positions.containsKey(symbol)) return null
         // Same sizing as the live path: configured share, capped by the free
@@ -89,8 +102,11 @@ class PaperBroker(var balance: Double = 1000.0) {
         val qty = margin * leverage / price
         // The same MMR the live path uses, so the paper stop sits where the
         // exchange's would — the plan's liquidation price is what the
-        // liquidation guard is measured against.
-        val plan = TpSlPlanner.plan(price, dir, leverage, risk.stopFractionOfLiqPct / 100.0, mmr)
+        // liquidation guard is measured against. The ATR floor keeps the stop
+        // outside the symbol's noise here too.
+        val plan = TpSlPlanner.plan(
+            price, dir, leverage, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple,
+        )
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
         positions[symbol] = pos
         history.add("OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol @ ${fmt(price)} qty ${fmt(qty)}")
@@ -696,22 +712,21 @@ class TraderEngine(private val rest: BitunixRest) {
      * than reading the tier of the PRE-CAP notional, which is a tier too high
      * and therefore too pessimistic.
      */
-    internal fun entryLeverage(symbol: String): Pair<Int, String?> {
+    internal fun entryLeverage(symbol: String, atrPct: Double? = null): Pair<Int, String?> {
         val wanted = effectiveLeverage(symbol)
         val tiers = riskTiers(symbol)
         val margin = marginForEntry()
         if (tiers.isEmpty() || margin <= 0.0) {
-            // No tier table (paper mode, or the query failed): the buffer is the
-            // only cap, and it uses the simulated default rate.
+            // No tier table (paper mode, or the query failed): the buffer and the
+            // volatility floor are the only caps, on the simulated default rate.
             val mmr = TpSlPlanner.DEFAULT_MMR
-            val cap = if (liqBufferPct > 0.0) {
+            val bufferCap = if (liqBufferPct > 0.0) {
                 (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1)
             } else MAX_LEVERAGE
-            val lev = minOf(wanted, cap).coerceAtLeast(1)
+            val volCap = volatilityLeverageCap(atrPct, mmr)
+            val lev = minOf(wanted, bufferCap, volCap).coerceAtLeast(1)
             if (lev >= wanted) return wanted to null
-            return lev to "leverage clamped ${wanted}x → ${lev}x · liquidation buffer ${fmt0(liqBufferPct)}% " +
-                "needs 1/lev ≥ ${fmt1(liqBufferPct / 100.0 + mmr)} (MMR ${fmt1(mmr * 100)}%) " +
-                "(set liq buffer <pct> to change)"
+            return lev to explainLeverageCap(wanted, lev, atrPct, mmr, null)
         }
         // The largest leverage whose position would land in a tier that ALLOWS
         // it — the exchange rejects an order above its tier's maximum, so the
@@ -727,19 +742,55 @@ class TraderEngine(private val rest: BitunixRest) {
                 lev = minOf(lev, (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1))
             }
         }
+        // The VOLATILITY cap: the stop has to fit inside the liquidation
+        // distance, and the stop has to sit outside the symbol's noise. At 75x
+        // on a symbol whose 15m bar moves 1.7%, no stop can do that — so the
+        // leverage is DERIVED from the volatility, not assumed.
+        val volCap = volatilityLeverageCap(atrPct, mmr)
+        lev = minOf(lev, volCap)
         if (lev >= wanted) return wanted to null
+        return lev to explainLeverageCap(wanted, lev, atrPct, mmr, tier)
+    }
+
+    /**
+     * The largest leverage at which a volatility-sized stop still fits inside
+     * the liquidation distance.
+     *
+     * [atrPct] is the symbol's ATR as a fraction of its price. Without it
+     * (no candles, no ATR) there is no cap — the historical rule applies.
+     */
+    private fun volatilityLeverageCap(atrPct: Double?, mmr: Double): Int {
+        if (atrPct == null || atrPct <= 0.0 || risk.stopAtrMultiple <= 0.0) return MAX_LEVERAGE
+        val stopDist = risk.stopAtrMultiple * atrPct
+        return TpSlPlanner.maxLeverageForStop(stopDist, mmr)
+    }
+
+    /** Why the leverage was lowered, in one line the user can act on. */
+    private fun explainLeverageCap(
+        wanted: Int,
+        lev: Int,
+        atrPct: Double?,
+        mmr: Double,
+        tier: RiskTier?,
+    ): String {
         val why = buildString {
             val t = tier
             if (t != null && t.maxLeverage < wanted) {
                 append("tier ${t.level} (${fmt(t.startValue)}–${fmt(t.endValue)} notional) allows ${t.maxLeverage}x")
-                if (liqBufferPct > 0.0) append(" · ")
+                append(" · ")
             }
-            if (liqBufferPct > 0.0) {
+            if (atrPct != null && atrPct > 0.0 && risk.stopAtrMultiple > 0.0) {
+                val stopDist = risk.stopAtrMultiple * atrPct * 100.0
+                val room = (1.0 / wanted.toDouble() - mmr) * 100.0
+                append("a ${fmt1(stopDist)}% stop (${fmt1(risk.stopAtrMultiple)}×ATR) needs that much room, " +
+                    "but ${wanted}x leaves only ${fmt1(room)}% to the liquidation price")
+            } else if (liqBufferPct > 0.0) {
                 append("liquidation buffer ${fmt0(liqBufferPct)}% needs 1/lev ≥ " +
                     "${fmt1(liqBufferPct / 100.0 + mmr)} (MMR ${fmt1(mmr * 100)}%)")
             }
         }
-        return lev to "leverage clamped ${wanted}x → ${lev}x · $why (set liq buffer <pct> to change)"
+        return "leverage clamped ${wanted}x → ${lev}x · $why " +
+            "(set leverage <n> to set the ceiling, set stop atr <n> for the volatility floor)"
     }
 
     /** The margin one entry commits: the configured share of the available balance. */
@@ -1083,7 +1134,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
-        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · initial SL ${fmt0(risk.stopFractionOfLiqPct)}% toward liq · liq guard ${offable(risk.liqGuardRoiPct)} ROI (also closes before 85% of the way to liquidation)")
+        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · initial SL ${fmt0(risk.stopFractionOfLiqPct)}% toward liq, at least ${fmt1(risk.stopAtrMultiple)}×ATR away · liq guard ${offable(risk.liqGuardRoiPct)} ROI (also closes before 85% of the way to liquidation)")
         appendLine("  risk manager: max open positions $maxOpenPositions · liq guard ${offable(risk.liqGuardRoiPct)} ROI · liq buffer ${offable(liqBufferPct)} · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -1121,12 +1172,17 @@ class TraderEngine(private val rest: BitunixRest) {
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
+            // The symbol's own volatility, from the candles already fetched —
+            // no extra request. The stop is sized against it, so it never sits
+            // inside the noise, and the leverage is derived to make room.
+            val atr = Indicators.atr(byTf[PRICE_TIMEFRAME] ?: emptyList())
+            val atrPct = if (atr != null && atr > 0.0 && price > 0.0) atr / price else null
             if (live) {
-                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions) ?: continue)
+                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions, atr) ?: continue)
             } else {
                 if (broker.positions.containsKey(sym)) continue
-                val (lev, levNote) = entryLeverage(sym)
-                broker.open(sym, sig.dir, price, lev, risk, mmr = entryMmr(sym, lev))?.let {
+                val (lev, levNote) = entryLeverage(sym, atrPct)
+                broker.open(sym, sig.dir, price, lev, risk, mmr = entryMmr(sym, lev), atr = atr)?.let {
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
@@ -1145,7 +1201,8 @@ class TraderEngine(private val rest: BitunixRest) {
         price: Double,
         confidence: Double,
         openPositions: JSONArray? = null,
-    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
+        atr: Double? = null,
+    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions, atr)
 
     /**
      * One-tap manual entry (paper or live).
@@ -1158,16 +1215,20 @@ class TraderEngine(private val rest: BitunixRest) {
             val px = symbolPrice(sym)
             if (px <= 0) return "No price for $sym."
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
-            val (lev, levNote) = entryLeverage(sym)
-            val pos = broker.openSized(sym, dir, px, lev, sizeFraction, risk, maxOpenPositions, entryMmr(sym, lev))
-                ?: return "SKIP $sym: could not open."
+            val atr = Indicators.atr(runCatching { candles(sym, PRICE_TIMEFRAME) }.getOrDefault(emptyList()))
+            val atrPct = if (atr != null && atr > 0.0 && px > 0.0) atr / px else null
+            val (lev, levNote) = entryLeverage(sym, atrPct)
+            val pos = broker.openSized(
+                sym, dir, px, lev, sizeFraction, risk, maxOpenPositions, entryMmr(sym, lev), atr,
+            ) ?: return "SKIP $sym: could not open."
             noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
                 "stop ${fmt(pos.stop)} (paper)" + (levNote?.let { " · $it" } ?: "")
         }
         val px = symbolPrice(sym)
         if (px <= 0) return "No price for $sym."
-        return placeLive(sym, dir, px, sizeFraction, null)
+        val atr = Indicators.atr(runCatching { candles(sym, PRICE_TIMEFRAME) }.getOrDefault(emptyList()))
+        return placeLive(sym, dir, px, sizeFraction, null, atr = atr)
     }
 
     /** Closes every open position (paper: simulated, live: market close-all). */
@@ -1202,9 +1263,24 @@ class TraderEngine(private val rest: BitunixRest) {
         }
     }
 
+    /**
+     * The symbol's volatility as a fraction of its price: ATR(14) on the price
+     * timeframe.
+     *
+     * This is what the stop is measured against. A stop closer than the
+     * symbol's own noise gets gapped through, and at high leverage that costs
+     * several times the intended loss.
+     */
+    fun atrPct(symbol: String, price: Double): Double? {
+        if (price <= 0.0) return null
+        val series = runCatching { candles(symbol, PRICE_TIMEFRAME) }.getOrDefault(emptyList())
+        val atr = Indicators.atr(series) ?: return null
+        if (atr <= 0.0) return null
+        return atr / price
+    }
+
     /** Last price for a symbol (exchange first, candles as fallback). */
-    fun symbolPrice(symbol: String): Double {
-        wsLivePrice(symbol)?.let { return it }
+    fun symbolPrice(symbol: String): Double {        wsLivePrice(symbol)?.let { return it }
         val live = runCatching { rest.lastPrice(symbol) }.getOrNull() ?: 0.0
         if (live > 0) return live
         return candles(symbol, PRICE_TIMEFRAME).lastOrNull()?.close ?: 0.0
@@ -1247,6 +1323,7 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
         openPositions: JSONArray? = null,
+        atr: Double? = null,
     ): String {
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
@@ -1270,7 +1347,10 @@ class TraderEngine(private val rest: BitunixRest) {
                 return "SKIP $symbol: live position already open."
             }
         }
-        val (lev, levNote) = entryLeverage(symbol)
+        // The volatility of this symbol, as a fraction of its price. The scan
+        // already fetched the candles, so this costs no extra request.
+        val atrPct = if (atr != null && atr > 0.0 && price > 0.0) atr / price else null
+        val (lev, levNote) = entryLeverage(symbol, atrPct)
         val levLine = levNote?.let { " · $it" } ?: ""
         // The maintenance margin rate of the tier this entry lands in — the
         // official liquidation price is Entry × (1 − 1/Leverage + MMR), so the
@@ -1280,7 +1360,7 @@ class TraderEngine(private val rest: BitunixRest) {
         // fraction would put the stop at or beyond the liquidation price. The
         // stop must stay inside liquidation with a safety margin; clamping it
         // silently would hide the risk, so the trade is refused instead.
-        if (!TpSlPlanner.stopFits(price, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr)) {
+        if (!TpSlPlanner.stopFits(price, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple)) {
             return "SKIP $symbol: stop would hit liquidation first at ${risk.stopFractionOfLiqPct.toInt()}% " +
                 "of the liquidation distance (${lev}x leverage, MMR ${fmt1(mmr * 100)}%). " +
                 "Lower stop frac or lower leverage.$levLine"
@@ -1312,7 +1392,9 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()
         val triggerBasis = mark ?: price
-        val plan = TpSlPlanner.plan(triggerBasis, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr)
+        val plan = TpSlPlanner.plan(
+            triggerBasis, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple,
+        )
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
@@ -2108,6 +2190,22 @@ class TraderEngine(private val rest: BitunixRest) {
                     risk = risk.copy(stopFractionOfLiqPct = v)
                     configRev++
                     "Initial stop set to ${fmt0(v)}% of the way to liquidation."
+                }
+            }
+            t.startsWith("set stop atr") -> {
+                val v = extractNumber(t.removePrefix("set stop atr"))
+                if (v == null || v !in 0.0..10.0)
+                    "Usage: set stop atr <n> (the stop sits this many ATRs from the entry, 0 = off)"
+                else {
+                    risk = risk.copy(stopAtrMultiple = v)
+                    configRev++
+                    if (v <= 0.0) {
+                        "Volatility floor off — the stop sits only at ${fmt0(risk.stopFractionOfLiqPct)}% of the " +
+                            "liquidation distance, which is inside the noise at high leverage."
+                    } else {
+                        "Volatility floor set to ${fmt1(v)}×ATR — the stop now sits at least that far from the " +
+                            "entry, and the leverage is capped so the stop still fits inside the liquidation distance."
+                    }
                 }
             }
             t.startsWith("set max positions") -> {
