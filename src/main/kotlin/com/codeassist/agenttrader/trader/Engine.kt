@@ -402,8 +402,26 @@ class TraderEngine(private val rest: BitunixRest) {
     private var lastWsError: String? = null
 
     // ---- Signal board (shared by chat, report and the Signals screen) ----
+    /**
+     * Guards the signal cache ONLY. It is never held across a network call:
+     * the evaluation costs ~30 REST calls, and holding a lock for that long
+     * blocked every other caller of the engine — the chat went silent and the
+     * balance stopped refreshing because both waited on the same monitor.
+     */
+    private val signalLock = Any()
+
+    @Volatile
     private var signalCache: List<SignalRow> = emptyList()
+
+    @Volatile
     private var signalCacheAt = 0L
+
+    /**
+     * Serializes balance refreshes with each other — and nothing else. The
+     * HTTP call must not hold the engine monitor: that blocked every other
+     * caller for as long as the exchange took to answer.
+     */
+    private val balanceLock = Any()
     private val wsPositions = java.util.Collections.synchronizedMap(HashMap<String, org.json.JSONObject>())
     // Latest private "tpsl" event per orderId, so the tpsl command can show live TP/SL state.
     private val wsTpSl = java.util.Collections.synchronizedMap(LinkedHashMap<String, org.json.JSONObject>())
@@ -484,6 +502,9 @@ class TraderEngine(private val rest: BitunixRest) {
             }
 
             override fun onChannel(ch: String, symbol: String?, data: JSONObject) {
+                // A Throwable that escapes an OkHttp callback thread kills the
+                // app: the feed dies AND the whole process goes with it.
+                runCatching {
                 when (ch) {
                     "balance" -> parseBalance(data)?.let { available ->
                         exchangeBalance.set(available)
@@ -504,6 +525,7 @@ class TraderEngine(private val rest: BitunixRest) {
                             while (wsTpSl.size > 50) wsTpSl.remove(wsTpSl.keys.first())
                         }
                     }
+                }
                 }
                 val line = feedEventLine(ch, data, symbol)
                 if (line.isNotEmpty()) onEvent?.invoke(line)
@@ -562,11 +584,17 @@ class TraderEngine(private val rest: BitunixRest) {
      * Refreshes the exchange balance over REST and caches it.
      * Blocking (network) — call it from a background thread, never from the UI.
      * Returns the new value, or the last known one when the exchange is unreachable.
+     *
+     * The HTTP call holds [balanceLock], NOT the engine monitor. Holding the
+     * engine monitor across a network call blocked every other caller of the
+     * engine for as long as the exchange took to answer — the chat went silent
+     * and the balance stopped refreshing, because both wait on the same lock.
      */
-    @Synchronized
     fun refreshLiveBalance(): Double? {
         if (!live) return null
-        val fetched = runCatching { rest.availableUsdt() }.getOrNull()
+        val fetched = synchronized(balanceLock) {
+            runCatching { rest.availableUsdt() }.getOrNull()
+        }
         // The mode can switch while the REST call is in flight — do not repopulate
         // an exchange cache that the PAPER session is not allowed to show.
         if (fetched != null && live) {
@@ -884,10 +912,11 @@ class TraderEngine(private val rest: BitunixRest) {
      * Evaluates the universe and returns one explainable row per symbol.
      * Cached for [maxAgeMs] because each row costs two kline requests.
      */
-    @Synchronized
     fun signalBoard(maxAgeMs: Long = 60_000): List<SignalRow> {
         val now = System.currentTimeMillis()
-        if (signalCache.isNotEmpty() && now - signalCacheAt <= maxAgeMs) return signalCache
+        synchronized(signalLock) {
+            if (signalCache.isNotEmpty() && now - signalCacheAt <= maxAgeMs) return signalCache
+        }
         val symbols = runCatching {
             // Auto-universe: refresh the symbol list from the live ticker feed
             // before evaluating, so each scan sees today's top gainers/volume.
@@ -903,10 +932,28 @@ class TraderEngine(private val rest: BitunixRest) {
             }.getOrNull()
         }
         if (rows.isNotEmpty()) {
-            signalCache = rows
-            signalCacheAt = now
+            synchronized(signalLock) {
+                signalCache = rows
+                signalCacheAt = now
+            }
         }
         return rows
+    }
+
+    /**
+     * The cached board, never a fresh evaluation.
+     *
+     * The chat reads this: a fresh sweep costs ~30 REST calls, and the chat
+     * must not wait for that before it can answer.
+     */
+    fun signalBoardCached(): List<SignalRow> = synchronized(signalLock) { signalCache }
+
+    /** Test hook: seeds the signal cache without network. */
+    internal fun seedSignalCache(rows: List<SignalRow>) {
+        synchronized(signalLock) {
+            signalCache = rows
+            signalCacheAt = System.currentTimeMillis()
+        }
     }
 
     /** Full signal explanation for chat and the periodic report. */
@@ -935,7 +982,10 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /** One-line summary for the chat context. */
     fun signalsBrief(): String = runCatching {
-        signalBoard().take(4).joinToString("; ") { "${it.symbol} ${it.status}" }
+        // The CACHED board, never a fresh sweep: the chat assembles its
+        // context before it can answer, and a fresh evaluation costs ~30
+        // REST calls. The engine's own loop keeps the board fresh.
+        signalBoardCached().take(4).joinToString("; ") { "${it.symbol} ${it.status}" }
     }.getOrElse { "" }
 
     /** Compact settings line for the chat context. */
@@ -1714,10 +1764,12 @@ class TraderEngine(private val rest: BitunixRest) {
                 // print the same line every cycle.
                 EngineRuntimeError.clearIfStale()
                 events.forEach(onEvent)
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 // Exchange/network failures are engine errors, never provider
                 // errors. Writing them to AgentRuntimeError made /diagnose blame
                 // the LLM and suggest switching models during a DNS outage.
+                // Throwable, not Exception: an Error that escapes this thread
+                // would kill the app outright.
                 val friendly = NetworkErrors.describe(NetworkErrors.rawMessage(e), intervalSec)
                 if (EngineRuntimeError.record(friendly)) {
                     onEvent("Loop error: $friendly")

@@ -213,6 +213,7 @@ endpoint clamps `limit` to the documented maximum.
 | `Unable to resolve host "fapi.bitunix.com"` | This device has no DNS/connection, not a broken model. The loop retries and `/diagnose` says so; no model switch is needed |
 | `Loop error: EOFException` | The connection dropped mid-response — the request was fine, the stream was cut. Reported once per window, not every cycle |
 | `SKIP scan: the futures wallet is empty` | The Futures wallet holds nothing (funds in the Funding wallet do not pay for futures orders). Transfer funds, or trade paper: `set live off` |
+| The chat stops replying and the balance stops updating | Two engine methods held the same monitor while doing HTTP — the signal board across ~30 REST calls, the balance across one. The chat and the balance queued behind each other. No lock is held across a network call any more, and the chat reads the cached board instead of triggering a sweep |
 
 ## Trading logic
 
@@ -312,7 +313,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 321 JVM unit tests
+gradle :app:testDebugUnitTest   # 323 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```

@@ -1518,7 +1518,10 @@ private fun runAsync(post: (Runnable) -> Unit, done: (String) -> Unit, work: () 
     Thread {
         val result = try {
             work()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
+            // A Throwable that escapes a background thread kills the WHOLE app
+            // on Android: the chat stops replying and the app "crashes" with
+            // no explanation. Catch everything here and report it instead.
             val raw = NetworkErrors.rawMessage(e)
             if (NetworkErrors.isExchange(e)) {
                 // Bitunix failures belong to the engine diagnostic, even when
