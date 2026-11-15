@@ -97,12 +97,19 @@ jobs:
           {
             echo "## Agent Trader v$VERSION"
             echo
-            echo "### Install"
-            echo "- **Agent-Trader-debug.apk** — installable debug build (recommended)"
-            echo "- **Agent-Trader-release.apk** — signed release build (when signing is configured)"
+            echo "### Install — pick the file that matches the app you already have"
+            echo "Both APKs are valid, but they are signed with **different keys**."
+            echo "Android only lets an update install over an app with the SAME key, so:"
+            echo "- **Agent-Trader-debug.apk** — key \`CN=Android Debug\` (SHA256 A9:E3:FE:09…)"
+            echo "- **Agent-Trader-release.apk** — key \`CN=Agent Trader\` (SHA256 98:AD:AD:A7…)"
+            echo "- In the app, type \`/cert\` — it prints the key of the build you run, and therefore the file to download."
+            echo "- If the installer says \"App not installed\" / INSTALL_FAILED_UPDATE_INCOMPATIBLE, you picked the other file. The failed install does not touch your data — just try the other one."
             echo "- Verify: \`sha256sum -c SHA256SUMS.txt\`"
             echo
             echo "### Highlights"
+            echo "- The app picks the trading universe itself: every scan refreshes it to the top symbols by 24h gainers or volume, filtered by minimum 24h volume"
+            echo "- Commands read plain sentences (\"min volume 24h usd 10000\"), and \`set universe\` checks the symbols against Bitunix"
+            echo "- \`/cert\` shows the signing key, \`/backup\` / \`/restore\` save and restore every setting"
             echo "- Bitunix futures engine: signed REST (marginCoin, per-endpoint rate limits, retry), WS on wss://fapi.bitunix.com/public + /private, live order path with TP/SL"
             echo "- Agentic chat: multi-turn LLM memory, wired slash commands, provider tester"
             echo "- LIVE balance always comes from the exchange (never the paper account)"
