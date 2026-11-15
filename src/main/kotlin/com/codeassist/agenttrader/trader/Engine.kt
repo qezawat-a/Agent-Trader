@@ -1950,11 +1950,10 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     leverage = v
                     configRev++
-                    val cap = if (liqBufferPct > 0.0) (100.0 / liqBufferPct).toInt().coerceAtLeast(1) else MAX_LEVERAGE
-                    val clamped = cap.coerceAtMost(MAX_LEVERAGE)
-                    "Leverage set to $v x." + if (liqBufferPct > 0 && v > clamped) {
-                        "\nNote: new entries will still be clamped to ${clamped}x — the liquidation buffer " +
-                            "(liq buffer ${fmt0(liqBufferPct)}%) keeps the estimated liquidation far enough from entry."
+                    "Leverage set to $v x." + if (liqBufferPct > 0.0) {
+                        "\nNote: the liquidation buffer (liq buffer ${fmt0(liqBufferPct)}%) may cap new entries " +
+                            "lower. The exact cap depends on the symbol's tier and its maintenance margin rate — " +
+                            "the chat line on each entry says what it was clamped to (see: tiers)."
                     } else ""
                 }
             }
@@ -2039,10 +2038,14 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Usage: set liq buffer <pct> (0 = off) — new entries keep the estimated liquidation at least this % from entry (caps the leverage)"
                 else {
                     liqBufferPct = v
-                    val cap = if (v > 0.0) (100.0 / v).toInt().coerceAtLeast(1) else MAX_LEVERAGE
-                    val clamped = cap.coerceAtMost(MAX_LEVERAGE)
-                    "Liquidation buffer ${if (v > 0) "set to ${fmt0(v)}% — new entries are capped at ${clamped}x " +
-                        "leverage so liquidation stays that far away" else "off — any leverage up to $MAX_LEVERAGE is allowed"}."
+                    if (v > 0.0) {
+                        "Liquidation buffer set to ${fmt0(v)}% — new entries may be capped lower. The exact cap " +
+                            "depends on the symbol's tier and its maintenance margin rate, so it is reported on " +
+                            "each entry (see: tiers)."
+                    } else {
+                        "Liquidation buffer off — your leverage is used as set, capped only by the symbol's own " +
+                            "tier limit (see: tiers)."
+                    }
                 }
             }
             t.startsWith("set guard") -> {
