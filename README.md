@@ -389,6 +389,11 @@ drift.
   always labelled `(paper)`, so the two accounts cannot be confused.
 - No live order is sent without the LIVE toggle, and the brain is instructed never to open or
   close a position that the user did not explicitly ask for.
+- The brain's authority is enforced in code, not in the prompt (`ToolPolicy`): read-only
+  tools run freely; every tool that moves money, changes risk or starts/stops the engine
+  opens a one-tap confirmation before anything is executed, and the engine answers with a
+  receipt (`⚙️` ran, `⚠️` failed, `🔒` blocked) — a model can never report an action it
+  was not granted.
 - Quantities below the exchange minimum are skipped, never upsized.
 - API keys are never printed, logged or written into the chat.
 

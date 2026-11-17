@@ -154,6 +154,21 @@ class SelfRepairTest {
     }
 
     @Test
+    fun a_market_question_is_not_a_bug_report() {
+        // "what's wrong with BTC" is a market question: it must not be hijacked
+        // into the self-debugger and answered with an app health report.
+        assertFalse(SelfRepair.asksForDiagnosis("what's wrong with BTC today"))
+        assertFalse(SelfRepair.asksForDiagnosis("whats wrong with eth"))
+    }
+
+    @Test
+    fun app_questions_still_reach_the_checks() {
+        assertTrue(SelfRepair.asksForDiagnosis("what's wrong with the app"))
+        assertTrue(SelfRepair.asksForDiagnosis("what's wrong with my engine"))
+        assertTrue(SelfRepair.asksForDiagnosis("what's wrong with app"))
+    }
+
+    @Test
     fun auto_fixes_are_applied_and_reported() {
         val d = SelfRepair.diagnose(provider(model = ""), engine())
         val applied = SelfRepair.applyAutoFixes(d) { action ->

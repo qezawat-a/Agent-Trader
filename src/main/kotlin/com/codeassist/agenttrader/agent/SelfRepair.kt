@@ -180,10 +180,19 @@ object SelfRepair {
      */
     fun asksForDiagnosis(text: String): Boolean {
         val t = text.lowercase()
-        if (DIAGNOSIS_ALWAYS.any { t.contains(it) }) return true
+        // "what's wrong with BTC?" is a market question, not a bug report. Without
+        // this guard every such message was hijacked into the self-debugger and
+        // answered with an app health report instead of market analysis.
+        val subject = WRONG_WITH.find(t)?.groupValues?.get(1)
+        if (subject != null && subject !in APP_SUBJECTS) return false
         if (FEATURE_REQUEST.any { t.contains(it) }) return false
+        if (DIAGNOSIS_ALWAYS.any { t.contains(it) }) return true
         return DIAGNOSIS_COMPLAINT.any { t.contains(it) }
     }
+
+    /** "what's wrong with X" — [APP_SUBJECTS] keeps the app-side questions working. */
+    private val WRONG_WITH = Regex("""what'?s wrong with\s+([a-z0-9]{2,12})""")
+    private val APP_SUBJECTS = setOf("app", "agent", "engine", "bot", "you", "it", "the", "this", "my")
 
     /** Explicit "check this" words — always run the probes. */
     private val DIAGNOSIS_ALWAYS = listOf(

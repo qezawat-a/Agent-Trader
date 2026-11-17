@@ -14,32 +14,10 @@ object AgentBrain {
     data class MoodSignal(val mood: Mood, val intensity: Int, val cue: String)
 
     /**
-     * Tool commands the model may invoke. They map 1:1 to trader-engine
-     * commands, so the engine stays the single source of truth for actions.
+     * Tool commands the model may invoke. The list and the authority of each
+     * command live in [ToolPolicy]; this is only the names, for the prompt.
      */
-    val TOOLS = listOf(
-        // read-only
-        "status", "balance", "positions", "orders", "pnl", "funding", "tiers", "signals",
-        "settings trade", "scan once", "trades_history", "tpsl", "history orders",
-        // engine control
-        "engine on", "engine off", "start trading", "stop trading",
-        "scan on", "scan off", "report interval", "set leverage", "set risk",
-        // scanner & signal configuration — nothing is hard-capped
-        "set universe", "set timeframes", "set scan top", "set min agree", "set min tf", "set min conf",
-        // how many timeframes must share one side (majority-side trading)
-        "set tf agree",
-        // risk manager & exits — nothing is hard-capped
-        "set breakeven", "set trail trigger", "set trail distance", "set stop frac",
-        // the volatility floor: the stop sits this many ATRs from the entry, so
-        // it is never inside the symbol's own noise
-        "set stop atr",
-        "set max positions", "set guard", "set tp r",
-        // liquidation backstop: close before the exchange can liquidate, and
-        // keep new entries' liquidation far enough from entry
-        "set liq guard", "set liq buffer",
-        // money-moving — only with an explicit request from the user
-        "close position", "diagnose", "repair",
-    )
+    val TOOLS: List<String> = ToolPolicy.commands
 
     private val moodCues: List<Pair<Mood, List<String>>> = listOf(
         Mood.ANGRY to listOf("furious", "angry", "pissed", "mad", "annoyed", "frustrated", "wtf", "ridiculous"),
@@ -57,7 +35,7 @@ object AgentBrain {
         var best: MoodSignal? = null
         for ((mood, cues) in moodCues) {
             for (cue in cues) {
-                if (t.contains(cue)) {
+                if (matchesCue(t, cue)) {
                     val intensity = when {
                         t.contains("really", true) || t.contains("very", true) || t.contains("!!!") -> 3
                         t.contains("!") -> 2
@@ -72,6 +50,15 @@ object AgentBrain {
         }
         return best
     }
+
+    /**
+     * A single word only counts on a word boundary: "mad" must not fire on
+     * "made", and "moon" must not fire on "afternoon". Multi-word cues are
+     * phrases, so a plain substring match is correct for them.
+     */
+    private fun matchesCue(text: String, cue: String): Boolean =
+        if (cue.contains(' ')) text.contains(cue)
+        else Regex("(?<![a-z0-9])" + Regex.escape(cue) + "(?![a-z0-9])").containsMatchIn(text)
 
     /** One short, non-syrupy acknowledgement of how the user feels. */
     fun empathyLine(mood: MoodSignal?): String = when (mood?.mood) {
@@ -116,10 +103,13 @@ object AgentBrain {
         appendLine("  <tool>status</tool>   <tool>positions</tool>   <tool>funding</tool>   <tool>scan once</tool>")
         appendLine("  Use at most 3 tool calls per reply, and only when you need facts you do not have.")
         appendLine("  Allowed tools: " + TOOLS.joinToString(", "))
-        appendLine("- The user can change anything (mode, leverage, engine, scan, report, provider, model).")
-        appendLine("  Never claim you changed something you did not change; say what was actually done.")
+        appendLine("- The app enforces that limit in code, and it asks the user to confirm every action")
+        appendLine("  that moves money or starts/stops the engine. You cannot bypass that confirmation:")
+        appendLine("  emit the tool only when the user asked for it, then report what the receipt says.")
+        appendLine("- Never claim you changed something you did not change. Every executed tool produces a")
+        appendLine("  receipt with the engine's real output; if a receipt is blocked or failed, say so.")
         appendLine("- Money rule: never open or close a position unless the user explicitly asked for that")
-        appendLine("  in this conversation. For everything else (settings, engine switches, scans) just do it.")
+        appendLine("  in this conversation. Risk settings are confirmation-gated as well.")
         appendLine("- SETTINGS: nothing about the engine is hard-capped. When the user asks what the")
         appendLine("  settings are, call <tool>settings trade</tool> and summarize the dump. On request you")
         appendLine("  can change: universe <tool>set universe BTCUSDT,ETHUSDT</tool>, timeframes")
@@ -132,7 +122,8 @@ object AgentBrain {
         appendLine("  confidence must pass the combined gate (default 70%); otherwise there is no trade. When the")
         appendLine("  user asks about signals, confidence or why nothing trades, call <tool>signals</tool> and")
         appendLine("  quote the actual rows and the gate that blocked the symbol.")
-        appendLine("- When something breaks, diagnose it, then repair it if the repair is safe, and report both.")
+        appendLine("- You cannot run /diagnose or /repair yourself. If something looks broken, name the")
+        appendLine("  slash command the user should run and what it will check.")
         appendLine("- Never reveal API keys, secrets or sign values.")
         appendLine()
         appendLine("EMOTION AND JUDGEMENT:")
@@ -159,21 +150,36 @@ object AgentBrain {
         }
     }.trim()
 
-    /** Extracts tool calls the model emitted, in order, without duplicates. */
+    /**
+     * Tool markup. Deliberately permissive: a command may carry a comma-separated
+     * list (`set universe BTCUSDT,ETHUSDT`), a decimal (`set tp r 1.5`) or an
+     * upper-case interval (`1M` is a month, `1m` is a minute). The extraction and
+     * the stripping must use the SAME grammar, or protocol noise leaks into the
+     * answer.
+     */
+    private val TOOL = Regex("<tool>\\s*([^\\n<]+?)\\s*</tool>")
+
+    /**
+     * Extracts tool calls the model emitted, in order, without duplicates.
+     *
+     * The command keeps the case the model wrote it in — lowercasing here turned
+     * `set timeframes 15m,1M` into a one-minute scan asked for by a user who
+     * wanted a monthly one.
+     */
     fun extractToolCalls(reply: String): List<String> {
         val out = mutableListOf<String>()
-        val regex = Regex("<tool>\\s*([a-zA-Z0-9_, ]+?)\\s*</tool>")
-        for (m in regex.findAll(reply)) {
-            val cmd = m.groupValues[1].trim().lowercase()
-            val allowed = TOOLS.any { cmd == it || cmd.startsWith("$it ") }
-            if (allowed && cmd !in out) out.add(cmd)
+        val seen = mutableSetOf<String>()
+        for (m in TOOL.findAll(reply)) {
+            val cmd = m.groupValues[1].trim()
+            if (cmd.isEmpty()) continue
+            if (!ToolPolicy.isKnown(cmd)) continue
+            if (seen.add(cmd.lowercase())) out.add(cmd)
         }
         return out
     }
 
     /** Removes tool-call markup so the user does not see protocol noise. */
-    fun stripToolCalls(reply: String): String =
-        reply.replace(Regex("<tool>\\s*[a-zA-Z0-9_ ]+?\\s*</tool>"), "").trim()
+    fun stripToolCalls(reply: String): String = TOOL.replace(reply, "").trim()
 
     /**
      * Compact live context for the prompt: mode, balance, positions, market mood.

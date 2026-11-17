@@ -1843,10 +1843,26 @@ class TraderEngine(private val rest: BitunixRest) {
         return body + "\nExtreme positive funding = crowded longs; extreme negative = crowded shorts."
     }
 
-    /** Starts the autonomous loop: scan + manage every [intervalSec] while trading is on. */
+    /**
+     * Starts the autonomous loop and installs [onEvent] as the event sink.
+     * Callers that only need the timer should use [ensureLoop]; callers that turn
+     * entries on should use [startTrading], which does both.
+     */
     fun startLoop(intervalSec: Long, onEvent: (String) -> Unit) {
         this.onEvent = onEvent
-        if (loopTask != null) return
+        ensureLoop(intervalSec)
+    }
+
+    /**
+     * Starts the loop if it is not already running, keeping the current event
+     * sink.
+     *
+     * This is the single owner of the loop's lifecycle. `trading == true` must
+     * always imply a running loop: the chat used to set the flag and claim
+     * "Loop running" while only a Compose effect ever started the timer.
+     */
+    fun ensureLoop(intervalSec: Long = 30) {
+        if (isLoopRunning) return
         loopTask = loopExecutor.scheduleWithFixedDelay({
             try {
                 // The risk manager (breakeven, trailing, the liquidation guard) must
@@ -1861,7 +1877,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 // fails once in a while must not look "new" every time and
                 // print the same line every cycle.
                 EngineRuntimeError.clearIfStale()
-                events.forEach(onEvent)
+                events.forEach { onEvent?.invoke(it) }
             } catch (e: Throwable) {
                 // Exchange/network failures are engine errors, never provider
                 // errors. Writing them to AgentRuntimeError made /diagnose blame
@@ -1870,11 +1886,37 @@ class TraderEngine(private val rest: BitunixRest) {
                 // would kill the app outright.
                 val friendly = NetworkErrors.describe(NetworkErrors.rawMessage(e), intervalSec)
                 if (EngineRuntimeError.record(friendly)) {
-                    onEvent("Loop error: $friendly")
+                    onEvent?.invoke("Loop error: $friendly")
                 }
             }
         }, intervalSec, intervalSec, TimeUnit.SECONDS)
         startReport()
+    }
+
+    /**
+     * Turns entries on and guarantees the loop is running, so the reply "Loop
+     * running" describes the real state instead of a promise.
+     */
+    fun startTrading(intervalSec: Long = 30): String {
+        if (!engineOn) return "Turn the engine on first: engine on"
+        trading = true
+        ensureLoop(intervalSec)
+        return "Trading started (${if (live) "LIVE — real orders" else "paper"}). Loop running: scan + manage."
+    }
+
+    /**
+     * Stops new entries but leaves the loop alive while positions are open: the
+     * risk manager (breakeven, trailing, liquidation guard) must not abandon a
+     * position the moment the user stops opening new ones.
+     */
+    fun stopTrading(): String {
+        trading = false
+        return if (hasOpenPositions()) {
+            "Trading stopped — no new entries. Open positions stay managed " +
+                "(breakeven, trailing, liquidation guard)."
+        } else {
+            "Trading stopped — no new entries, nothing open."
+        }
     }
 
     private fun startReport() {
@@ -1919,35 +1961,48 @@ class TraderEngine(private val rest: BitunixRest) {
      * of them, which looks like the app ignoring the chat, so the missing
      * "set " prefix is added here before the command is matched.
      */
-    private fun normalizeCommand(t: String): String = when {
-        t.startsWith("min volume") -> "set $t"
-        t.startsWith("auto universe") -> "set $t"
-        t.startsWith("auto rank") -> "set $t"
-        t.startsWith("auto on") -> "set auto universe on"
-        t.startsWith("auto off") -> "set auto universe off"
-        t.startsWith("scan top") -> "set $t"
-        t.startsWith("leverage ") -> "set $t"
-        t.startsWith("risk ") -> "set $t"
-        t.startsWith("universe ") -> "set $t"
-        else -> t
+    private fun normalizeCommand(text: String): String {
+        val lower = text.lowercase()
+        return when {
+            lower.startsWith("min volume") -> "set $text"
+            lower.startsWith("auto universe") -> "set $text"
+            lower.startsWith("auto rank") -> "set $text"
+            lower.startsWith("auto on") -> "set auto universe on"
+            lower.startsWith("auto off") -> "set auto universe off"
+            lower.startsWith("scan top") -> "set $text"
+            lower.startsWith("leverage ") -> "set $text"
+            lower.startsWith("risk ") -> "set $text"
+            lower.startsWith("universe ") -> "set $text"
+            else -> text
+        }
     }
 
+    /** The argument after [prefix] in the text's ORIGINAL casing, or "" when absent. */
+    private fun argsOf(text: String, prefix: String): String =
+        if (text.regionMatches(0, prefix, 0, prefix.length, ignoreCase = true)) {
+            text.substring(prefix.length).trim()
+        } else ""
+
     fun handle(text: String): String {
-        val t = normalizeCommand(text.trim().lowercase())
+        val raw = normalizeCommand(text.trim())
+        val t = raw.lowercase()
         return when {
             t.startsWith("engine on") -> {
                 engineOn = true
-                "Engine on (${if (live) "LIVE" else "paper"} mode)."
+                "Engine on (${if (live) "LIVE" else "paper"} mode). Trading stays off until: start trading"
             }
-            t.startsWith("engine off") -> { engineOn = false; trading = false; stopLoop(); "Engine off." }
-            t.startsWith("start trading") -> when {
-                !engineOn -> "Turn the engine on first: engine on"
-                else -> {
-                    trading = true
-                    "Trading started (${if (live) "LIVE — real orders" else "paper"}). Loop running: scan + manage."
+            t.startsWith("engine off") -> {
+                engineOn = false
+                trading = false
+                stopLoop()
+                if (hasOpenPositions()) {
+                    "Engine off. The management loop stopped too — open positions now have only their exchange SL/TP."
+                } else {
+                    "Engine off."
                 }
             }
-            t.startsWith("stop trading") -> { trading = false; stopLoop(); "Trading stopped." }
+            t.startsWith("start trading") -> startTrading()
+            t.startsWith("stop trading") -> stopTrading()
             t.startsWith("scan on") -> { scanOn = true; "Scanner on: ranking the top symbols by volume." }
             t.startsWith("scan off") -> { scanOn = false; "Scanner off: using the fixed universe." }
             t.startsWith("set live") -> {
@@ -2115,7 +2170,16 @@ class TraderEngine(private val rest: BitunixRest) {
                 if (events.isEmpty()) "No management events (no positions moved)."
                 else events.joinToString("\n")
             }
-            t.startsWith("close position") -> closePosition(t.removePrefix("close position").trim().uppercase().ifEmpty { "BTCUSDT" })
+            t.startsWith("close position") -> {
+                // No symbol, no trade: defaulting to BTCUSDT silently closed an
+                // account the user never named.
+                val symbol = argsOf(raw, "close position").uppercase()
+                if (symbol.isEmpty()) {
+                    val open = if (live) feedPositions() else broker.positions.keys.toList()
+                    "Usage: close position <SYMBOL> — nothing was closed. Open: " +
+                        open.joinToString(", ").ifEmpty { "(none)" }
+                } else closePosition(symbol)
+            }
             t.startsWith("close all") -> closeAll()
             t.startsWith("manual entry") -> {
                 val parts = t.removePrefix("manual entry").trim().split(Regex("\\s+"))
@@ -2306,7 +2370,9 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             }
             t.startsWith("set timeframes") -> {
-                val parsed = parseTimeframesCsv(t.removePrefix("set timeframes"))
+                // Cut from the ORIGINAL text: parseTimeframesCsv is case-sensitive
+                // and "1M" is a month while "1m" is one minute.
+                val parsed = parseTimeframesCsv(argsOf(raw, "set timeframes"))
                 if (parsed == null) {
                     "Usage: set timeframes 15m,1h — valid: ${KLINE_INTERVALS.joinToString(",")} (max 5)"
                 } else {

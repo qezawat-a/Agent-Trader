@@ -40,4 +40,30 @@ class EngineCommandTest {
         engine.handle("set tf agree 5")
         assertEquals(Int.MAX_VALUE, engine.minSideTfs)
     }
+
+    @Test
+    fun timeframes_keep_their_case_because_1m_and_1M_are_different() {
+        // Regression: the argument used to be cut from a lowercased copy, so a
+        // monthly candle "1M" became the one-minute "1m".
+        val reply = engine.handle("set timeframes 15m,1M")
+        assertEquals(listOf("15m", "1M"), engine.timeframes)
+        assertTrue(reply.contains("15m, 1M"), reply)
+    }
+
+    @Test
+    fun close_position_without_a_symbol_closes_nothing() {
+        // Regression: a missing symbol defaulted to BTCUSDT and silently closed
+        // a position the user never named.
+        val reply = engine.handle("close position")
+        assertTrue(reply.contains("Usage:"), reply)
+        assertTrue(reply.contains("nothing was closed"), reply)
+    }
+
+    @Test
+    fun close_position_matches_case_insensitively() {
+        // The prefix match must not depend on the model writing lowercase.
+        val reply = engine.handle("Close Position")
+        assertTrue(reply.contains("Usage:"), reply)
+        assertTrue(reply.contains("nothing was closed"), reply)
+    }
 }

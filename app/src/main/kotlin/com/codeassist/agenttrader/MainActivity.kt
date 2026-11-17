@@ -41,6 +41,7 @@ import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -55,9 +56,11 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -74,9 +77,13 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.codeassist.agenttrader.agent.AgentBrain
 import com.codeassist.agenttrader.agent.AgentConfig
+import com.codeassist.agenttrader.agent.AgentSession
 import com.codeassist.agenttrader.agent.AppIdentity
+import com.codeassist.agenttrader.agent.ChatReply
+import com.codeassist.agenttrader.agent.ChatTransport
 import com.codeassist.agenttrader.agent.CommandRouter
 import com.codeassist.agenttrader.agent.ConfigBackup
+import com.codeassist.agenttrader.agent.ConsentGate
 import com.codeassist.agenttrader.agent.ModelClient
 import com.codeassist.agenttrader.agent.SelfCheck
 import com.codeassist.agenttrader.agent.SelfRepair
@@ -94,6 +101,7 @@ import com.codeassist.agenttrader.trader.parseSymbolsCsv
 import com.codeassist.agenttrader.trader.parseTimeframesCsv
 import com.codeassist.agenttrader.ui.AppScreen
 import com.codeassist.agenttrader.ui.ControlScreen
+import com.codeassist.agenttrader.ui.MarkdownText
 import com.codeassist.agenttrader.ui.SignalsScreen
 import com.codeassist.agenttrader.ui.StatusPill
 import com.codeassist.agenttrader.ui.TradeScreen
@@ -102,6 +110,10 @@ import com.codeassist.agenttrader.util.fmt
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 class MainActivity : ComponentActivity() {
     private val ui = Handler(Looper.getMainLooper())
@@ -124,7 +136,7 @@ private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose <what is wrong> /repair /autopsy /verify /code_review (/review) /bug_fix /simplify /team_spawn /ws on|off
 Self-diagnosis: /verify runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
-Trader commands (type them in chat): engine on|off, start trading, stop trading, scan on|off|once, signals, settings trade, status, balance, positions, positions history, orders, history orders, cancel orders, pnl, trades_history, funding, tiers, tpsl, close position <SYMBOL>, close all, mid management, report on|off|interval <min>, set leverage <1-200>, set risk <1-100>, set live on|off (paper vs real), set universe <SYMBOLS>, set timeframes <LIST>, set scan top <3-50>, set min agree <1-37>, set min tf <1-100>, set min conf <1-100>, set tf agree <1-N>, set auto universe on|off, set min volume <usdt>, set auto rank gainers|volume, refresh auto, set breakeven <pct>, set trail trigger <pct>, set trail distance <pct>, set stop frac <10-90>, set tp r <0.5-20>, set max positions <1-20>, set liq guard <pct> (closes a position before the exchange can liquidate it), set liq buffer <pct> (caps entry leverage so liquidation stays far enough), set guard <sec>
+Trader commands: the exact list is in your tool set above — act with <tool>...</tool> calls. The user can also type them directly in chat.
 The universe is automatic: every scan refreshes it to the top symbols by 24h gainers or volume (min 24h volume filter). "set universe ..." switches to a fixed list.
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
 """.trim()
@@ -134,7 +146,6 @@ private fun now(): String = SimpleDateFormat("HH:mm", Locale.getDefault()).forma
 @Composable
 fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
     var engineVersion by remember { mutableStateOf(0) }
-    var tradingActive by remember { mutableStateOf(false) }
     val engine = remember(engineVersion) {
         TraderEngine(BitunixRest(config.bitunixApiKey, config.bitunixSecret)).apply {
             leverage = config.leverage
@@ -159,11 +170,22 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             this.autoUniverse = config.autoUniverse
             this.autoMinVolumeUsd = config.autoMinVolumeUsd
             this.autoRankBy = config.autoRankBy
-            // Risk settings persisted since v.2.2.6 (previously reset on restart).
-            if (config.breakevenRoiPct > 0) risk = risk.copy(breakevenRoiPct = config.breakevenRoiPct.toDouble())
-            if (config.trailTriggerRoiPct > 0) risk = risk.copy(trailingTriggerRoiPct = config.trailTriggerRoiPct.toDouble())
-            if (config.trailDistanceRoiPct > 0) risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct.toDouble())
-            if (config.stopFracPct > 0) risk = risk.copy(stopFractionOfLiqPct = config.stopFracPct.toDouble())
+            // Risk settings persisted since v2.6 with a "chosen" flag, because
+            // 0 is a real setting ("off") and must not be read as "unset". An
+            // old backup carries no flag: a non-zero value was chosen by the
+            // user, a zero one falls back to the engine default.
+            if (config.breakevenSet || config.breakevenRoiPct > 0) {
+                risk = risk.copy(breakevenRoiPct = config.breakevenRoiPct.toDouble())
+            }
+            if (config.trailTriggerSet || config.trailTriggerRoiPct > 0) {
+                risk = risk.copy(trailingTriggerRoiPct = config.trailTriggerRoiPct.toDouble())
+            }
+            if (config.trailDistanceSet || config.trailDistanceRoiPct > 0) {
+                risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct.toDouble())
+            }
+            if (config.stopFracSet || config.stopFracPct > 0) {
+                risk = risk.copy(stopFractionOfLiqPct = config.stopFracPct.toDouble())
+            }
             risk = risk.copy(stopAtrMultiple = config.stopAtrMultiple.toDouble())
             risk = risk.copy(liqGuardRoiPct = config.liqGuardRoiPct.toDouble())
             liqBufferPct = config.liqBufferPct.toDouble()
@@ -176,9 +198,7 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
         post = post,
         engine = engine,
         engineVersion = engineVersion,
-        tradingActive = tradingActive,
         onEngineRecreate = { engineVersion++ },
-        onTradingChange = { tradingActive = it },
     )
 }
 
@@ -188,14 +208,10 @@ fun AgentApp(
     post: (Runnable) -> Unit,
     engine: TraderEngine,
     engineVersion: Int,
-    tradingActive: Boolean,
     onEngineRecreate: () -> Unit,
-    onTradingChange: (Boolean) -> Unit,
 ) {
     val appContext = LocalContext.current
     val messages = remember { mutableStateListOf(ChatMsg("Agent Trader ready. Tap a quick action or type /help.", false, now())) }
-    // Rolling multi-turn memory for the LLM: (role, content), oldest first.
-    val history = remember { mutableStateListOf<Pair<String, String>>() }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
@@ -206,6 +222,54 @@ fun AgentApp(
     var lastKeys by remember { mutableStateOf(config.bitunixApiKey to config.bitunixSecret) }
     val listState = rememberLazyListState()
     val keyboard = LocalSoftwareKeyboardController.current
+
+    /**
+     * One chat session: memory, the tool loop and the receipts.
+     *
+     * The engine can be recreated when the Bitunix keys change, so the session
+     * reaches it through a holder instead of a capture — a stale engine would
+     * answer with the old account's state.
+     */
+    val engineBox = remember { AtomicReference(engine) }
+    SideEffect { engineBox.set(engine) }
+
+    // A model-requested action waiting for the user's one-tap confirmation.
+    var consentRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var consentResolve by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+
+    val session = remember {
+        AgentSession(
+            transport = ChatTransport { model, msgs, maxTokens ->
+                ChatReply(ModelClient(config.baseUrl, config.apiKey).chat(model, msgs, maxTokens))
+            },
+            execute = { command -> engineBox.get().handle(command) },
+            consent = ConsentGate { command, reason ->
+                // Blocks the worker thread (never the UI thread) until the user
+                // answers, denies on timeout so the chat can never hang forever.
+                val latch = CountDownLatch(1)
+                val granted = AtomicBoolean(false)
+                post(object : Runnable {
+                    override fun run() {
+                        consentRequest = command to reason
+                        consentResolve = { ok ->
+                            granted.set(ok)
+                            latch.countDown()
+                        }
+                    }
+                })
+                val answered = latch.await(120, TimeUnit.SECONDS)
+                answered && granted.get()
+            },
+        )
+    }
+
+    /** Identity of the conversation: memory resets when any of these change. */
+    fun sessionKey(): String = listOf(
+        if (engine.live) "LIVE" else "PAPER",
+        config.baseUrl,
+        config.model,
+        config.apiKey.hashCode(),
+    ).joinToString("|")
 
     /** Copies the engine's current settings into [AgentConfig] so they survive restarts. */
     fun persistEngine() {
@@ -259,23 +323,16 @@ fun AgentApp(
 
     /** Engine toggles — one tap, no typing. */
     fun toggleEngine(on: Boolean) {
-        engine.engineOn = on
-        if (!on) {
-            engine.trading = false
-            onTradingChange(false)
-        }
-        say(if (on) "Engine ON — scanning every 30s." else "Engine OFF.")
+        // The engine owns its own lifecycle (loop stop/open-position warning),
+        // so the UI routes through handle() instead of writing the fields.
+        say(engine.handle(if (on) "engine on" else "engine off"))
     }
 
     fun toggleTrading(on: Boolean) {
-        if (on && !engine.engineOn) {
-            engine.engineOn = true
-            say("Engine ON first, trading started.")
-        } else {
-            say(if (on) "Trading started (${if (engine.live) "LIVE — real orders" else "paper"})." else "Trading stopped.")
-        }
-        engine.trading = on
-        onTradingChange(on)
+        if (on && !engine.engineOn) engine.engineOn = true
+        // startTrading()/stopTrading() own the loop: the reply describes the
+        // real state ("loop running"), not a promise.
+        say(if (on) engine.startTrading() else engine.stopTrading())
     }
 
     fun toggleScan(on: Boolean) {
@@ -334,7 +391,9 @@ fun AgentApp(
         apiKeyPresent = config.apiKey.isNotBlank(),
         model = config.model,
         modelsAvailable = 0,
-        lastError = AgentRuntimeError.last,
+        // Only a recent provider failure is worth reporting; a stale one or an
+        // app-side exception would send the repair flow after the wrong suspect.
+        lastError = AgentRuntimeError.providerError(),
     )
 
     /** Engine snapshot for self-diagnosis. */
@@ -453,10 +512,13 @@ fun AgentApp(
             )
         }
 
-        checks += if (AgentRuntimeError.last.isBlank()) {
-            SelfCheck.pass("last provider error", "none recorded")
+        checks += if (AgentRuntimeError.providerError().isBlank()) {
+            SelfCheck.pass("last provider error", "none recent")
         } else {
-            SelfCheck.fail("last provider error", AgentRuntimeError.last.take(180))
+            SelfCheck.fail(
+                "last provider error",
+                "${AgentRuntimeError.providerError().take(180)} (${AgentRuntimeError.ageSeconds()}s ago)",
+            )
         }
         checks += if (EngineRuntimeError.last.isBlank()) {
             SelfCheck.pass("last engine error", "none recorded")
@@ -495,7 +557,8 @@ fun AgentApp(
             appendLine("Engine status: ${engine.status().replace("\n", " | ")}")
             appendLine("Config: ${engine.configLine()}")
             appendLine("Loop running: ${engine.isLoopRunning}, feed: ${engine.liveFeedOn}, live: ${engine.live}")
-            if (AgentRuntimeError.last.isNotBlank()) appendLine("Last provider error: ${AgentRuntimeError.last}")
+            val providerErr = AgentRuntimeError.describe()
+            if (providerErr.isNotBlank()) appendLine("Last provider/app error: $providerErr")
             if (EngineRuntimeError.last.isNotBlank()) appendLine("Last engine error: ${EngineRuntimeError.last}")
         }.trim()
 
@@ -532,7 +595,9 @@ fun AgentApp(
             )
             d.summary() + repairHint + "\n\n— Agent analysis (" + model + ") —\n" + AgentBrain.stripToolCalls(reply).trim()
         } catch (e: Exception) {
-            AgentRuntimeError.last = "Error: ${e.message}"
+            // The model failed, not the app: attribute the failure to the
+            // provider so /autopsy and the repair flow look in the right place.
+            AgentRuntimeError.record("Error: ${e.message ?: e.javaClass.simpleName}", AgentRuntimeError.PROVIDER)
             d.summary() + "\n\nThe analysis model failed: ${e.message}\n" +
                 "That failure is now the top suspect — /autopsy shows it, /repair retries the provider."
         }
@@ -670,16 +735,10 @@ fun AgentApp(
         }
     }
 
-    // Keep the autonomous loop alive across engine re-creations (e.g. after key change).
-    LaunchedEffect(engineVersion, tradingActive) {
-        if (tradingActive) {
-            engine.trading = true
-            engine.startLoop(30) { msg -> say(msg) }
-        } else {
-            engine.stopLoop()
-        }
-    }
-    DisposableEffect(Unit) {
+    // When the engine is recreated (e.g. the Bitunix keys changed) the OLD
+    // engine's loop must die with it: a background engine trading on stale
+    // credentials is exactly the leak this effect prevents.
+    DisposableEffect(engine) {
         onDispose { engine.stopLoop() }
     }
 
@@ -740,7 +799,9 @@ fun AgentApp(
             is CommandRouter.Parsed.Agent -> when (parsed.command) {
                 "/help" -> say(CommandRouter.helpText())
                 "/clear" -> {
-                    history.clear()
+                    session.clear()
+                    // The plan belongs to the conversation: a cleared chat has no plan.
+                    config.lastPlan = ""
                     post(object : Runnable {
                         override fun run() {
                             messages.clear()
@@ -756,14 +817,18 @@ fun AgentApp(
                         val all = client.listModels()
                         if (all.isEmpty()) "No models returned."
                         else {
-                            val probes = client.autoSetModels(all)
+                            // Probe a handful of candidates and stop at the first
+                            // that answers. Probing every id the provider listed
+                            // meant 300 billable calls and a chat frozen until
+                            // they all finished.
+                            val probes = client.probeWorking(all)
                             val working = probes.filter { it.ok }.map { it.model }
                             if (working.isEmpty()) {
-                                "No working models for this key:\n" +
+                                "No working model among the ${probes.size} candidates tried:\n" +
                                     probes.joinToString("\n") { (m, ok, d) -> "$m — ${if (ok) "ok" else d}" }
                             } else {
                                 config.model = working.first()
-                                "Working models (${working.size}): ${working.joinToString(", ")}.\nModel set to ${working.first()}."
+                                "Model set to ${working.first()} (verified with a live call)."
                             }
                         }
                     }
@@ -983,25 +1048,32 @@ fun AgentApp(
                     }.trim()
                 }
                 "/autopsy" -> {
-                    val providerErr = AgentRuntimeError.last
+                    val providerErr = AgentRuntimeError.providerError()
+                    val appErr = if (AgentRuntimeError.source == AgentRuntimeError.LOCAL) AgentRuntimeError.last else ""
                     val engineErr = EngineRuntimeError.last
                     val entries = mutableListOf<String>()
-                    if (providerErr.isNotBlank()) entries += "Captured error (provider): $providerErr"
+                    if (providerErr.isNotBlank()) {
+                        entries += "Captured error (provider, ${AgentRuntimeError.ageSeconds()}s ago): $providerErr"
+                    }
+                    if (appErr.isNotBlank()) entries += "Captured error (app code): $appErr"
                     if (engineErr.isNotBlank()) entries += "Captured error (engine): $engineErr"
                     if (entries.isEmpty()) {
                         say("No recorded failure to analyse. Errors during async work are stored automatically (see /diagnose).")
                     } else {
-                        val engineOnly = providerErr.isBlank() && engineErr.isNotBlank()
+                        val engineOnly = providerErr.isBlank() && appErr.isBlank() && engineErr.isNotBlank()
                         val stage = when {
                             engineOnly && NetworkErrors.isNetwork(engineErr) -> "exchange/network (Bitunix unreachable)"
                             entries.any { it.contains("HTTP") } -> "network/API call"
                             entries.any { it.contains("Exception") } -> "logic/exception"
                             else -> "unknown"
                         }
-                        val action = if (stage.startsWith("exchange/network")) {
-                            "This is a connectivity problem, not a model problem. Check Wi-Fi/mobile data; the loop retries automatically."
-                        } else {
-                            "Check provider/keys, retry the operation, or review the trace above."
+                        val action = when {
+                            stage.startsWith("exchange/network") ->
+                                "This is a connectivity problem, not a model problem. Check Wi-Fi/mobile data; the loop retries automatically."
+                            appErr.isNotBlank() ->
+                                "The failure came from the app itself, not the provider — retry once, then report it with /diagnose <what you did>."
+                            else ->
+                                "Check provider/keys, retry the operation, or review the trace above."
                         }
                         say(
                             "Autopsy of last failure:\n" +
@@ -1035,14 +1107,10 @@ fun AgentApp(
                 "/repair" -> runAsync(post, ::say) { repairNow() }
                 else -> say("${parsed.command} is not wired yet.")
             }
-            is CommandRouter.Parsed.Trader -> runAsync(post, { r ->
-                say(r)
-                when {
-                    parsed.text.startsWith("start trading") -> onTradingChange(true)
-                    parsed.text.startsWith("stop trading") -> onTradingChange(false)
-                    parsed.text.startsWith("engine off") -> onTradingChange(false)
-                }
-            }) {
+            is CommandRouter.Parsed.Trader -> runAsync(post, ::say) {
+                // The engine's reply already states the real loop state
+                // ("Loop running: scan + manage"), so there is no UI-side
+                // trading flag to keep in sync any more.
                 engine.handle(parsed.text)
             }
             is CommandRouter.Parsed.Chat -> {
@@ -1052,10 +1120,8 @@ fun AgentApp(
                     // model reason over the evidence. Before this, the message either
                     // reached a model with no runtime facts or died on "No model set".
                     busy = true
-                    history.add("user" to text)
                     runAsync(post, { s ->
                         say(s)
-                        history.add("assistant" to s)
                         busy = false
                     }) { analyse(text, deep = true) }
                 } else if (config.model.isBlank()) {
@@ -1065,35 +1131,37 @@ fun AgentApp(
                     )
                 } else {
                     busy = true
-                    history.add("user" to parsed.text)
                     val moodSignal = AgentBrain.detectMood(parsed.text)
                     val moodSnapshot = mood
                     runAsync(post, { s ->
                         say(s)
-                        history.add("assistant" to s)
                         busy = false
                     }) {
-                        val client = ModelClient(config.baseUrl, config.apiKey)
+                        session.beginSession(sessionKey())
                         val sys = AgentBrain.buildSystemPrompt(
                             soul = config.soul,
                             context = liveContext(moodSnapshot),
                             mood = moodSignal,
                             appCapabilities = CAPABILITIES,
                         )
-                        val window = listOf("system" to sys) + history.takeLast(12)
-                        var reply = client.chat(config.model, window)
-                        // Agentic step: run the tools the model asked for, then let it answer.
-                        val tools = AgentBrain.extractToolCalls(reply)
-                        if (tools.isNotEmpty()) {
-                            val results = tools.map { t -> "» $t\n" + engine.handle(t) }
-                            val withTools = window + listOf(
-                                "assistant" to reply,
-                                "user" to "Tool results:\n" + results.joinToString("\n") +
-                                    "\nNow answer the user using these results.",
-                            )
-                            reply = client.chat(config.model, withTools)
+                        // The session owns the tool loop: authority checks, consent,
+                        // the 3-call cap and the receipts all live there now.
+                        try {
+                            session.turn(
+                                model = config.model,
+                                systemPrompt = sys,
+                                userText = parsed.text,
+                                onReceipt = { receipt -> say(receipt.render()) },
+                            ).answer
+                        } catch (e: Exception) {
+                            // The provider failed (HTTP, empty content…): it is
+                            // a provider failure even though the session is
+                            // app code, so /autopsy must not blame the app.
+                            val raw = NetworkErrors.rawMessage(e)
+                            AgentRuntimeError.record("Error: $raw", AgentRuntimeError.PROVIDER)
+                            "The model call failed: $raw\n" +
+                                "/autopsy shows the failure; /models re-picks a working model."
                         }
-                        AgentBrain.stripToolCalls(reply)
                     }
                 }
             }
@@ -1137,7 +1205,9 @@ fun AgentApp(
                     if (engine.live) "LIVE" else "PAPER",
                     if (engine.live) scheme.error else scheme.tertiary,
                 )
-                if (engine.trading) {
+                // The pill must show a real, running loop — "trading" alone can
+                // be a stale flag after an engine re-creation.
+                if (engine.trading && engine.isLoopRunning) {
                     Spacer(Modifier.width(6.dp))
                     StatusPill("TRADING", scheme.primary)
                 }
@@ -1310,6 +1380,30 @@ fun AgentApp(
             }
         }
     }
+
+    // One-tap confirmation for everything the MODEL asked the engine to do that
+    // moves money, changes risk or starts/stops the loop. The request comes from
+    // the worker thread; answering releases the blocked gate there.
+    consentRequest?.let { (command, reason) ->
+        fun resolve(granted: Boolean) {
+            consentResolve?.invoke(granted)
+            consentResolve = null
+            consentRequest = null
+        }
+        AlertDialog(
+            onDismissRequest = { resolve(false) },
+            title = { Text("Confirm before this runs") },
+            text = {
+                Text("$reason\n\nThe agent asked to run:\n$command")
+            },
+            confirmButton = {
+                TextButton(onClick = { resolve(true) }) { Text("Run it") }
+            },
+            dismissButton = {
+                TextButton(onClick = { resolve(false) }) { Text("No") }
+            },
+        )
+    }
 }
 
 /** One-tap toggle chip used in the chat quick bar. */
@@ -1353,11 +1447,21 @@ private fun Bubble(msg: ChatMsg) {
             modifier = Modifier.widthIn(max = 300.dp),
         ) {
             Column(Modifier.padding(horizontal = 10.dp, vertical = 7.dp)) {
-                Text(
-                    msg.text,
-                    color = if (msg.isUser) scheme.onPrimaryContainer else scheme.onSurfaceVariant,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
+                // Bot answers are model Markdown: render it instead of showing
+                // literal `**` and `#` noise. User text stays plain.
+                if (msg.isUser) {
+                    Text(
+                        msg.text,
+                        color = scheme.onPrimaryContainer,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                } else {
+                    MarkdownText(
+                        msg.text,
+                        color = scheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
                 Text(
                     msg.time,
                     Modifier
@@ -1533,7 +1637,10 @@ private fun runAsync(post: (Runnable) -> Unit, done: (String) -> Unit, work: () 
                 friendly
             } else {
                 val msg = "Error: $raw"
-                AgentRuntimeError.last = msg
+                // LOCAL, not provider: this thread also runs engine commands and
+                // repairs, and blaming the model for an app bug sent /autopsy
+                // and the repair flow after the wrong suspect.
+                AgentRuntimeError.record(msg, AgentRuntimeError.LOCAL)
                 msg
             }
         }

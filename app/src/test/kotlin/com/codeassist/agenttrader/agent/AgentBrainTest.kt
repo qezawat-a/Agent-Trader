@@ -26,6 +26,23 @@ class AgentBrainTest {
     }
 
     @Test
+    fun single_word_cues_only_fire_on_word_boundaries() {
+        // "mad" inside "made" and "moon" inside "moonlight" are different words.
+        assertNull(AgentBrain.detectMood("I made a trade this morning"))
+        assertNull(AgentBrain.detectMood("waiting for moonlight"))
+        assertEquals(AgentBrain.Mood.ANGRY, AgentBrain.detectMood("I'm mad")?.mood)
+        assertEquals(AgentBrain.Mood.EUPHORIC, AgentBrain.detectMood("to the moon")?.mood)
+    }
+
+    @Test
+    fun the_default_soul_is_about_trading_not_about_editing_files() {
+        val soul = AgentConfig.DEFAULT_SOUL
+        assertTrue(soul.contains("capital"), soul)
+        assertFalse(soul.contains("files"), soul)
+        assertFalse(soul.contains("CodeAssist"), soul)
+    }
+
+    @Test
     fun intensity_rises_with_emphasis() {
         val soft = AgentBrain.detectMood("I am a bit worried")
         val loud = AgentBrain.detectMood("I am really worried!!!")
@@ -67,7 +84,9 @@ class AgentBrainTest {
     @Test
     fun tool_calls_keep_symbols_and_are_deduplicated() {
         val tools = AgentBrain.extractToolCalls("<tool>close position BTCUSDT</tool><tool>status</tool><tool>status</tool>")
-        assertEquals(listOf("close position btcusdt", "status"), tools)
+        // Case preserved: parseTimeframesCsv is case-sensitive (1m vs 1M), and
+        // the engine lowercases what it must anyway.
+        assertEquals(listOf("close position BTCUSDT", "status"), tools)
     }
 
     @Test

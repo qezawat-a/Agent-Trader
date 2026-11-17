@@ -11,7 +11,11 @@ import java.net.URL
  * Robustness rules learned the hard way:
  *  - Base URLs are often pasted without /v1 (e.g. https://api.openai.com). We append /v1
  *    when the path has no version segment; /v1beta or /openai paths are left untouched.
- *  - Reasoning models may return "content": null with text in "reasoning_content".
+ *  - Reasoning models may return "content": null and put a chain of thought in
+ *    "reasoning_content". That trace is NEVER used as the answer: it is private
+ *    model output, it can contain tool-shaped text, and showing it to the user
+ *    would be a lie about what the model said. An empty content is an error the
+ *    caller surfaces explicitly.
  *  - OpenAI o-series rejects "max_tokens" and asks for "max_completion_tokens"; we retry
  *    once with the renamed field when the error says so.
  *  - 429/5xx get two retries with backoff. API keys are redacted from every error message.
@@ -80,14 +84,27 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
         }
     }
 
-    /** Tries each model with a tiny request and returns every model with its result. */
-    fun autoSetModels(candidates: List<String>): List<Probe> = candidates.map { model ->
-        try {
-            val reply = chat(model, listOf("user" to "ping"), maxTokens = 16)
-            Probe(model, true, if (reply.isBlank()) "ok (empty content)" else "ok")
-        } catch (e: Exception) {
-            Probe(model, false, e.message?.redact() ?: e.javaClass.simpleName)
+    /**
+     * Probes at most [limit] candidates and stops at the first one that answers.
+     *
+     * `/models` used to probe every id the provider listed: 300 models meant 300
+     * billable calls, 429 retries and a chat that could not answer until they all
+     * finished. Preference order is the caller's, so a free/cheap model is tried
+     * first instead of whatever the provider happened to list first.
+     */
+    fun probeWorking(candidates: List<String>, limit: Int = 5): List<Probe> {
+        val out = mutableListOf<Probe>()
+        for (model in candidates.filter { it.isNotBlank() }.distinct().take(limit.coerceAtLeast(1))) {
+            val probe = try {
+                val reply = chat(model, listOf("user" to "ping"), maxTokens = 16)
+                Probe(model, true, if (reply.isBlank()) "ok (empty content)" else "ok")
+            } catch (e: Exception) {
+                Probe(model, false, e.message?.redact() ?: e.javaClass.simpleName)
+            }
+            out += probe
+            if (probe.ok) break
         }
+        return out
     }
 
     /** One-shot chat completion. [messages] are (role, content) pairs, oldest first. */
@@ -116,10 +133,9 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
             ?: throw IllegalStateException("Malformed reply: no choices. ${json.take(200).redact()}")
         if (choices.length() == 0) throw IllegalStateException("Empty choices array.")
         val msg = choices.getJSONObject(0).optJSONObject("message") ?: JSONObject()
-        val content = msg.optString("content", "").trim()
-            .ifBlank { msg.optString("reasoning_content", "").trim() }
-            .ifBlank { msg.optString("reasoning", "").trim() }
-        return content
+        // Content only. A blank answer stays blank so the caller can report an
+        // empty response instead of leaking the private reasoning trace.
+        return msg.optString("content", "").trim()
     }
 
     /** Appends /v1 when the URL has no version segment (v1, v1beta, v2, openai...). */
@@ -163,7 +179,9 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
         if (code !in 200..299) {
-            val detail = "${text.take(300)}"
+            // Redact BEFORE the body becomes an exception message: the provider
+            // body can echo the Authorization header back.
+            val detail = text.take(300).redact()
             if (detail.contains("max_completion_tokens")) throw RenamedMaxTokens(detail)
             if (code == 429 || code >= 500) throw RetryableHttp("HTTP $code: $detail")
             throw IllegalStateException("HTTP $code: $detail${friendlyHttpHint(code, detail)}")

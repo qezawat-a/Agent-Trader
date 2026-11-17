@@ -59,6 +59,10 @@ object CommandRouter {
         // v1.1.7 risk manager & exits — same lesson: route to the engine, never the LLM
         "set breakeven", "set trail trigger", "set trail distance",
         "set stop frac", "set stop fraction",
+        // v2.6 — the volatility floor was missing here, so "set stop atr 1.5" fell
+        // through to the LLM, whose parser dropped the decimal: the control was
+        // unreachable from chat.
+        "set stop atr",
         "set max positions", "set maxpos", "set guard",
         "set liq guard", "set liq buffer",
         // v2.2.x TP distance + majority-side gate — both engine commands, both were

@@ -33,4 +33,11 @@ class CommandRouterTest {
         assertTrue(CommandRouter.parse("set tp 2.5") is CommandRouter.Parsed.Trader)
         assertTrue(CommandRouter.parse("set tf agree 2") is CommandRouter.Parsed.Trader)
     }
+
+    @Test
+    fun the_volatility_stop_command_goes_to_the_engine() {
+        // Regression: "set stop atr 1.5" fell through to the LLM, whose parser
+        // dropped the decimal, so the control was unreachable from chat.
+        assertTrue(CommandRouter.parse("set stop atr 1.5") is CommandRouter.Parsed.Trader)
+    }
 }

@@ -111,25 +111,42 @@ class AgentConfig(context: Context) {
         get() = prefs.getInt("min_side_tfs", 0)
         set(value) = prefs.edit().putInt("min_side_tfs", value).apply()
 
-    /** Risk manager: SL→entry trigger ROI % (0 = off). Persisted since v.2.2.6. */
+    /**
+     * Risk manager: SL→entry trigger ROI % (0 = off). Persisted since v.2.2.6.
+     *
+     * Zero is a real setting ("off"), not "unset". [breakevenSet] tells the two
+     * apart, otherwise turning it off reverted to the engine default on restart.
+     */
     var breakevenRoiPct: Int
         get() = prefs.getInt("breakeven_roi", 0)
-        set(value) = prefs.edit().putInt("breakeven_roi", value).apply()
+        set(value) = prefs.edit().putInt("breakeven_roi", value).putBoolean("breakeven_roi_set", true).apply()
+
+    val breakevenSet: Boolean
+        get() = prefs.getBoolean("breakeven_roi_set", false)
 
     /** Trailing trigger ROI % (0 = off). */
     var trailTriggerRoiPct: Int
         get() = prefs.getInt("trail_trigger", 0)
-        set(value) = prefs.edit().putInt("trail_trigger", value).apply()
+        set(value) = prefs.edit().putInt("trail_trigger", value).putBoolean("trail_trigger_set", true).apply()
+
+    val trailTriggerSet: Boolean
+        get() = prefs.getBoolean("trail_trigger_set", false)
 
     /** Trailing distance behind best ROI %. */
     var trailDistanceRoiPct: Int
         get() = prefs.getInt("trail_distance", 0)
-        set(value) = prefs.edit().putInt("trail_distance", value).apply()
+        set(value) = prefs.edit().putInt("trail_distance", value).putBoolean("trail_distance_set", true).apply()
+
+    val trailDistanceSet: Boolean
+        get() = prefs.getBoolean("trail_distance_set", false)
 
     /** Initial stop as % of the way to liquidation (0 = use engine default). */
     var stopFracPct: Int
         get() = prefs.getInt("stop_frac", 0)
-        set(value) = prefs.edit().putInt("stop_frac", value).apply()
+        set(value) = prefs.edit().putInt("stop_frac", value).putBoolean("stop_frac_set", true).apply()
+
+    val stopFracSet: Boolean
+        get() = prefs.getBoolean("stop_frac_set", false)
 
     /**
      * How many ATRs away the stop must sit from the entry (0 = off).
@@ -237,9 +254,13 @@ class AgentConfig(context: Context) {
         "min_conf" to minConfidence,
         "min_side_tfs" to minSideTfs,
         "breakeven_roi" to breakevenRoiPct,
+        "breakeven_roi_set" to breakevenSet,
         "trail_trigger" to trailTriggerRoiPct,
+        "trail_trigger_set" to trailTriggerSet,
         "trail_distance" to trailDistanceRoiPct,
+        "trail_distance_set" to trailDistanceSet,
         "stop_frac" to stopFracPct,
+        "stop_frac_set" to stopFracSet,
         "stop_atr" to stopAtrMultiple,
         "tp_r" to tpR,
         "auto_universe" to autoUniverse,
@@ -284,10 +305,13 @@ class AgentConfig(context: Context) {
         num("min_tf_conf")?.let { minTfConfidence = it.toInt() }
         num("min_conf")?.let { minConfidence = it.toInt() }
         int("min_side_tfs")?.let { minSideTfs = it }
-        int("breakeven_roi")?.let { breakevenRoiPct = it }
-        int("trail_trigger")?.let { trailTriggerRoiPct = it }
-        int("trail_distance")?.let { trailDistanceRoiPct = it }
-        int("stop_frac")?.let { stopFracPct = it }
+        // Old backups carry the values but no "chosen" flag. A non-zero value can
+        // only have come from the engine, so it was chosen; an explicit 0 without
+        // the flag is the pre-v2.6 default and must keep the engine default.
+        restoreChosen(int("breakeven_roi"), bool("breakeven_roi_set")) { breakevenRoiPct = it }
+        restoreChosen(int("trail_trigger"), bool("trail_trigger_set")) { trailTriggerRoiPct = it }
+        restoreChosen(int("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
+        restoreChosen(int("stop_frac"), bool("stop_frac_set")) { stopFracPct = it }
         num("stop_atr")?.let { stopAtrMultiple = it.toFloat() }
         num("tp_r")?.let { tpR = it.toFloat() }
         bool("auto_universe")?.let { autoUniverse = it }
@@ -307,19 +331,18 @@ class AgentConfig(context: Context) {
         str("last_plan")?.let { lastPlan = it }
     }
 
-    var lastError: String
+    val lastError: String
         get() = prefs.getString("last_error", "") ?: ""
-        set(value) = prefs.edit().putString("last_error", value.trim()).apply()
-
-    val maxSteps: Int = 128
-    val thinking: String = "MAX"
-    val autonomousSec: Int = 15
-    val rateLimitWindow: Int = 128
 
     companion object {
+        /**
+         * The persona a fresh install starts with. It has to describe THIS app:
+         * a real-money futures trading agent, not a file-editing coding assistant.
+         */
         const val DEFAULT_SOUL =
-            "You are CodeAssist's agent. Be precise, admit uncertainty, never invent results, " +
-                "and ask before changing files unless auto-accept is on."
+            "Calm, sharp and honest. You protect the trader's capital before anything else. " +
+                "You quote real numbers from the engine, never invent results, and say plainly " +
+                "when you do not know something. You never promise a profit and never hide a loss."
 
         /** The buffer default the versions before v2.5.0 shipped and persisted. */
         const val LEGACY_LIQ_BUFFER_DEFAULT = 5f
@@ -342,4 +365,14 @@ internal fun effectiveLiqBuffer(stored: Float?, chosen: Boolean, legacyDefault: 
     stored == null -> 0f
     stored == legacyDefault -> 0f
     else -> stored
+}
+
+/**
+ * Applies a restored numeric setting only when it was actually chosen: either the
+ * backup carries the "set" flag, or the value is non-zero (the app never wrote a
+ * non-zero risk value the user had not triggered).
+ */
+private fun restoreChosen(value: Int?, chosen: Boolean?, apply: (Int) -> Unit) {
+    if (value == null) return
+    if (chosen == true || (chosen == null && value != 0)) apply(value)
 }
