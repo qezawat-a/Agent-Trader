@@ -102,15 +102,11 @@ object ToolPolicy {
         ToolSpec("set breakeven", ToolCapability.RISK),
         ToolSpec("set trail trigger", ToolCapability.RISK),
         ToolSpec("set trail distance", ToolCapability.RISK),
-        ToolSpec("set stop fraction", ToolCapability.RISK),
-        ToolSpec("set stop frac", ToolCapability.RISK),
-        ToolSpec("set stop atr", ToolCapability.RISK),
+        ToolSpec("set sl", ToolCapability.RISK),
         ToolSpec("set tp r", ToolCapability.RISK),
         // "set tp" is prefix-matched with a following space, so "set tp 2.5"
         // lands here while "set tp r 3" still hits the longer spec first.
         ToolSpec("set tp", ToolCapability.RISK),
-        ToolSpec("set liq guard", ToolCapability.RISK),
-        ToolSpec("set liq buffer", ToolCapability.RISK),
 
         // ---- MONEY ----
         ToolSpec("close position", ToolCapability.MONEY),

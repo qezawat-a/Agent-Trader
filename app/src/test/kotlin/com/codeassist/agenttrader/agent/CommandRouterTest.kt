@@ -35,9 +35,8 @@ class CommandRouterTest {
     }
 
     @Test
-    fun the_volatility_stop_command_goes_to_the_engine() {
-        // Regression: "set stop atr 1.5" fell through to the LLM, whose parser
-        // dropped the decimal, so the control was unreachable from chat.
-        assertTrue(CommandRouter.parse("set stop atr 1.5") is CommandRouter.Parsed.Trader)
+    fun the_sl_command_goes_to_the_engine() {
+        // Regression: the SL control must reach the engine, not the LLM.
+        assertTrue(CommandRouter.parse("set sl 2") is CommandRouter.Parsed.Trader)
     }
 }

@@ -183,12 +183,9 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             if (config.trailDistanceSet || config.trailDistanceRoiPct > 0) {
                 risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct.toDouble())
             }
-            if (config.stopFracSet || config.stopFracPct > 0) {
-                risk = risk.copy(stopFractionOfLiqPct = config.stopFracPct.toDouble())
+            if (config.slPct > 0) {
+                risk = risk.copy(slPct = config.slPct.toDouble())
             }
-            risk = risk.copy(stopAtrMultiple = config.stopAtrMultiple.toDouble())
-            risk = risk.copy(liqGuardRoiPct = config.liqGuardRoiPct.toDouble())
-            liqBufferPct = config.liqBufferPct.toDouble()
             if (config.tpR > 0f) tpR = config.tpR.toDouble()
             trading = false // the trading loop never auto-resumes on launch (safety)
         }
@@ -292,10 +289,7 @@ fun AgentApp(
         config.breakevenRoiPct = engine.risk.breakevenRoiPct.toInt()
         config.trailTriggerRoiPct = engine.risk.trailingTriggerRoiPct.toInt()
         config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct.toInt()
-        config.stopFracPct = engine.risk.stopFractionOfLiqPct.toInt()
-        config.stopAtrMultiple = engine.risk.stopAtrMultiple.toFloat()
-        config.liqGuardRoiPct = engine.risk.liqGuardRoiPct.toInt().coerceIn(0, 100)
-        config.liqBufferPct = engine.liqBufferPct.toFloat()
+        config.slPct = engine.risk.slPct.toInt()
         config.tpR = engine.tpR.toFloat()
         config.autoUniverse = engine.autoUniverse
         config.autoMinVolumeUsd = engine.autoMinVolumeUsd
@@ -508,7 +502,7 @@ fun AgentApp(
         } else {
             SelfCheck.pass(
                 "risk config",
-                "leverage ${engine.leverage}x (max ${engine.leverageCeiling()}), stop ${engine.risk.stopFractionOfLiqPct.toInt()}% of liq, TP ${engine.tpR}R",
+                "leverage ${engine.leverage}x (max ${engine.leverageCeiling()}), stop ${if (engine.risk.slPct > 0) "${engine.risk.slPct.toInt()}% from entry" else "none"}, TP ${engine.tpR}R",
             )
         }
 

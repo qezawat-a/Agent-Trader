@@ -140,23 +140,13 @@ class AgentConfig(context: Context) {
     val trailDistanceSet: Boolean
         get() = prefs.getBoolean("trail_distance_set", false)
 
-    /** Initial stop as % of the way to liquidation (0 = use engine default). */
-    var stopFracPct: Int
-        get() = prefs.getInt("stop_frac", 0)
-        set(value) = prefs.edit().putInt("stop_frac", value).putBoolean("stop_frac_set", true).apply()
-
-    val stopFracSet: Boolean
-        get() = prefs.getBoolean("stop_frac_set", false)
-
     /**
-     * How many ATRs away the stop must sit from the entry (0 = off).
-     *
-     * The stop has to be outside the symbol's own noise, or the market gaps
-     * through it. The default is 1.5 ATRs.
+     * Stop distance from the entry, % of price (0 = no stop — a plain market
+     * order; the app never invents one). Any stored value is the user's choice.
      */
-    var stopAtrMultiple: Float
-        get() = prefs.getFloat("stop_atr", com.codeassist.agenttrader.trader.TpSlPlanner.STOP_ATR_MULTIPLE.toFloat())
-        set(value) = prefs.edit().putFloat("stop_atr", value.coerceIn(0f, 10f)).apply()
+    var slPct: Int
+        get() = prefs.getInt("sl_pct", 0)
+        set(value) = prefs.edit().putInt("sl_pct", value.coerceIn(0, 50)).apply()
 
     /** TP distance as R-multiple of the stop distance (0 = use engine default). */
     var tpR: Float
@@ -179,41 +169,6 @@ class AgentConfig(context: Context) {
     var autoRankBy: String
         get() = prefs.getString("auto_rank_by", "gainers") ?: "gainers"
         set(value) = prefs.edit().putString("auto_rank_by", value.trim()).apply()
-
-    /** Liquidation guard: close a position when its loss reaches this % of margin (stored as positive, e.g. 60 = -60% ROI). 0 = off. */
-    var liqGuardRoiPct: Int
-        get() = prefs.getInt("liq_guard_roi", 60)
-        set(value) = prefs.edit().putInt("liq_guard_roi", value.coerceIn(0, 100)).apply()
-
-    /**
-     * Liquidation buffer: keep estimated liquidation at least this % from
-     * entry (caps leverage). 0 = off (the default).
-     *
-     * The stored VALUE only counts once the user has chosen it themselves
-     * ([liqBufferPctSet]) — or once it differs from the 5% that the versions
-     * before v2.5.0 shipped as a default and wrote into the settings on every
-     * chat message. An install that never chose a buffer still carried that
-     * inherited 5, which silently capped the leverage (75x became 17x);
-     * reading the raw value would have kept the cap alive after the default
-     * went to 0.
-     */
-    var liqBufferPct: Float
-        get() = effectiveLiqBuffer(
-            if (prefs.contains(KEY_LIQ_BUFFER_PCT)) prefs.getFloat(KEY_LIQ_BUFFER_PCT, 0f) else null,
-            liqBufferPctSet,
-            LEGACY_LIQ_BUFFER_DEFAULT,
-        )
-        set(value) {
-            prefs.edit()
-                .putFloat(KEY_LIQ_BUFFER_PCT, value.coerceIn(0f, 100f))
-                .putBoolean(KEY_LIQ_BUFFER_PCT_SET, true)
-                .apply()
-        }
-
-    /** True once the user has chosen a liquidation buffer themselves. */
-    var liqBufferPctSet: Boolean
-        get() = prefs.getBoolean(KEY_LIQ_BUFFER_PCT_SET, false)
-        set(value) { prefs.edit().putBoolean(KEY_LIQ_BUFFER_PCT_SET, value).apply() }
 
     fun skillGet(name: String): String? = prefs.getString("skill_$name", null)
     fun skillPut(name: String, text: String) = prefs.edit().putString("skill_$name", text.trim()).apply()
@@ -259,16 +214,11 @@ class AgentConfig(context: Context) {
         "trail_trigger_set" to trailTriggerSet,
         "trail_distance" to trailDistanceRoiPct,
         "trail_distance_set" to trailDistanceSet,
-        "stop_frac" to stopFracPct,
-        "stop_frac_set" to stopFracSet,
-        "stop_atr" to stopAtrMultiple,
+        "sl_pct" to slPct,
         "tp_r" to tpR,
         "auto_universe" to autoUniverse,
         "auto_min_volume_usd" to autoMinVolumeUsd,
         "auto_rank_by" to autoRankBy,
-        "liq_guard_roi" to liqGuardRoiPct,
-        "liq_buffer_pct" to liqBufferPct,
-        "liq_buffer_pct_set" to liqBufferPctSet,
         "last_plan" to lastPlan,
     )
 
@@ -311,23 +261,11 @@ class AgentConfig(context: Context) {
         restoreChosen(int("breakeven_roi"), bool("breakeven_roi_set")) { breakevenRoiPct = it }
         restoreChosen(int("trail_trigger"), bool("trail_trigger_set")) { trailTriggerRoiPct = it }
         restoreChosen(int("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
-        restoreChosen(int("stop_frac"), bool("stop_frac_set")) { stopFracPct = it }
-        num("stop_atr")?.let { stopAtrMultiple = it.toFloat() }
+        int("sl_pct")?.let { slPct = it }
         num("tp_r")?.let { tpR = it.toFloat() }
         bool("auto_universe")?.let { autoUniverse = it }
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }
         str("auto_rank_by")?.let { autoRankBy = it }
-        int("liq_guard_roi")?.let { liqGuardRoiPct = it }
-        num("liq_buffer_pct")?.let { v ->
-            val f = v.toFloat().coerceIn(0f, 100f)
-            // An old backup carries no "chosen" flag: the legacy 5% default
-            // inside it was never the user's choice, anything else was.
-            val chosen = bool(KEY_LIQ_BUFFER_PCT_SET) ?: (f != LEGACY_LIQ_BUFFER_DEFAULT)
-            prefs.edit()
-                .putFloat(KEY_LIQ_BUFFER_PCT, f)
-                .putBoolean(KEY_LIQ_BUFFER_PCT_SET, chosen)
-                .apply()
-        }
         str("last_plan")?.let { lastPlan = it }
     }
 
@@ -343,28 +281,7 @@ class AgentConfig(context: Context) {
             "Calm, sharp and honest. You protect the trader's capital before anything else. " +
                 "You quote real numbers from the engine, never invent results, and say plainly " +
                 "when you do not know something. You never promise a profit and never hide a loss."
-
-        /** The buffer default the versions before v2.5.0 shipped and persisted. */
-        const val LEGACY_LIQ_BUFFER_DEFAULT = 5f
-
-        const val KEY_LIQ_BUFFER_PCT = "liq_buffer_pct"
-        const val KEY_LIQ_BUFFER_PCT_SET = "liq_buffer_pct_set"
     }
-}
-
-/**
- * The effective liquidation buffer.
- *
- * A stored value only counts when the user chose it ([chosen]) or when it is
- * not the legacy default that the versions before v2.5.0 shipped and wrote
- * into the settings on every chat message. That inherited 5% was never the
- * user's choice, and it silently capped the leverage — 75x became 17x.
- */
-internal fun effectiveLiqBuffer(stored: Float?, chosen: Boolean, legacyDefault: Float): Float = when {
-    chosen -> stored ?: 0f
-    stored == null -> 0f
-    stored == legacyDefault -> 0f
-    else -> stored
 }
 
 /**

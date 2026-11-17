@@ -352,7 +352,7 @@ fun ControlScreen(
                     Text("Risk manager & exits", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
                         "Breakeven ${num(engine.risk.breakevenRoiPct)}% · trail trigger ${num(engine.risk.trailingTriggerRoiPct)}% · " +
-                            "SL ${num(engine.risk.stopFractionOfLiqPct)}% toward liq · liq guard ${num(engine.risk.liqGuardRoiPct)}% ROI · " +
+                            "SL ${if (engine.risk.slPct > 0) "${num(engine.risk.slPct)}% from entry" else "none"} · " +
                             "max ${engine.maxOpenPositions} positions · " +
                             "guard ${if (engine.guardIntervalSec > 0) "${engine.guardIntervalSec}s" else "off"}",
                         style = MaterialTheme.typography.labelSmall,
@@ -396,23 +396,23 @@ fun ControlScreen(
                         )
                         OutlinedButton(onClick = { onAction("set guard $guardText") }) { Text("Apply") }
                     }
-                    var lgText by remember(engine.configRev) { mutableStateOf(num(engine.risk.liqGuardRoiPct)) }
+                    var slText by remember(engine.configRev) { mutableStateOf(num(engine.risk.slPct)) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
-                            lgText, { lgText = it },
-                            label = { Text("Liq guard % ROI (0 off)") }, singleLine = true,
+                            slText, { slText = it },
+                            label = { Text("SL % from entry (0 off)") }, singleLine = true,
                             modifier = Modifier.weight(1f),
                         )
-                        OutlinedButton(onClick = { onAction("set liq guard $lgText") }) { Text("Apply") }
+                        OutlinedButton(onClick = { onAction("set sl $slText") }) { Text("Apply") }
                     }
                     Text(
-                        "Liq guard closes a position before the exchange can liquidate it (warn at ${num(-(engine.risk.liqGuardRoiPct + 15.0))}% ROI). " +
-                            "Liq buffer ${num(engine.liqBufferPct)}% caps new entries' leverage the same way — off by default, because any value silently lowers the leverage you asked for.",
+                        "SL is yours: 'set sl 2' attaches a 2% stop to new entries; 0 = none (a plain market order). " +
+                            "The exchange validates the trigger levels.",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
                     Text(
-                        "Also via chat: set trail distance 15 · set stop frac 50 · set liq buffer 2 — or ask: settings trade",
+                        "Also via chat: set trail distance 15 · set sl 2 · or ask: settings trade",
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
@@ -761,7 +761,7 @@ fun TradeScreen(
                                         fontWeight = FontWeight.SemiBold,
                                     )
                                     Text(
-                                        "qty ${fmt(p.qty)} · entry ${fmt(p.entry)} · stop ${fmt(p.stop)}",
+                                        "qty ${fmt(p.qty)} · entry ${fmt(p.entry)} · stop ${p.stop?.let { fmt(it) } ?: "none"}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = scheme.onSurfaceVariant,
                                     )

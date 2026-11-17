@@ -6,6 +6,7 @@ import org.json.JSONObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class AutoUniverseTest {
@@ -154,51 +155,33 @@ class UniverseRankingTest {
 }
 
 /**
- * Liquidation-aware stops: the stop must never reach or pass the liquidation
- * price. When it can't fit, the trade is refused rather than opened with a
- * stop that liquidation would hit first.
+ * The stop follows the user's own explicit SL distance — never an invented
+ * fraction of the liquidation distance, never clamped, never ATR-widened.
  */
 class LiquidationStopTest {
 
     @Test
-    fun stop_at_50_percent_is_inside_liquidation() {
-        // entry 100, lev 10 -> liq = 90.5 (long, MMR 0.5%) -> stop at 50% = 95.25.
-        assertTrue(TpSlPlanner.stopFits(100.0, 1, 10, 0.5))
-        assertTrue(TpSlPlanner.stopFits(100.0, -1, 10, 0.5))
+    fun sl_pct_is_an_exact_distance_from_the_entry() {
+        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.02)
+        assertEquals(98.0, plan.stop!!, 1e-9)
+        val short = TpSlPlanner.plan(100.0, -1, 10, 0.02)
+        assertEquals(102.0, short.stop!!, 1e-9)
     }
 
     @Test
-    fun stop_at_100_percent_reaches_liquidation_and_fails() {
-        // stopFraction 1.0 puts stop exactly at liq -> refused.
-        assertFalse(TpSlPlanner.stopFits(100.0, 1, 10, 1.0))
-        assertFalse(TpSlPlanner.stopFits(100.0, -1, 10, 1.0))
+    fun sl_pct_zero_means_no_stop_and_no_ladder() {
+        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.0)
+        assertNull(plan.stop)
+        assertTrue(plan.ladder.isEmpty())
     }
 
     @Test
-    fun stop_beyond_liquidation_fails() {
-        assertFalse(TpSlPlanner.stopFits(100.0, 1, 10, 1.2))
-        assertFalse(TpSlPlanner.stopFits(100.0, -1, 10, 1.2))
-    }
-
-    @Test
-    fun high_leverage_makes_stop_harder_to_fit() {
-        // At 200x the room is 1/200 = 0.5% — exactly the MMR, so with the
-        // default MMR 0.5% there is NO room and the entry is refused.
-        assertFalse(TpSlPlanner.stopFits(100.0, 1, 200, 0.5))
-        // With a smaller MMR (0.1%) there is room again and 90% still fits.
-        assertTrue(TpSlPlanner.stopFits(100.0, 1, 200, 0.9, mmr = 0.001))
-    }
-
-    @Test
-    fun plan_clamps_stop_inside_liquidation() {
-        // entry 100, lev 10, stopFraction 1.0 -> clamped to safety margin.
-        val plan = TpSlPlanner.plan(100.0, 1, 10, 1.0)
-        val liqDist = TpSlPlanner.liqDistance(100.0, 10)
-        val liq = 100.0 - liqDist
-        val floor = liq + 0.05 * liqDist
-        assertTrue(plan.stop > liq, "stop must be inside liquidation: stop=${plan.stop} liq=$liq")
-        assertTrue(plan.stop >= floor, "stop must respect safety margin: stop=${plan.stop} floor=$floor")
-        assertTrue(plan.stop < 100.0, "stop must be below entry for a long: ${plan.stop}")
+    fun the_ladder_is_built_from_the_stop_distance() {
+        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.02)
+        assertEquals(4, plan.ladder.size)
+        assertEquals(102.0, plan.ladder[0].first, 1e-9) // entry + 1R
+        assertEquals(106.0, plan.ladder[2].first, 1e-9) // entry + 3R
+        assertEquals(108.0, plan.ladder[3].first, 1e-9) // entry + 4R
     }
 
     @Test
@@ -212,12 +195,31 @@ class LiquidationStopTest {
         assertEquals(0.5, TpSlPlanner.liqDistance(100.0, 100, mmr = 0.005) / 100.0 * 100.0, 1e-9)
         // No MMR (old, optimistic model) → the full 1/leverage.
         assertEquals(1.0, TpSlPlanner.liqDistance(100.0, 100, mmr = 0.0) / 100.0 * 100.0, 1e-9)
+        // 1/200 = 0.5% equals MMR 0.5% → no room at all.
+        assertEquals(0.0, TpSlPlanner.liqDistance(100.0, 200, mmr = 0.005), 1e-12)
     }
 
     @Test
-    fun an_entry_without_liquidation_room_is_refused() {
-        // 1/200 = 0.5% and MMR 0.5% → no room at all: refuse, do not open.
-        assertFalse(TpSlPlanner.stopFits(100.0, 1, 200, 0.3, mmr = 0.005))
-        assertEquals(0.0, TpSlPlanner.liqDistance(100.0, 200, mmr = 0.005), 1e-12)
+    fun tier_for_leverage_maps_to_the_highest_tier_covering_the_selection() {
+        // The official documented BTC table.
+        val tiers = parseRiskTiers(
+            org.json.JSONArray(
+                """[{"level":1,"startValue":"0","endValue":"150000","leverage":125,"maintenanceMarginRate":"0.004"},
+                    {"level":2,"startValue":"150000","endValue":"800000","leverage":100,"maintenanceMarginRate":"0.005"},
+                    {"level":3,"startValue":"800000","endValue":"2500000","leverage":50,"maintenanceMarginRate":"0.01"},
+                    {"level":4,"startValue":"2500000","endValue":"10000000","leverage":20,"maintenanceMarginRate":"0.025"},
+                    {"level":5,"startValue":"10000000","endValue":"20000000","leverage":10,"maintenanceMarginRate":"0.05"},
+                    {"level":6,"startValue":"20000000","endValue":"40000000","leverage":5,"maintenanceMarginRate":"0.1"},
+                    {"level":7,"startValue":"40000000","endValue":"60000000","leverage":2,"maintenanceMarginRate":"0.25"},
+                    {"level":8,"startValue":"60000000","endValue":"100000000","leverage":1,"maintenanceMarginRate":"0.5"}]""",
+            ),
+        )
+        // The official example: 50x → tier 3 (max value 2,500,000 USDT).
+        assertEquals(3, tierForLeverage(tiers, 50)?.level)
+        assertEquals(2, tierForLeverage(tiers, 75)?.level)
+        assertEquals(1, tierForLeverage(tiers, 125)?.level)
+        assertEquals(8, tierForLeverage(tiers, 1)?.level)
+        // No tier covers more than 125x on this table.
+        assertNull(tierForLeverage(tiers, 200))
     }
 }

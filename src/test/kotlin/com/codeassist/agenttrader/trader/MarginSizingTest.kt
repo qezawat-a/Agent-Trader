@@ -5,29 +5,28 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * Margin sizing: the hard cap by free position slots, the fee buffer and the
- * exchange's minimum order size. Ported from the Telegram trader so both apps
- * commit the same margin for the same balance.
+ * Margin sizing: the share of the balance, the hard cap by free position slots
+ * and the exchange's minimum order size.
  */
 class MarginSizingTest {
 
     @Test
-    fun share_of_the_balance_minus_the_fee_buffer() {
-        // 10% of 1000 = 100, the 80% buffer leaves 80.
-        assertEquals(80.0, MarginSizing.compute(1000.0, 10.0, 0, 5))
+    fun share_of_the_balance_is_used_as_set() {
+        // 10% of 1000 = 100, nothing more and nothing less.
+        assertEquals(100.0, MarginSizing.compute(1000.0, 10.0, 0, 5))
     }
 
     @Test
     fun the_book_is_capped_by_the_free_slots() {
         // 60% of 1000 = 600, but 5 free slots can only carry 1000/5 = 200.
         val margin = MarginSizing.compute(1000.0, 60.0, 0, 5)
-        assertEquals(160.0, margin) // 200 * 0.8
+        assertEquals(200.0, margin)
     }
 
     @Test
     fun the_cap_uses_the_slots_that_are_left() {
-        // 3 of 5 slots used -> 2 free -> cap 500 -> 500 * 0.8.
-        assertEquals(400.0, MarginSizing.compute(1000.0, 60.0, 3, 5))
+        // 3 of 5 slots used -> 2 free -> cap 500.
+        assertEquals(500.0, MarginSizing.compute(1000.0, 60.0, 3, 5))
     }
 
     @Test
@@ -53,7 +52,7 @@ class MarginSizingTest {
 
     @Test
     fun the_floor_is_reachable_with_a_small_balance() {
-        // A 5 USDT account with a 10% share commits 0.4 USDT, but one contract
+        // A 5 USDT account with a 10% share commits 0.5 USDT, but one contract
         // needs 1 USDT of margin at 1x — the floor wins and the account can
         // still carry it.
         val computed = MarginSizing.compute(5.0, 10.0, 0, 5)

@@ -112,7 +112,11 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 
 **Risk manager & exits**
 
-`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set stop frac <10-90>` · `set max positions <1-20>` · `set liq guard <pct>` (0 = off) · `set liq buffer <pct>` (0 = off) · `set guard <sec>` (0 = off)
+`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off)
+
+Stop-loss is the user's own setting: `set sl <pct>` attaches a stop that many percent from the entry; `0` attaches none (a plain market order) — the app never invents a stop, a fraction of liquidation, or a volatility floor. The take-profit ladder (1R..4R) is sized on this distance and only exists when a stop is set.
+
+The leverage an entry may use is checked against the symbol's **live tiered risk-limit table** (`get_position_tiers`): the tier the selected leverage maps to is the highest tier whose maximum leverage covers the selection, and the position value must stay within that tier's nominal cap — otherwise the entry is refused (fail-closed). PAPER mode simulates at the configured leverage.
 
 ## How the brain works
 
@@ -238,11 +242,11 @@ endpoint clamps `limit` to the documented maximum.
   reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
-- TP/SL plan: partial TP ladder 1R–4R at 25% each, plus a configurable risk manager (defaults
-  keep the old behavior): initial stop 50% of the way to liquidation, breakeven at 10% ROI
-  (SL moves to entry), trailing stop from 15% ROI keeping 15% ROI behind the best price.
+- TP/SL plan: partial TP ladder 1R–4R at 25% each (sized on the configured SL distance, and
+  only built when one is set), plus a user-configured risk manager: SL (`set sl <pct>`, none by
+  default), breakeven (SL moves to entry) and a trailing stop behind the best price.
 
-### Risk manager (v1.1.7)
+### Risk manager
 
 Every value is user-changeable — in chat, on the Control screen ("Risk manager & exits"),
 or by asking the agent:
@@ -252,11 +256,8 @@ or by asking the agent:
 | `set breakeven <pct>` | 25% | Once ROI reaches it, the stop moves to entry (0 = off) |
 | `set trail trigger <pct>` | 40% | Trailing starts once ROI reaches it (0 = off) |
 | `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
-| `set stop frac <10-90>` | 30% | Initial stop sits this % of the way toward liquidation |
-| `set stop atr <n>` | 1.5 | The stop must also sit this many ATRs from the entry, so it is never inside the symbol's own noise (0 = off) |
+| `set sl <pct>` | **0 (none)** | Stop distance from the entry, % of price. 0 = no stop (a plain market order) |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
-| `set liq guard <pct>` | 60% | Backstop: closes the position at −this % ROI **before** the exchange can liquidate it (0 = off). Always also fires at 85% of the way to the liquidation price |
-| `set liq buffer <pct>` | 0% (off) | New entries keep the estimated liquidation ≥ this % from entry — caps the leverage an entry may use (0 = off, the default) |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
 The risk manager gates **every** entry path: the scanner, manual entry and one-tap live
@@ -269,14 +270,9 @@ position's mark price, applies breakeven/trailing, and updates the exchange stop
 **trading** off stops new entries, it does not abandon the positions that are already open.
 `riskBlock()` checks guard interval → max open positions before any entry; `tpsl_history`
 and `settings trade` always show the current configured values.
-- Leverage clamped to each symbol's own maximum from `trading_pairs` (the exchange lists up to
-  200x for BTCUSDT/ETHUSDT, 20–125x for most other contracts); quantities floored to the
-  symbol's base precision and skipped when below the minimum volume.
-- **The leverage ceiling is the exchange's tier table, not a guess.** Bitunix runs a tiered
-  risk limit: each tier of `get_position_tiers` carries a nominal-value range, the **maximum
-  leverage** the tier allows, and the **maintenance margin rate** that applies there. Both
-  directions matter — the rate rises with the tier and the allowed leverage falls, so the
-  75x tier of BTCUSDT is the one that carries 0.65% MMR:
+- LIVE entries check the selected leverage against the symbol's own tiered risk-limit table
+  (`get_position_tiers`), which carries per tier: the nominal-value range, the **maximum
+  leverage** the tier allows and the **maintenance margin rate** that applies there:
 
   | tier | notional | max leverage | MMR |
   | --- | --- | --- | --- |
@@ -286,55 +282,13 @@ and `settings trade` always show the current configured values.
   | 4 | 1 000 000 – 4 000 000 | 75x | 0.65% |
   | 5 | 4 000 000 – 10 000 000 | 50x | 1.00% |
 
-  The engine reads the tier the position would actually occupy, takes that tier's rate for the
-  liquidation math, and never asks for more leverage than the tier allows.
-- **The stop is sized on volatility, and the leverage is derived from it.** A stop placed at
-  30% of the liquidation distance sits **0.21%** from the entry at 75x, while a 15m bar on
-  that symbol routinely moves **1.7%** — the market gaps through it and the realised loss is
-  three to five times the intended one. The stop must therefore sit at least **1.5 × ATR**
-  away (`set stop atr <n>`), and the leverage is capped so that stop still fits inside the
-  liquidation distance:
-
-  ```
-  1/leverage − MMR ≥ stop distance + safety   →   leverage ≤ 1/(stop + MMR + safety)
-  ```
-
-  Measured on the symbols that were actually traded (live 15m ATR):
-
-  | symbol | ATR(14) | stop at 1.5×ATR | max leverage that fits | the app used |
-  |---|---|---|---|---|
-  | FFUSDT | 1.73% | 2.59% | **29x** | 75x |
-  | XPLUSDT | 0.95% | 1.43% | **44x** | 50x |
-  | AKEUSDT | 2.86% | 4.30% | **19x** | 40x |
-  | KAVAUSDT | 2.50% | 3.75% | **21x** | 25x |
-  | BTCUSDT | 0.32% | 0.48% | 78x | 75x |
-
-  At 75x on FFUSDT **no stop can exist** — the liquidation distance is 0.68% and a
-  noise-sized stop needs 2.59% — so the leverage has to come down. On BTCUSDT the 75x
-  stands: a 0.48% stop fits inside the 0.68% of room. Your leverage setting is the
-  **ceiling**; the app lowers it only when a stop could not otherwise exist, and says so
-  in the chat line.
-- **Liquidation protection, two sides.** `set liq buffer` keeps a new entry's estimated
-  liquidation price at least that % away from entry (which caps the leverage the entry may
-  use); it is **off by default** — it is a policy, not a safety rule, and any value silently
-  lowers the leverage you asked for (5% buffer + 0.65% MMR → 17x instead of 75x).
-  `set liq guard` is the backstop on an open position — if its loss reaches the floor,
-  the engine warns once and then closes it at market, so the exchange's liquidation engine
-  never gets the chance. With a healthy stop the guard stays quiet: the stop sits at 30% of
-  the liquidation distance and fires long before the floor at −60% ROI.
-
-  The guard's floor is anchored to the **distance to the liquidation price**, not to a flat
-  ROI — a flat ROI only works at low leverage. The liquidation ROI is `−(1 − L·MMR)`, so at
-  75x with MMR 0.65% the exchange liquidates at −51.25% and a flat −60% guard would only
-  fire *after* the exchange had already taken the position. The guard therefore also closes
-  at 85% of the way to the liquidation price, whichever trigger comes first. The ordering is
-  always the same: **stop → guard → liquidation**.
-
-  The versions before v2.5.1 shipped the buffer at 5% *and* wrote that value into the
-  settings on every chat message, so an install that never chose a buffer still carried an
-  inherited 5 that kept the cap alive. The stored value now only counts once you have
-  chosen it yourself (or once it differs from that inherited 5) — so upgrading clears the
-  cap, while a buffer you did pick is kept.
+  Per the official rules, the tier of a position is **calculated from the leverage the user
+  selects** — the highest tier whose maximum leverage covers the selection. The engine reads
+  that tier from the live table, so the MMR used for the liquidation math is the tier's rate,
+  and the position value must stay within the tier's nominal cap or the entry is refused
+  (fail-closed — the exchange would reject such an order anyway). There is no clamp the app
+  derives by itself and no volatility-based leverage derivation: the selected leverage stands
+  unless the tiered risk limit says otherwise.
 - **The liquidation math is the exchange's own.** Bitunix liquidates at
   `Liq = Entry × (1 − 1/Leverage + MMR)`, so the maintenance margin rate is read from
   `get_position_tiers` and subtracted from the room — at 75x with MMR 0.65% the real room is
@@ -347,7 +301,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 334 JVM unit tests
+gradle :app:testDebugUnitTest   # 353 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```

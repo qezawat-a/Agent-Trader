@@ -181,21 +181,21 @@ object SignalAggregator {
 }
 
 /**
- * TP/SL rules from the user's spec, expressed as prices.
- *  - Stop-loss sits halfway (50%) between entry and the liquidation price, so the loss stays
- *    well inside the liquidation distance. Liquidation is approximated as entry * (1 -/+ 1/leverage).
- *  - Partial take-profit ladder: 1R, 2R, 3R, 4R, each closing 25%. R is the entry-to-stop distance.
- *  - Breakeven: once ROI reaches 10%, the stop moves to entry.
- *  - Trailing stop: once in profit, the stop trails the best price at a 15% ROI distance.
- *
- * Liquidation-aware: the stop is NEVER allowed to reach or pass the liquidation price.
- * A safety margin keeps the stop inside liquidation even when the user pushes
- * `set stop frac` high. If a stop cannot fit at the configured leverage, the
- * trade is refused rather than opened with a stop that liquidation would hit first.
+ * TP/SL plan expressed as prices — nothing here is an invented rule.
+ *  - Stop-loss is the user's OWN explicit choice (`slPct`, `set sl <pct>`):
+ *    a fixed distance from the entry, applied only when the user sets it.
+ *    slPct = 0 means NO stop (the way a plain market order works) — the app
+ *    never manufactures a stop of its own.
+ *  - Partial take-profit ladder: 1R, 2R, 3R, 4R, each closing 25%. R is the
+ *    entry-to-stop distance, and exists only when the user set a stop.
+ *  - Breakeven and trailing are user-configured rules (chat/Control screen).
+ *  - Liquidation price uses the documented Bitunix formula; the MMR is the
+ *    actual tier rate (LIVE) — see [PAPER_SIMULATED_MMR] for the simulator.
  */
 data class TpSlPlan(
     val entry: Double,
-    val stop: Double,
+    /** The user's stop price, or null when no stop is configured. */
+    val stop: Double?,
     val liquidation: Double,
     val ladder: List<Pair<Double, Double>>, // (price, fraction of position)
 )
@@ -205,52 +205,14 @@ object TpSlPlanner {
     const val LADDER_FRACTION = 0.25
     const val BREAKEVEN_ROI = 0.10
     const val TRAIL_ROI = 0.15
-    const val STOP_FRACTION_OF_LIQ = 0.5
-
-    /** The stop must stay at least this share of the liquidation distance away
-     *  from the liquidation price, so liquidation never beats the stop. */
-    const val LIQ_SAFETY_FRACTION = 0.05
 
     /**
-     * The fraction of the liquidation distance at which the liquidation guard
-     * closes.
-     *
-     * The stop sits at 30% of that distance by default, so the guard stays a
-     * BACKSTOP: it fires late, but before the exchange can liquidate.
+     * MMR used ONLY by the PAPER simulator. It is NOT an exchange value and
+     * is never used in LIVE mode — the live path reads the actual rate from
+     * the symbol's tiered risk-limit table (`get_position_tiers`). 0.5%
+     * papers over a missing live table during simulation.
      */
-    const val LIQ_GUARD_ROOM_FRACTION = 0.85
-
-    /**
-     * How many ATRs away the stop must sit from the entry.
-     *
-     * The stop has to be outside the symbol's own noise, or the market gaps
-     * through it and the loss is several times the intended one.
-     */
-    const val STOP_ATR_MULTIPLE = 1.5
-
-    /**
-     * The room left between the stop and the liquidation price, as a fraction
-     * of the price. The leverage is capped so this room always exists.
-     */
-    const val LIQ_STOP_SAFETY_PCT = 0.0015
-
-    /** The user-visible stop fraction may not exceed this — beyond it the stop
-     *  is inside the safety margin and the trade is refused. */
-    const val MAX_STOP_FRACTION = 0.90
-
-    /**
-     * Maintenance margin rate used when the symbol's tier table is not
-     * available (paper mode, or the tier query failed).
-     *
-     * Bitunix's own liquidation formula is
-     *   Liq = Entry × (1 − 1/Leverage + MMR)   (long; mirrored for a short),
-     * so the MMR term eats INTO the liquidation distance. Ignoring it made
-     * every distance in the app look safer than it was: at 100x with MMR 0.5%
-     * the app saw 1.0% of room where the exchange had 0.5%. The default errs
-     * on the safe side — 0.5% is the tier-1 rate of the majors, and the live
-     * path reads the real value from the tier table.
-     */
-    const val DEFAULT_MMR = 0.005
+    const val PAPER_SIMULATED_MMR = 0.005
 
     /**
      * The liquidation distance from the entry, in price units:
@@ -259,133 +221,43 @@ object TpSlPlanner {
      * Zero when the leverage is too low for the MMR to leave any room — such
      * an entry is refused rather than opened.
      */
-    fun liqDistance(entry: Double, leverage: Int, mmr: Double = DEFAULT_MMR): Double {
+    fun liqDistance(entry: Double, leverage: Int, mmr: Double = PAPER_SIMULATED_MMR): Double {
         if (entry <= 0.0 || leverage <= 0) return 0.0
         return maxOf(0.0, entry * (1.0 / leverage - mmr.coerceIn(0.0, 0.5)))
     }
 
     /** The liquidation price — the official Bitunix formula. */
-    fun liqPrice(entry: Double, dir: Int, leverage: Int, mmr: Double = DEFAULT_MMR): Double {
+    fun liqPrice(entry: Double, dir: Int, leverage: Int, mmr: Double = PAPER_SIMULATED_MMR): Double {
         val d = liqDistance(entry, leverage, mmr)
         return if (dir > 0) entry - d else entry + d
     }
 
     /**
-     * Builds a TP/SL plan where [stop] is guaranteed inside [liquidation] with
-     * the safety margin. [stopFraction] is clamped to [MAX_STOP_FRACTION].
-     *
-     * The stop distance has TWO floors:
-     *  - [stopFraction] of the liquidation distance (the historical rule);
-     *  - [atrMultiple] × the symbol's ATR — the VOLATILITY floor.
-     *
-     * The volatility floor is what keeps the stop outside the noise. A stop
-     * at 30% of the liquidation distance sits 0.21% from the entry at 75x,
-     * while a 15m bar on that symbol routinely moves 1.7% — the market gaps
-     * through it and the realised loss is three to five times the intended
-     * one. The ATR floor says: never place a stop closer than the symbol's
-     * own noise.
+     * Builds a TP/SL plan. The stop is exactly [slPct] of the price away from
+     * the entry — the user's own choice, never a fraction of the liquidation
+     * distance, never widened by the symbol's noise, and never clamped.
+     * [slPct] = 0 means no stop (and no TP ladder).
      */
     fun plan(
         entry: Double, dir: Int, leverage: Int,
-        stopFraction: Double = STOP_FRACTION_OF_LIQ,
-        mmr: Double = DEFAULT_MMR,
-        atr: Double? = null,
-        atrMultiple: Double = STOP_ATR_MULTIPLE,
+        slPct: Double = 0.0,
+        mmr: Double = PAPER_SIMULATED_MMR,
     ): TpSlPlan {
         val liqDist = liqDistance(entry, leverage, mmr)
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
-        val frac = stopFraction.coerceIn(0.01, MAX_STOP_FRACTION)
-        val volDist = if (atr != null && atr > 0) atrMultiple * atr else 0.0
-        val dist = maxOf(frac * liqDist, volDist)
-        val stop = if (dir > 0) {
-            val s = entry - dist
-            // Keep the stop inside liquidation with the safety margin.
-            val floor = liq + LIQ_SAFETY_FRACTION * liqDist
-            maxOf(s, floor)
-        } else {
-            val s = entry + dist
-            val ceil = liq - LIQ_SAFETY_FRACTION * liqDist
-            minOf(s, ceil)
-        }
-        val r = abs(entry - stop)
-        val ladder = LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
+        val dist = entry * slPct.coerceIn(0.0, 0.95)
+        val stop = if (slPct > 0.0) (if (dir > 0) entry - dist else entry + dist) else null
+        val r = stop?.let { abs(entry - it) }
+        val ladder = if (r != null && r > 0.0)
+            LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
+        else emptyList()
         return TpSlPlan(entry, stop, liq, ladder)
-    }
-
-    /**
-     * The largest leverage at which a stop of [stopDistPct] (a fraction of the
-     * price) still fits inside the liquidation distance, with [safetyPct] of
-     * the price to spare.
-     *
-     *   1/L − MMR ≥ stopDist + safety   →   L ≤ 1/(stopDist + MMR + safety)
-     *
-     * This is the rule that makes the leverage DERIVED rather than assumed: a
-     * symbol whose volatility needs a 2.6% stop cannot be traded at 75x,
-     * because 75x leaves only 0.68% of room to the liquidation price.
-     */
-    fun maxLeverageForStop(stopDistPct: Double, mmr: Double, safetyPct: Double = LIQ_STOP_SAFETY_PCT): Int {
-        if (stopDistPct <= 0.0) return Int.MAX_VALUE
-        val lev = 1.0 / (stopDistPct + mmr + safetyPct)
-        if (!lev.isFinite() || lev >= Int.MAX_VALUE) return Int.MAX_VALUE
-        return lev.toInt().coerceAtLeast(1)
-    }
-
-    /** True when a stop at [stopFraction] of the liquidation distance still fits
-     *  inside liquidation with the safety margin at [leverage]. No coercion — the
-     *  raw user value is checked, so a setting of 100%+ correctly returns false. */
-    fun stopFits(
-        entry: Double, dir: Int, leverage: Int, stopFraction: Double,
-        mmr: Double = DEFAULT_MMR,
-        atr: Double? = null,
-        atrMultiple: Double = STOP_ATR_MULTIPLE,
-    ): Boolean {
-        if (leverage <= 0 || entry <= 0) return false
-        val liqDist = liqDistance(entry, leverage, mmr)
-        if (liqDist <= 0.0) return false // no room at all: refuse the entry
-        val liq = if (dir > 0) entry - liqDist else entry + liqDist
-        val volDist = if (atr != null && atr > 0) atrMultiple * atr else 0.0
-        val dist = maxOf(stopFraction * liqDist, volDist)
-        val stop = if (dir > 0) entry - dist else entry + dist
-        return if (dir > 0) stop > liq + LIQ_SAFETY_FRACTION * liqDist else stop < liq - LIQ_SAFETY_FRACTION * liqDist
     }
 
     /** ROI of a position at a price, including leverage. */
     fun roi(entry: Double, price: Double, dir: Int, leverage: Int): Double =
         dir * (price - entry) / entry * leverage
 
-    /**
-     * The ROI (negative, percent) at which the liquidation guard must close.
-     *
-     * The user sets a flat ROI — "close at −60% ROI" — but a flat ROI is only
-     * safe at LOW leverage. The liquidation ROI is −(1 − L·MMR): at 75x with
-     * MMR 0.65% the exchange liquidates at −51.25%, so a −60% guard would only
-     * fire AFTERWARDS and the backstop would never run.
-     *
-     * So the guard has a distance floor as well: it closes at
-     * [LIQ_GUARD_ROOM_FRACTION] of the distance from the entry to the
-     * liquidation price, whichever trigger comes first. That is before the
-     * liquidation at EVERY leverage, and it always stays behind the stop
-     * (30% of that distance by default).
-     *
-     * [liqPrice] is the exchange's own liquidation price when it publishes
-     * one, else the official formula.
-     */
-    fun guardThresholdRoiPct(
-        userRoiPct: Double,
-        entry: Double,
-        liqPrice: Double,
-        leverage: Int,
-    ): Double {
-        if (entry <= 0.0 || leverage <= 0) return -abs(userRoiPct)
-        val liqDist = abs(entry - liqPrice)
-        // The distance the user's ROI asks for, in price units.
-        val userDistance = entry * (abs(userRoiPct) / 100.0) / leverage
-        // The safety floor: a fixed share of the way to liquidation.
-        val floorDistance = liqDist * LIQ_GUARD_ROOM_FRACTION
-        // The closer to the entry wins — that is the earlier trigger.
-        val distance = minOf(userDistance, floorDistance)
-        return -distance / entry * leverage * 100.0
-    }
     /** Trailing stop price for the best price seen so far, [trailRoi] distance behind it. */
     fun trailStop(best: Double, dir: Int, leverage: Int, trailRoi: Double = TRAIL_ROI): Double {
         val dist = trailRoi / leverage

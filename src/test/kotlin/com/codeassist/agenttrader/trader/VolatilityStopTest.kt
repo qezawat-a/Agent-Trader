@@ -1,121 +1,108 @@
 package com.codeassist.agenttrader.trader
 
-import kotlin.math.abs
+import org.json.JSONArray
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * The stop must sit outside the symbol's own noise, and the leverage must be
- * derived so it still fits inside the liquidation distance.
- *
- * The ATR figures are the live 15m ATR(14) of the symbols that were actually
- * traded, measured from the exchange's klines.
+ * Leverage and liquidation come only from the user's setting and the
+ * symbol's own live tiered risk-limit table — never from a volatility-derived
+ * cap or a buffer the app invented.
  */
-class VolatilityStopTest {
+class TieredRiskLimitTest {
 
-    /** ATR(14) as a fraction of the price, measured live on the 15m. */
-    private fun atrPct(symbol: String) = when (symbol) {
-        "FFUSDT" -> 0.01727
-        "XPLUSDT" -> 0.00954
-        "AKEUSDT" -> 0.02863
-        "KAVAUSDT" -> 0.02499
-        "BTCUSDT" -> 0.00321
-        else -> 0.01
-    }
+    /** The live BTCUSDT tier table (read from the exchange, all five tiers). */
+    private fun btcTiers() = parseRiskTiers(
+        JSONArray(
+            """[{"level":1,"startValue":"0","endValue":"100000","leverage":200,"maintenanceMarginRate":"0.003"},
+                {"level":2,"startValue":"100000","endValue":"400000","leverage":150,"maintenanceMarginRate":"0.004"},
+                {"level":3,"startValue":"400000","endValue":"1000000","leverage":100,"maintenanceMarginRate":"0.005"},
+                {"level":4,"startValue":"1000000","endValue":"4000000","leverage":75,"maintenanceMarginRate":"0.0065"},
+                {"level":5,"startValue":"4000000","endValue":"10000000","leverage":50,"maintenanceMarginRate":"0.01"}]""",
+        ),
+    )
 
-    @Test
-    fun at_75x_no_stop_can_fit_on_ff_so_the_entry_is_refused() {
-        // The whole point: on FF at 75x the liquidation distance is 0.68% but
-        // a noise-sized stop needs 2.59%. No stop can exist there, so the
-        // entry must be refused — the leverage has to come down first.
-        val entry = 0.09880
-        val atr = entry * atrPct("FFUSDT")
-        assertTrue(
-            !TpSlPlanner.stopFits(entry, 1, 75, 0.30, 0.0065, atr, 1.5),
-            "at 75x a noise-sized stop cannot fit inside the liquidation distance",
-        )
-    }
-
-    @Test
-    fun the_stop_sits_outside_the_noise_at_the_capped_leverage() {
-        // FFUSDT at the leverage a sane stop allows: the stop is outside the
-        // 15m noise AND inside the liquidation distance.
-        val entry = 0.09880
-        val atr = entry * atrPct("FFUSDT")
-        val cap = TpSlPlanner.maxLeverageForStop(1.5 * atrPct("FFUSDT"), 0.0065)
-        val plan = TpSlPlanner.plan(entry, 1, cap, 0.30, 0.0065, atr, 1.5)
-        val dist = abs(entry - plan.stop) / entry
-        assertTrue(
-            dist >= 1.5 * atrPct("FFUSDT") - 1e-9,
-            "stop at $dist is still inside the noise (${atrPct("FFUSDT")})",
-        )
-        val liqDist = TpSlPlanner.liqDistance(entry, cap, 0.0065)
-        assertTrue(abs(entry - plan.stop) < liqDist, "the stop must stay inside the liquidation distance")
-    }
-
-    @Test
-    fun the_leverage_is_capped_so_the_stop_fits_inside_liquidation() {
-        val cap = TpSlPlanner.maxLeverageForStop(1.5 * atrPct("FFUSDT"), 0.0065)
-        assertTrue(cap < 75, "75x must not be allowed on a symbol that volatile, got ${cap}x")
-        // At the cap the stop fits with room to spare.
-        val entry = 0.09880
-        val atr = entry * atrPct("FFUSDT")
-        val plan = TpSlPlanner.plan(entry, 1, cap, 0.30, 0.0065, atr, 1.5)
-        val liqDist = TpSlPlanner.liqDistance(entry, cap, 0.0065)
-        val stopDist = abs(entry - plan.stop)
-        assertTrue(stopDist < liqDist, "the stop ($stopDist) must stay inside the liquidation distance ($liqDist)")
-    }
-
-    @Test
-    fun a_low_volatility_symbol_keeps_the_high_leverage() {
-        // BTCUSDT at 75x: a 0.48% stop fits inside the 0.68% of room, so the
-        // user's 75x stands. The cap must not fire on every symbol.
-        val cap = TpSlPlanner.maxLeverageForStop(1.5 * atrPct("BTCUSDT"), 0.0065)
-        assertTrue(cap >= 75, "75x must survive on BTC, got ${cap}x")
-    }
-
-    @Test
-    fun every_traded_symbol_gets_a_leverage_that_fits() {
-        // The four symbols from the losing session, with the leverage the app
-        // used and the one a volatility-sane stop allows.
-        val cases = listOf(
-            Triple("FFUSDT", 75, 29),
-            Triple("XPLUSDT", 50, 44),
-            Triple("AKEUSDT", 40, 19),
-            Triple("KAVAUSDT", 25, 21),
-        )
-        for ((sym, used, expected) in cases) {
-            val cap = TpSlPlanner.maxLeverageForStop(1.5 * atrPct(sym), 0.0065)
-            assertEquals(expected, cap, "$sym: expected a cap of $expected, got $cap")
-            assertTrue(cap < used, "$sym: $used x cannot fit a sane stop (cap ${cap}x)")
-        }
-    }
-
-    @Test
-    fun the_engine_lowers_the_leverage_and_says_why() {
+    private fun liveEngine(leverage: Int): TraderEngine {
         val e = TraderEngine(com.codeassist.agenttrader.bitunix.BitunixRest("k", "s"))
-        e.seedRiskTiers(
-            "FFUSDT",
-            parseRiskTiers(
-                org.json.JSONArray(
-                    """[{"level":1,"startValue":"0","endValue":"100000","leverage":200,"maintenanceMarginRate":"0.003"},
-                        {"level":2,"startValue":"100000","endValue":"400000","leverage":150,"maintenanceMarginRate":"0.004"},
-                        {"level":3,"startValue":"400000","endValue":"1000000","leverage":100,"maintenanceMarginRate":"0.005"},
-                        {"level":4,"startValue":"1000000","endValue":"4000000","leverage":75,"maintenanceMarginRate":"0.0065"}]""",
-                ),
-            ),
-        )
+        e.live = true
+        e.seedRiskTiers("BTCUSDT", btcTiers())
         e.broker.balance = 266_666.67
         e.riskFraction = 0.1
-        e.liqBufferPct = 0.0
-        e.leverage = 75
-        val (lev, note) = e.entryLeverage("FFUSDT", atrPct("FFUSDT"))
-        assertEquals(29, lev)
-        assertNotNull(note)
-        // The reason must be on the line the user reads: the noise, not a secret.
-        assertTrue("ATR" in note!!, note)
-        assertTrue("75x" in note, note)
+        e.leverage = leverage
+        return e
+    }
+
+    @Test
+    fun paper_uses_the_users_leverage_as_set() {
+        val e = TraderEngine(com.codeassist.agenttrader.bitunix.BitunixRest("k", "s"))
+        e.leverage = 42
+        assertEquals(42, e.entryLeverage("BTCUSDT").first)
+    }
+
+    @Test
+    fun live_refuses_when_the_tier_table_is_unavailable() {
+        val e = TraderEngine(com.codeassist.agenttrader.bitunix.BitunixRest("k", "s"))
+        e.live = true
+        e.seedRiskTiers("BTCUSDT", emptyList()) // what a failed query caches
+        e.leverage = 10
+        val (lev, reason) = e.entryLeverage("BTCUSDT")
+        assertEquals(0, lev)
+        assertTrue(reason != null && "tiered risk-limit table unavailable" in reason, reason)
+    }
+
+    @Test
+    fun live_refuses_when_no_tier_covers_the_selection() {
+        // The documented BTC table caps at 125x; the configured leverage is
+        // higher than every tier allows.
+        val documented = parseRiskTiers(
+            JSONArray("""[{"level":1,"startValue":"0","endValue":"150000","leverage":125,"maintenanceMarginRate":"0.004"}]"""),
+        )
+        val e = TraderEngine(com.codeassist.agenttrader.bitunix.BitunixRest("k", "s"))
+        e.live = true
+        e.seedRiskTiers("BTCUSDT", documented)
+        e.broker.balance = 1_000.0
+        e.leverage = 150
+        val (lev, reason) = e.entryLeverage("BTCUSDT")
+        assertEquals(0, lev)
+        assertTrue(reason != null && "exceeds every tier" in reason, reason)
+    }
+
+    @Test
+    fun live_uses_the_tier_the_selection_maps_to() {
+        // 75x → the tier whose cap is 75x (level 4), MMR from that tier.
+        assertEquals(4, tierForLeverage(btcTiers(), 75)?.level)
+        assertEquals(0.0065, tierForLeverage(btcTiers(), 75)?.mmr!!, 1e-9)
+        val e = liveEngine(75)
+        assertEquals(75, e.entryLeverage("BTCUSDT").first)
+    }
+
+    @Test
+    fun live_refuses_when_the_position_would_exceed_the_tier_cap() {
+        // 200x on 26,666 USDT of margin = 5.3M of position value, but the tier a
+        // 200x selection maps to is tier 1, capped at 100k USDT — refuse.
+        val e = liveEngine(200)
+        val (lev, reason) = e.entryLeverage("BTCUSDT")
+        assertEquals(0, lev)
+        assertTrue(reason != null && "tier 1" in reason, reason)
+    }
+
+    @Test
+    fun a_small_position_may_use_the_symbol_maximum() {
+        // 1000 USDT balance × 10% × 200x = 20,000 position value — fits tier 1.
+        val e = liveEngine(200)
+        e.broker.balance = 1_000.0
+        assertEquals(200, e.entryLeverage("BTCUSDT").first)
+    }
+
+    @Test
+    fun every_tier_rate_comes_from_the_table() {
+        assertEquals(0.003, tierForLeverage(btcTiers(), 200)?.mmr!!, 1e-9)
+        assertEquals(0.004, tierForLeverage(btcTiers(), 150)?.mmr!!, 1e-9)
+        assertEquals(0.005, tierForLeverage(btcTiers(), 100)?.mmr!!, 1e-9)
+        assertEquals(0.0065, tierForLeverage(btcTiers(), 75)?.mmr!!, 1e-9)
+        assertEquals(0.01, tierForLeverage(btcTiers(), 50)?.mmr!!, 1e-9)
+        assertNull(tierForLeverage(btcTiers(), 250))
     }
 }

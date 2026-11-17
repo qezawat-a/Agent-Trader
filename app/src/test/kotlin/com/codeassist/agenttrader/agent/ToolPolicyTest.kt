@@ -48,7 +48,7 @@ class ToolPolicyTest {
             "cancel orders",
             "set leverage 20",
             "set risk 50",
-            "set stop atr 1.5",
+            "set sl 2",
             "start trading",
             "stop trading",
             "engine on",

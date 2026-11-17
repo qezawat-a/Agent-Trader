@@ -6,23 +6,14 @@ import kotlin.math.pow
 /**
  * How much margin one position may commit.
  *
- * Ported from the Telegram trader (bitunix-ai-trader, src/trading/risk.js) so
- * both apps size a trade the same way:
- *
  *  1. the configured share of the available balance;
  *  2. a HARD CAP: the book can never hold more margin than the balance divided
  *     by the number of free position slots. Without it, 5 positions at 60% each
  *     ask for 300% of the balance and the exchange simply refuses;
- *  3. a fee/margin buffer — committing 100% of the balance leaves no room for
- *     the taker fee and the exchange answers 20003 "insufficient balance" even
- *     though the balance looked sufficient;
- *  4. a floor at the minimum margin that still clears the exchange's minimum
+ *  3. a floor at the minimum margin that still clears the exchange's minimum
  *     order size, so a small account can open a position at all.
  */
 object MarginSizing {
-
-    /** Only this share of the computed margin is actually committed. */
-    const val BUFFER = 0.80
 
     /**
      * Margin one position may use.
@@ -40,8 +31,6 @@ object MarginSizing {
         val slotsLeft = maxOf(1, maxPositions - openPositions)
         val cap = available / slotsLeft
         if (margin > cap) margin = cap
-        // Fee/margin buffer.
-        margin *= BUFFER
         return maxOf(0.0, margin)
     }
 

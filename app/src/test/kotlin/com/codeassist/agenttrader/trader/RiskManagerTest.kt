@@ -10,9 +10,9 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Risk manager & exits (v1.1.7): guard interval, max open positions,
- * user-configurable breakeven/trailing/initial stop, the liquidation guard
- * (closes before the exchange can liquidate) and the entry-side liq buffer.
+ * Risk manager & exits: guard interval, max open positions, the user-configured
+ * SL distance, breakeven/trailing and the tiered-risk-limit rules the live
+ * entry path follows (no invented caps).
  */
 class RiskManagerTest {
 
@@ -59,118 +59,46 @@ class RiskManagerTest {
         assertTrue("max open positions" in blocked, blocked)
     }
 
-    // ---- liquidation guard (paper broker) ----
+    // ---- the paper stop: the user's own SL ----
 
     @Test
-    fun liq_guard_closes_a_crashing_position_before_its_stop() {
+    fun the_paper_stop_fires_at_the_configured_distance() {
         val e = engine()
-        // Stop far toward liquidation (would fire at -90% ROI); the guard floor
-        // sits at -60% — the guard must close FIRST, at the market price.
-        e.risk = e.risk.copy(stopFractionOfLiqPct = 90.0, liqGuardRoiPct = 60.0)
-        val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)!!
-        val balanceBefore = e.broker.balance
-
-        // -120% ROI at 10x: past the guard, past the stop.
-        val events = e.broker.manage("BTCUSDT", 88.0, e.risk)
-        assertTrue(events.any { it.startsWith("LIQ GUARD closed BTCUSDT") }, events.toString())
-        assertNull(e.broker.positions["BTCUSDT"])
-        // Closed at the market price, not at the optimistic stop price:
-        // margin 80 (10% of 1000, minus the fee buffer) → qty 8 at 10x,
-        // so the loss is 8 * (100 - 88) = 96 USDT.
-        assertTrue(e.broker.balance < balanceBefore, "the loss must be realized")
-        assertEquals(904.0, e.broker.balance, 0.01)
-        assertTrue(e.broker.history.any { it.startsWith("PARTIAL BTCUSDT -") }, e.broker.history.toString())
-        assertTrue(pos.qty <= 1e-12)
-    }
-
-    @Test
-    fun liq_guard_warns_once_then_closes() {
-        val e = engine()
-        e.risk = e.risk.copy(stopFractionOfLiqPct = 95.0, liqGuardRoiPct = 60.0)
+        e.risk = e.risk.copy(slPct = 2.85) // stop at 97.15
         e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
 
-        // -48% ROI: inside the warn zone (-45%..-60%) — one warning, no close.
-        val warn = e.broker.manage("BTCUSDT", 95.2, e.risk)
-        assertTrue(warn.any { it.startsWith("LIQ GUARD WARNING") }, warn.toString())
-        assertNotNull(e.broker.positions["BTCUSDT"])
-
-        // The warning fires once; a second tick at the same price stays silent.
-        val again = e.broker.manage("BTCUSDT", 95.2, e.risk)
-        assertTrue(again.none { it.startsWith("LIQ GUARD") }, again.toString())
-
-        // -61% ROI: the guard closes at market, before the exchange could.
-        val close = e.broker.manage("BTCUSDT", 93.9, e.risk)
-        assertTrue(close.any { it.startsWith("LIQ GUARD closed BTCUSDT") }, close.toString())
-        assertNull(e.broker.positions["BTCUSDT"])
-    }
-
-    @Test
-    fun liq_guard_off_leaves_the_stop_in_charge() {
-        val e = engine()
-        e.risk = e.risk.copy(liqGuardRoiPct = 0.0)
-        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
-        val events = e.broker.manage("BTCUSDT", 88.0, e.risk)
-        assertTrue(events.none { it.startsWith("LIQ GUARD") }, events.toString())
-        // The ordinary stop took the position out at its own price.
-        assertTrue(events.any { it.startsWith("CLOSE BTCUSDT") }, events.toString())
-    }
-
-    @Test
-    fun a_healthy_stop_fires_before_the_guard() {
-        val e = engine()
-        // Default stop frac 30 (-30% ROI) vs guard 60 (-60% ROI): the stop wins.
-        e.risk = e.risk.copy(stopFractionOfLiqPct = 30.0, liqGuardRoiPct = 60.0)
-        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
-        // The stop sits at 30% of the liq distance (100 × (1/10 − 0.005) = 9.5)
-        // → 97.15. The price crosses it.
+        // -2.85% price = -28.5% ROI at 10x: the stop fires at its own price.
         val events = e.broker.manage("BTCUSDT", 97.0, e.risk)
-        assertTrue(events.none { it.startsWith("LIQ GUARD") }, events.toString())
         assertTrue(events.any { it.startsWith("CLOSE BTCUSDT @ 97.15") }, events.toString())
     }
 
-    // ---- entry-side liquidation buffer ----
-
     @Test
-    fun the_liq_buffer_is_off_by_default() {
-        // A default that silently lowers the leverage the user chose is wrong:
-        // 5% buffer + 0.65% MMR capped a 75x account at 17x without asking.
+    fun no_sl_configured_means_no_stop_at_all() {
         val e = engine()
-        assertEquals(0.0, e.liqBufferPct, 1e-9)
+        e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)
+        val events = e.broker.manage("BTCUSDT", 80.0, e.risk) // -200% ROI, still no invented stop
+        assertTrue(events.none { it.startsWith("CLOSE") }, events.toString())
+        assertNotNull(e.broker.positions["BTCUSDT"])
     }
 
     @Test
-    fun liq_buffer_caps_entry_leverage() {
+    fun the_stop_loss_defaults_to_off() {
         val e = engine()
-        e.liqBufferPct = 2.0
-        e.leverage = 125
-        val (lev, note) = e.entryLeverage("BTCUSDT")
-        // 2% of room + MMR 0.5% → 1/leverage ≥ 2.5% → at most 40x.
-        assertEquals(40, lev)
-        assertNotNull(note)
-        assertTrue("clamped 125x → 40x" in note, note)
+        assertEquals(0.0, e.risk.slPct, 1e-9)
     }
 
-    @Test
-    fun liq_buffer_leaves_low_leverage_alone() {
-        val e = engine()
-        e.liqBufferPct = 2.0
-        e.leverage = 20
-        val (lev, note) = e.entryLeverage("BTCUSDT")
-        assertEquals(20, lev)
-        assertNull(note)
-    }
+    // ---- the selected leverage, exactly as the user set it (paper) ----
 
     @Test
-    fun liq_buffer_off_means_no_clamp() {
+    fun paper_entry_uses_the_users_leverage() {
         val e = engine()
-        e.liqBufferPct = 0.0
         e.leverage = 200
         val (lev, note) = e.entryLeverage("BTCUSDT")
         assertEquals(200, lev)
         assertNull(note)
     }
 
-    // ---- the tiered risk limit: the exchange's own leverage ceiling ----
+    // ---- the tiered risk limit: tier from the selected leverage ----
 
     /** The live BTCUSDT tier table (read from the exchange). */
     private fun btcTiers() = parseRiskTiers(
@@ -183,70 +111,66 @@ class RiskManagerTest {
         ),
     )
 
-    @Test
-    fun the_75x_tier_leaves_a_75x_entry_alone() {
-        // The case that bit the user: 75x available, and the position lands in
-        // the tier that ALLOWS 75x. Nothing may downgrade it.
+    private fun liveEngine(leverage: Int): TraderEngine {
         val e = engine()
+        e.live = true
         e.seedRiskTiers("BTCUSDT", btcTiers())
         e.broker.balance = 266_666.67
         e.riskFraction = 0.1
-        e.liqBufferPct = 0.0
-        e.leverage = 75
-        val (lev, note) = e.entryLeverage("BTCUSDT")
-        // 266 666.67 × 10% × 75 = 2 000 000 notional → the 1M–4M tier.
-        assertEquals(75, lev)
-        assertNull(note)
+        e.leverage = leverage
+        return e
     }
 
     @Test
-    fun a_tier_that_forbids_the_leverage_is_respected() {
-        // 200x on a 2M notional: the 4M–10M tier (the notional 200x would
-        // reach) allows only 50x, and the 1M–4M tier allows 75x — so 75x is
-        // the largest the exchange accepts for this margin.
-        val e = engine()
-        e.seedRiskTiers("BTCUSDT", btcTiers())
-        e.broker.balance = 266_666.67
-        e.riskFraction = 0.1
-        e.liqBufferPct = 0.0
-        e.leverage = 200
-        val (lev, note) = e.entryLeverage("BTCUSDT")
-        assertEquals(75, lev)
-        assertNotNull(note)
-        assertTrue("clamped 200x → 75x" in note, note)
+    fun tier_for_leverage_maps_to_the_highest_tier_covering_the_selection() {
+        assertEquals(1, tierForLeverage(btcTiers(), 200)?.level) // 200x is tier 1 of the table
+        assertEquals(3, tierForLeverage(btcTiers(), 100)?.level)
+        assertEquals(4, tierForLeverage(btcTiers(), 75)?.level)
+        assertEquals(5, tierForLeverage(btcTiers(), 50)?.level)
+        assertNull(tierForLeverage(btcTiers(), 250)) // no tier covers it
+    }
+
+    @Test
+    fun the_75x_tier_leaves_a_75x_entry_alone() {
+        // 26 666.67 × 10% × 75 = 2 000 000 position value → tier 4, cap 4M — fine.
+        val e = liveEngine(75)
+        assertEquals(75, e.entryLeverage("BTCUSDT").first)
     }
 
     @Test
     fun a_small_position_may_use_the_symbol_maximum() {
-        val e = engine()
-        e.seedRiskTiers("BTCUSDT", btcTiers())
-        e.broker.balance = 1000.0
-        e.riskFraction = 0.1
-        e.liqBufferPct = 0.0
-        e.leverage = 200
-        val (lev, note) = e.entryLeverage("BTCUSDT")
-        // 1000 × 10% × 200 = 20 000 notional → the first tier, which allows 200x.
-        assertEquals(200, lev)
-        assertNull(note)
+        // 1000 × 10% × 200x = 20 000 position value — fits tier 1.
+        val e = liveEngine(200)
+        e.broker.balance = 1_000.0
+        assertEquals(200, e.entryLeverage("BTCUSDT").first)
     }
 
     @Test
-    fun the_rate_comes_from_the_tier_the_position_occupies() {
-        // 5% buffer, 75x wanted. The PRE-CAP notional (2M) sits in the tier
-        // with MMR 0.65%, but the position that actually opens (17x → 453k)
-        // sits in the tier with MMR 0.50%. The rate must be the one the
-        // position occupies — reading the pre-cap tier made the app believe
-        // it had less room than it has, and capped the leverage one step too low.
-        val e = engine()
-        e.seedRiskTiers("BTCUSDT", btcTiers())
-        e.broker.balance = 266_666.67
-        e.riskFraction = 0.1
-        e.liqBufferPct = 5.0
-        e.leverage = 75
+    fun live_refuses_when_the_position_would_exceed_the_tier_cap() {
+        // 200x on 26 666.67 margin = 5.3M position value; the selection maps to
+        // tier 1, capped at 100k USDT — the exchange would reject the order, so
+        // the entry is refused here instead.
+        val e = liveEngine(200)
         val (lev, note) = e.entryLeverage("BTCUSDT")
-        assertEquals(17, lev)
-        assertNotNull(note)
-        assertTrue("MMR 0.5%" in note, note)
+        assertEquals(0, lev)
+        assertTrue(note != null && "tier 1" in note, note)
+    }
+
+    @Test
+    fun live_refuses_when_no_tier_covers_the_selection() {
+        // The documented BTC table caps at 125x; the configured leverage is
+        // higher than every tier allows.
+        val documented = parseRiskTiers(
+            JSONArray("""[{"level":1,"startValue":"0","endValue":"150000","leverage":125,"maintenanceMarginRate":"0.004"}]"""),
+        )
+        val e = engine()
+        e.live = true
+        e.seedRiskTiers("BTCUSDT", documented)
+        e.broker.balance = 1_000.0
+        e.leverage = 150
+        val (lev, note) = e.entryLeverage("BTCUSDT")
+        assertEquals(0, lev)
+        assertTrue(note != null && "exceeds every tier" in note, note)
     }
 
     // ---- chat commands & routing ----
@@ -262,17 +186,17 @@ class RiskManagerTest {
         // +0.5% price = +5% ROI at 10x → breakeven: SL to entry.
         var events = e.broker.manage("BTCUSDT", 100.5, e.risk)
         assertTrue(events.any { it.startsWith("Breakeven BTCUSDT") }, events.toString())
-        assertEquals(100.0, pos.stop, 1e-9)
+        assertEquals(100.0, pos.stop!!, 1e-9)
 
         // +0.81% price = +8.1% ROI (0.8 is not exact in floating point — stay above it)
         // → trailing fires 5% ROI (0.5% price) behind the best.
         events = e.broker.manage("BTCUSDT", 100.81, e.risk)
         assertTrue(events.any { it.startsWith("Trailing BTCUSDT") }, events.toString())
-        assertEquals(100.81 * 0.995, pos.stop, 1e-6)
+        assertEquals(100.81 * 0.995, pos.stop!!, 1e-6)
 
         // A pullback never widens the stop.
         e.broker.manage("BTCUSDT", 100.7, e.risk)
-        assertEquals(100.81 * 0.995, pos.stop, 1e-6)
+        assertEquals(100.81 * 0.995, pos.stop!!, 1e-6)
     }
 
     @Test
@@ -282,19 +206,18 @@ class RiskManagerTest {
         val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)!!
         val events = e.broker.manage("BTCUSDT", 120.0, e.risk) // +200% ROI — nothing fires
         assertTrue(events.none { it.startsWith("Breakeven") || it.startsWith("Trailing") }, events.toString())
-        assertEquals(pos.plan.stop, pos.stop, 1e-9)
+        assertNull(pos.stop)
     }
 
-    // ---- initial stop fraction ----
+    // ---- the user's SL distance ----
 
     @Test
-    fun stop_fraction_is_user_configurable() {
-        // The liq distance is Entry × (1/leverage − MMR) = 100 × (0.1 − 0.005) = 9.5,
-        // so liq is at 90.5 and 30% of the way to it is 97.15.
-        assertEquals(97.15, TpSlPlanner.plan(100.0, 1, 10, 0.30).stop, 1e-9)
-        assertEquals(102.85, TpSlPlanner.plan(100.0, -1, 10, 0.30).stop, 1e-9)
-        // Defaults keep the long-standing 50% behavior.
-        assertEquals(95.25, TpSlPlanner.plan(100.0, 1, 10).stop, 1e-9)
+    fun sl_distance_is_the_users_own_setting() {
+        // slPct is a fraction of the price, exactly the user's choice.
+        assertEquals(98.0, TpSlPlanner.plan(100.0, 1, 10, 0.02).stop!!, 1e-9)
+        assertEquals(102.0, TpSlPlanner.plan(100.0, -1, 10, 0.02).stop!!, 1e-9)
+        // 0 = no stop at all — not an invented default.
+        assertNull(TpSlPlanner.plan(100.0, 1, 10, 0.0).stop)
     }
 
     // ---- chat commands & routing ----
@@ -306,37 +229,33 @@ class RiskManagerTest {
         assertTrue(e.handle("set breakeven 5").contains("5"))
         assertTrue(e.handle("set trail trigger 8").contains("8"))
         assertTrue(e.handle("set trail distance 5").contains("5"))
-        assertTrue(e.handle("set stop frac 30").contains("30"))
+        assertTrue(e.handle("set sl 2").contains("2"))
         assertTrue(e.handle("set max positions 4").contains("4"))
-        assertTrue(e.handle("set liq guard 70").contains("70"))
-        assertTrue(e.handle("set liq buffer 3").contains("3"))
         assertTrue(e.handle("set guard 120").contains("120"))
         assertTrue(e.configRev > before, "configRev must bump")
         assertEquals(5.0, e.risk.breakevenRoiPct)
         assertEquals(8.0, e.risk.trailingTriggerRoiPct)
         assertEquals(5.0, e.risk.trailDistanceRoiPct)
-        assertEquals(30.0, e.risk.stopFractionOfLiqPct)
+        assertEquals(2.0, e.risk.slPct)
         assertEquals(4, e.maxOpenPositions)
-        assertEquals(70.0, e.risk.liqGuardRoiPct)
-        assertEquals(3.0, e.liqBufferPct)
         assertEquals(120L, e.guardIntervalSec)
     }
 
     @Test
-    fun liq_guard_can_be_turned_off() {
+    fun the_stop_can_be_turned_off() {
         val e = engine()
-        assertTrue(e.handle("set liq guard 0").contains("off"))
-        assertEquals(0.0, e.risk.liqGuardRoiPct)
-        assertTrue(e.handle("set liq buffer 0").contains("off"))
-        assertEquals(0.0, e.liqBufferPct)
+        assertTrue(e.handle("set sl 2").contains("2"))
+        assertEquals(2.0, e.risk.slPct)
+        assertTrue(e.handle("set sl 0").contains("off"))
+        assertEquals(0.0, e.risk.slPct)
     }
 
     @Test
     fun risk_prefixes_route_to_the_engine_not_the_llm() {
         val cmds = listOf(
             "set breakeven 5", "set trail trigger 8", "set trail distance 5",
-            "set stop frac 30", "set max positions 4", "set liq guard 60",
-            "set liq buffer 2", "set guard 120",
+            "set sl 2", "set max positions 4",
+            "set guard 120",
         )
         for (cmd in cmds) {
             assertTrue(CommandRouter.parse(cmd) is CommandRouter.Parsed.Trader, cmd)

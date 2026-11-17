@@ -111,8 +111,8 @@ jobs:
             echo "- Verify: \`sha256sum -c SHA256SUMS.txt\`"
             echo
             echo "### Highlights"
-            echo "- The leverage is the exchange's, not the app's: the tiered risk limit table sets both the maximum leverage per tier and the maintenance margin rate. 75x stays 75x — the app no longer caps it behind your back — and the stop is placed inside the REAL liquidation price"
-            echo "- Liquidation protection: \`set liq guard\` closes an open position at market before the exchange can liquidate it, and the stop triggers on MARK_PRICE — the same series the exchange liquidates against"
+            echo "- The leverage is the exchange's, not the app's: each symbol's tiered risk limit table (read live from \`get_position_tiers\`) sets both the maximum leverage per tier and the maintenance margin rate. The tier of a position is calculated from the leverage you select, and the entry is refused if your position value would exceed that tier's cap — fail-closed, nothing invented by the app"
+            echo "- The stop is yours: \`set sl <pct>\` attaches a stop that % from entry, 0 attaches none (a plain market order). The take-profit ladder is sized on that distance. The liquidation price uses the documented Bitunix formula with the tier's own MMR"
             echo "- The app picks the trading universe itself: every scan refreshes it to the top symbols by 24h gainers or volume, filtered by minimum 24h volume"
             echo "- Commands read plain sentences (\"min volume 24h usd 10000\"), and \`set universe\` checks the symbols against Bitunix"
             echo "- \`/cert\` shows the signing key, \`/backup\` / \`/restore\` save and restore every setting"

@@ -127,13 +127,11 @@ class StopRulesTest {
     // ---- the engine wires the rules together ----
 
     @Test
-    fun the_engine_uses_the_same_rules_for_entries() {
+    fun the_engine_uses_the_users_leverage_for_entries() {
         val e = engine()
-        e.liqBufferPct = 5.0
         e.leverage = 100
         val (lev, note) = e.entryLeverage("BTCUSDT")
-        // 5% of room + MMR 0.5% → 1/leverage ≥ 5.5% → at most 18x.
-        assertEquals(18, lev)
-        assertTrue(note != null && "clamped" in note, note ?: "")
+        assertEquals(100, lev)
+        assertNull(note)
     }
 }

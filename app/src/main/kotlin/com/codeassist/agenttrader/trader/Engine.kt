@@ -15,10 +15,11 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import kotlin.math.ceil
-import kotlin.math.floor
 
-/** An open position, paper or live. dir is 1 for long and -1 for short. */
+/**
+ * A paper position. [stop] is the user's configured stop price, null when
+ * none — the book then relies on the user's own TP/SL or nothing else.
+ */
 data class Position(
     val symbol: String,
     val dir: Int,
@@ -27,15 +28,16 @@ data class Position(
     val originalQty: Double,
     val leverage: Int,
     val plan: TpSlPlan,
-    var stop: Double,
+    var stop: Double?,
     var best: Double,
     var nextRung: Int = 0,
     var breakeven: Boolean = false,
 )
 
 /**
- * Risk manager & exit rules — every value is user-changeable (chat or Control
- * screen); the defaults keep the engine's long-standing behavior.
+ * Exit rules — every value is user-changeable (chat or Control screen).
+ * No stop exists unless the user sets one (`set sl <pct>`); the app never
+ * invents a distance, a fraction of liquidation, or a volatility floor.
  */
 data class RiskSettings(
     /** Stop moves to entry once ROI reaches this % (0 = breakeven off). */
@@ -44,28 +46,14 @@ data class RiskSettings(
     val trailingTriggerRoiPct: Double = 40.0,
     /** Trailing stop keeps this much ROI distance behind the best price. */
     val trailDistanceRoiPct: Double = 25.0,
-    /** Initial stop sits this % of the way toward liquidation. */
-    val stopFractionOfLiqPct: Double = 30.0,
     /**
-     * The stop must also sit this many ATRs away from the entry, so it is
-     * never inside the symbol's own noise (0 = off, the historical rule).
+     * Stop-loss distance from the entry, as a % of the price (e.g. 2 = 2%).
+     * 0 = no stop — a plain market order, no invented placement.
      *
-     * A stop at 30% of the liquidation distance sits 0.21% from the entry at
-     * 75x, while a 15m bar on that symbol routinely moves 1.7% — the market
-     * gaps through it and the realised loss is three to five times the
-     * intended one. With this floor the stop is placed outside the noise and
-     * the leverage is derived to make room for it.
+     * Kept separate from TP/SL endpoints deliberately: when > 0, the TP ladder
+     * is sized on this distance (R = entry − SL).
      */
-    val stopAtrMultiple: Double = TpSlPlanner.STOP_ATR_MULTIPLE,
-    /**
-     * Liquidation backstop: close the position once the loss reaches this % of
-     * its margin (0 = off). The exchange SL normally fires first (it sits at
-     * stopFractionOfLiqPct of the liq distance); this guard closes the position
-     * at market when the SL was rejected, missing or gapped through — before
-     * the exchange's liquidation engine can. Default -60% ROI leaves ~40% of
-     * the margin and a warn at -45%.
-     */
-    val liqGuardRoiPct: Double = 60.0,
+    val slPct: Double = 0.0,
 )
 
 /**
@@ -77,35 +65,25 @@ class PaperBroker(var balance: Double = 1000.0) {
     var realizedPnl = 0.0
     val history = mutableListOf<String>()
 
-    /** Symbols the liquidation guard already warned about (warn once per position). */
-    private val liqGuardWarned = mutableSetOf<String>()
-
     fun open(
         symbol: String, dir: Int, price: Double, leverage: Int,
         risk: RiskSettings = RiskSettings(),
-        mmr: Double = TpSlPlanner.DEFAULT_MMR,
-        atr: Double? = null,
-    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk, mmr = mmr, atr = atr)
+    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk)
 
     /** Opens a position committing [marginFraction] of the balance as margin. */
     fun openSized(
         symbol: String, dir: Int, price: Double, leverage: Int,
         marginFraction: Double, risk: RiskSettings = RiskSettings(),
         maxPositions: Int = 5,
-        mmr: Double = TpSlPlanner.DEFAULT_MMR,
-        atr: Double? = null,
     ): Position? {
         if (positions.containsKey(symbol)) return null
-        // Same sizing as the live path: configured share, capped by the free
-        // slots, minus the fee buffer.
+        // Same sizing as the live path: configured share, capped by the free slots.
         val margin = MarginSizing.compute(balance, marginFraction * 100.0, positions.size, maxPositions)
         val qty = margin * leverage / price
-        // The same MMR the live path uses, so the paper stop sits where the
-        // exchange's would — the plan's liquidation price is what the
-        // liquidation guard is measured against. The ATR floor keeps the stop
-        // outside the symbol's noise here too.
+        // Simulated market: the same plan semantics as LIVE — the stop is
+        // exactly the user's configured distance (none by default).
         val plan = TpSlPlanner.plan(
-            price, dir, leverage, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple,
+            price, dir, leverage, risk.slPct / 100.0, TpSlPlanner.PAPER_SIMULATED_MMR,
         )
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
         positions[symbol] = pos
@@ -141,47 +119,16 @@ class PaperBroker(var balance: Double = 1000.0) {
             TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.trailingTriggerRoiPct / 100.0
         ) {
             val trail = TpSlPlanner.trailStop(p.best, p.dir, p.leverage, risk.trailDistanceRoiPct / 100.0)
-            val improves = if (p.dir > 0) trail > p.stop else trail < p.stop
+            val improves = p.stop == null || if (p.dir > 0) trail > p.stop!! else trail < p.stop!!
             if (improves) {
                 p.stop = trail
                 events.add("Trailing $symbol: SL moved to ${fmt(trail)}")
             }
         }
-        // Liquidation guard — the backstop when the SL is missing, rejected or
-        // gapped through: close at the market price BEFORE the exchange's
-        // liquidation engine can. Runs before the stop check so a configured
-        // floor below the stop's ROI still wins; the normal stop (default 30%
-        // of the liq distance = -30% ROI) fires first in the healthy case.
-        if (risk.liqGuardRoiPct > 0) {
-            val roiPct = TpSlPlanner.roi(p.entry, price, p.dir, p.leverage) * 100.0
-            // The liquidation price the STOP PLAN was built from — it already
-            // carries this symbol's MMR. Recomputing it as entry/leverage (the
-            // old naive distance) overstated the room by the MMR and put the
-            // guard's trigger past the real liquidation.
-            val liq = p.plan.liquidation
-            val closeThreshold = TpSlPlanner.guardThresholdRoiPct(risk.liqGuardRoiPct, p.entry, liq, p.leverage)
-            val warnThreshold = closeThreshold + 15.0
-            if (roiPct <= closeThreshold) {
-                liqGuardWarned.remove(symbol)
-                val dist = if (p.entry != 0.0) (liq - price) / p.entry * 100.0 else 0.0
-                close(symbol, price)
-                events.add(
-                    "LIQ GUARD closed $symbol @ ${fmt(price)} — ROI ${fmt1(roiPct)}%, " +
-                        "~${fmt1(dist)}% from the estimated liquidation; closed before the exchange could.",
-                )
-            } else if (roiPct <= warnThreshold && !liqGuardWarned.contains(symbol)) {
-                liqGuardWarned.add(symbol)
-                val dist = if (p.entry != 0.0) (liq - price) / p.entry * 100.0 else 0.0
-                events.add(
-                    "LIQ GUARD WARNING $symbol: ROI ${fmt1(roiPct)}% — the exchange can " +
-                        "liquidate ~${fmt1(dist)}% from here. Close it or add margin.",
-                )
-            }
-            if (positions[symbol] == null) return events.filter { it.isNotEmpty() }
-        }
-        val stopHit = if (p.dir > 0) price <= p.stop else price >= p.stop
-        if (stopHit) {
-            events.add(close(symbol, p.stop) ?: "")
+        val stop = p.stop
+        if (stop != null) {
+            val stopHit = if (p.dir > 0) price <= stop else price >= stop
+            if (stopHit) events.add(close(symbol, stop) ?: "")
         }
         return events.filter { it.isNotEmpty() }
     }
@@ -189,7 +136,6 @@ class PaperBroker(var balance: Double = 1000.0) {
     fun close(symbol: String, price: Double): String? {
         val p = positions[symbol] ?: return null
         realize(p, price, 1.0)
-        liqGuardWarned.remove(symbol)
         return "CLOSE $symbol @ ${fmt(price)}"
     }
 
@@ -240,12 +186,12 @@ internal fun improvesStop(dir: Int, candidate: Double, current: Double): Boolean
  * can be taken out at the entry — even if the price pulled back since.
  */
 internal fun breakevenStopFor(
-    dir: Int, entry: Double, best: Double, lev: Int, curStop: Double, risk: RiskSettings,
+    dir: Int, entry: Double, best: Double, lev: Int, curStop: Double?, risk: RiskSettings,
 ): Double? {
     if (risk.breakevenRoiPct <= 0) return null
     val roi = TpSlPlanner.roi(entry, best, dir, lev)
     if (roi < risk.breakevenRoiPct / 100.0) return null
-    return if (improvesStop(dir, entry, curStop)) entry else null
+    return if (curStop == null || improvesStop(dir, entry, curStop)) entry else null
 }
 
 /**
@@ -260,13 +206,13 @@ internal fun breakevenStopFor(
  *    the engine would widen a stop (its own or the user's).
  */
 internal fun trailingStopFor(
-    dir: Int, entry: Double, best: Double, lev: Int, curStop: Double, risk: RiskSettings,
+    dir: Int, entry: Double, best: Double, lev: Int, curStop: Double?, risk: RiskSettings,
 ): Double? {
     if (risk.trailingTriggerRoiPct <= 0) return null
     val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
     if (bestRoi < risk.trailingTriggerRoiPct / 100.0) return null
     val trail = TpSlPlanner.trailStop(best, dir, lev, risk.trailDistanceRoiPct / 100.0)
-    return if (improvesStop(dir, trail, curStop)) trail else null
+    return if (curStop == null || improvesStop(dir, trail, curStop)) trail else null
 }
 
 /**
@@ -355,27 +301,10 @@ class TraderEngine(private val rest: BitunixRest) {
      *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
     var tpR: Double = 1.0
 
-    /**
-     * Liquidation buffer for NEW entries, % from the entry (0 = off): the
-     * estimated liquidation price must stay at least this far away, which caps
-     * the leverage an entry may use ("set liq buffer <pct>").
-     *
-     * OFF by default. This is a POLICY, not a safety rule: it silently
-     * downgrades the leverage the user chose (5% buffer + 0.65% MMR → 17x
-     * instead of the 75x the account and the exchange both allow). The
-     * safety rules — the stop inside the real liquidation price, and the
-     * refusal to open a position with no room — do not depend on it.
-     */
-    var liqBufferPct: Double = 0.0
-        set(value) { field = value; configRev++ }
-
     // Live-position mid-management state, keyed by symbol.
     private val liveBest = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveLastStop = java.util.concurrent.ConcurrentHashMap<String, Double>()
     private val liveBreakevenDone = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-
-    /** Symbols the liquidation guard already warned about (warn once per position). */
-    private val liqGuardWarned = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
 
     /**
      * The exchange's tiered risk limit table per symbol
@@ -576,7 +505,7 @@ class TraderEngine(private val rest: BitunixRest) {
         ws?.close()
         ws = null
         // Keep the last exchange balance cached: LIVE mode still needs it for
-        // sizing and the liquidation guard while the feed reconnects.
+        // sizing while the feed reconnects.
         wsPositions.clear()
         wsTpSl.clear()
     }
@@ -683,114 +612,34 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /**
-     * Leverage a NEW entry may use.
+     * The leverage an entry may use — nothing invented here.
      *
-     * Two caps, both taken from the exchange's own tiered risk limit table
-     * (`get_position_tiers`), which carries per tier the nominal value range,
-     * the MAXIMUM LEVERAGE the tier allows, and the maintenance margin rate:
+     * PAPER: the simulated leverage is used as set; there are no exchange
+     * limits to respect and the book is rehearsal.
      *
-     *   BTCUSDT (read live):    0 – 100 000        → 200x, MMR 0.30%
-     *                          100 000 – 400 000  → 150x, MMR 0.40%
-     *                          400 000 – 1 000 000 → 100x, MMR 0.50%
-     *                        1 000 000 – 4 000 000 →  75x, MMR 0.65%
+     * LIVE: the symbol's OWN tiered risk-limit table (get_position_tiers)
+     * decides, per the official rules. The tier is calculated from the
+     * leverage the user selects — the highest tier whose maximum leverage
+     * still covers the selection. The intended position value must stay
+     * within that tier's nominal range; otherwise the entry is refused.
+     * The MMR used for the plan is that tier's rate (never a fixed fallback).
      *
-     *  - the tier the position occupies allows at most that tier's maximum
-     *    leverage — the exchange rejects an order above it, so the app must
-     *    not ask for one;
-     *  - the optional liquidation buffer ("set liq buffer <pct>", 0 = off)
-     *    demands that the estimated liquidation price stays at least that %
-     *    away from the entry. With the official formula
-     *        Liq = Entry × (1 − 1/Leverage + MMR)
-     *    that means 1/leverage ≥ buffer/100 + MMR.
-     *
-     * The buffer is OFF by default: it is a policy, not a safety rule, and any
-     * non-zero value silently downgrades the leverage the user asked for
-     * (5% buffer + 0.65% MMR → 17x instead of 75x).
-     *
-     * The tier depends on the notional, the notional on the leverage, and the
-     * leverage on the tier's MMR — so this settles on a fixed point rather
-     * than reading the tier of the PRE-CAP notional, which is a tier too high
-     * and therefore too pessimistic.
+     * Returns (leverage, refusalReason): refusalReason is non-null exactly
+     * when the entry must not open; a 0x leverage signals a refusal.
      */
-    internal fun entryLeverage(symbol: String, atrPct: Double? = null): Pair<Int, String?> {
+    internal fun entryLeverage(symbol: String): Pair<Int, String?> {
         val wanted = effectiveLeverage(symbol)
+        if (!live) return wanted to null
         val tiers = riskTiers(symbol)
+        if (tiers.isEmpty()) return 0 to
+            "SKIP $symbol: tiered risk-limit table unavailable — refusing to trade without the exchange's limits"
+        val tier = tierForLeverage(tiers, wanted)
+            ?: return 0 to "SKIP $symbol: ${wanted}x exceeds every tier this symbol allows"
         val margin = marginForEntry()
-        if (tiers.isEmpty() || margin <= 0.0) {
-            // No tier table (paper mode, or the query failed): the buffer and the
-            // volatility floor are the only caps, on the simulated default rate.
-            val mmr = TpSlPlanner.DEFAULT_MMR
-            val bufferCap = if (liqBufferPct > 0.0) {
-                (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1)
-            } else MAX_LEVERAGE
-            val volCap = volatilityLeverageCap(atrPct, mmr)
-            val lev = minOf(wanted, bufferCap, volCap).coerceAtLeast(1)
-            if (lev >= wanted) return wanted to null
-            return lev to explainLeverageCap(wanted, lev, atrPct, mmr, null)
+        if (margin > 0.0 && tier.endValue.isFinite() && margin * wanted > tier.endValue) {
+            return 0 to "SKIP $symbol: position value ${fmt(margin * wanted)} exceeds tier ${tier.level} cap (${fmt(tier.endValue)} USDT)"
         }
-        // The largest leverage whose position would land in a tier that ALLOWS
-        // it — the exchange rejects an order above its tier's maximum, so the
-        // app must not ask for one. Then the optional buffer on top.
-        var lev = maxTierLeverage(tiers, margin, wanted)
-        var tier: RiskTier? = null
-        var mmr = TpSlPlanner.DEFAULT_MMR
-        repeat(2) {
-            val t = tierFor(tiers, margin * lev)
-            tier = t
-            mmr = t?.mmr ?: TpSlPlanner.DEFAULT_MMR
-            if (liqBufferPct > 0.0) {
-                lev = minOf(lev, (1.0 / (liqBufferPct / 100.0 + mmr)).toInt().coerceAtLeast(1))
-            }
-        }
-        // The VOLATILITY cap: the stop has to fit inside the liquidation
-        // distance, and the stop has to sit outside the symbol's noise. At 75x
-        // on a symbol whose 15m bar moves 1.7%, no stop can do that — so the
-        // leverage is DERIVED from the volatility, not assumed.
-        val volCap = volatilityLeverageCap(atrPct, mmr)
-        lev = minOf(lev, volCap)
-        if (lev >= wanted) return wanted to null
-        return lev to explainLeverageCap(wanted, lev, atrPct, mmr, tier)
-    }
-
-    /**
-     * The largest leverage at which a volatility-sized stop still fits inside
-     * the liquidation distance.
-     *
-     * [atrPct] is the symbol's ATR as a fraction of its price. Without it
-     * (no candles, no ATR) there is no cap — the historical rule applies.
-     */
-    private fun volatilityLeverageCap(atrPct: Double?, mmr: Double): Int {
-        if (atrPct == null || atrPct <= 0.0 || risk.stopAtrMultiple <= 0.0) return MAX_LEVERAGE
-        val stopDist = risk.stopAtrMultiple * atrPct
-        return TpSlPlanner.maxLeverageForStop(stopDist, mmr)
-    }
-
-    /** Why the leverage was lowered, in one line the user can act on. */
-    private fun explainLeverageCap(
-        wanted: Int,
-        lev: Int,
-        atrPct: Double?,
-        mmr: Double,
-        tier: RiskTier?,
-    ): String {
-        val why = buildString {
-            val t = tier
-            if (t != null && t.maxLeverage < wanted) {
-                append("tier ${t.level} (${fmt(t.startValue)}–${fmt(t.endValue)} notional) allows ${t.maxLeverage}x")
-                append(" · ")
-            }
-            if (atrPct != null && atrPct > 0.0 && risk.stopAtrMultiple > 0.0) {
-                val stopDist = risk.stopAtrMultiple * atrPct * 100.0
-                val room = (1.0 / wanted.toDouble() - mmr) * 100.0
-                append("a ${fmt1(stopDist)}% stop (${fmt1(risk.stopAtrMultiple)}×ATR) needs that much room, " +
-                    "but ${wanted}x leaves only ${fmt1(room)}% to the liquidation price")
-            } else if (liqBufferPct > 0.0) {
-                append("liquidation buffer ${fmt0(liqBufferPct)}% needs 1/lev ≥ " +
-                    "${fmt1(liqBufferPct / 100.0 + mmr)} (MMR ${fmt1(mmr * 100)}%)")
-            }
-        }
-        return "leverage clamped ${wanted}x → ${lev}x · $why " +
-            "(set leverage <n> to set the ceiling, set stop atr <n> for the volatility floor)"
+        return wanted to null
     }
 
     /** The margin one entry commits: the configured share of the available balance. */
@@ -800,10 +649,6 @@ class TraderEngine(private val rest: BitunixRest) {
         } else broker.balance
         return available * riskFraction
     }
-
-    /** The maintenance margin rate that applies to an entry of this size. */
-    private fun entryMmr(symbol: String, leverage: Int): Double =
-        mmrFor(symbol, marginForEntry() * leverage)
 
     /**
      * The exchange's tier table for a symbol, cached for [MMR_CACHE_MS].
@@ -828,13 +673,18 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /**
      * The maintenance margin rate (MMR) for a symbol at a given notional — the
-     * official tier table (`get_position_tiers`) is the source. Falls back to
-     * [TpSlPlanner.DEFAULT_MMR] when the table is unavailable: assuming a rate
-     * that is too low would place the stop outside the real liquidation price.
+     * official tier table is the source of every rate. When the notional is
+     * beyond the table, the highest MMR in it applies (the most conservative
+     * tiered rate the exchange publishes). When the table is entirely
+     * unavailable (API down), the simulator's MMR stands in as a placeholder;
+     * the exchange's own `liqPrice` is always preferred over this formula.
      */
     internal fun mmrFor(symbol: String, notional: Double): Double {
-        tierFor(riskTiers(symbol), notional)?.let { return it.mmr.coerceIn(0.0, 0.5) }
-        return TpSlPlanner.DEFAULT_MMR
+        val tiers = riskTiers(symbol)
+        if (tiers.isEmpty()) return TpSlPlanner.PAPER_SIMULATED_MMR
+        tierFor(tiers, notional)?.let { return it.mmr.coerceIn(0.0, 0.5) }
+        return tiers.maxByOrNull { it.mmr }?.mmr?.coerceIn(0.0, 0.5)
+            ?: TpSlPlanner.PAPER_SIMULATED_MMR
     }
 
     /** Formats qty to the symbol's base precision, floored, never below minTradeVolume. */
@@ -1134,14 +984,14 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
-        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · initial SL ${fmt0(risk.stopFractionOfLiqPct)}% toward liq, at least ${fmt1(risk.stopAtrMultiple)}×ATR away · liq guard ${offable(risk.liqGuardRoiPct)} ROI (also closes before 85% of the way to liquidation)")
-        appendLine("  risk manager: max open positions $maxOpenPositions · liq guard ${offable(risk.liqGuardRoiPct)} ROI · liq buffer ${offable(liqBufferPct)} · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
+        appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
+        appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
             "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
-            "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set stop frac <pct> · " +
+            "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set sl <pct> · " +
             "set tp r <n> (TP = n× the stop distance) · " +
-            "set max positions <n> · set liq guard <pct> · set liq buffer <pct> · set guard <sec>")
+            "set max positions <n> · set guard <sec>")
     }.trim()
 
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
@@ -1172,17 +1022,12 @@ class TraderEngine(private val rest: BitunixRest) {
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
-            // The symbol's own volatility, from the candles already fetched —
-            // no extra request. The stop is sized against it, so it never sits
-            // inside the noise, and the leverage is derived to make room.
-            val atr = Indicators.atr(byTf[PRICE_TIMEFRAME] ?: emptyList())
-            val atrPct = if (atr != null && atr > 0.0 && price > 0.0) atr / price else null
             if (live) {
-                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions, atr) ?: continue)
+                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions) ?: continue)
             } else {
                 if (broker.positions.containsKey(sym)) continue
-                val (lev, levNote) = entryLeverage(sym, atrPct)
-                broker.open(sym, sig.dir, price, lev, risk, mmr = entryMmr(sym, lev), atr = atr)?.let {
+                val (lev, levNote) = entryLeverage(sym)
+                broker.open(sym, sig.dir, price, lev, risk)?.let {
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
@@ -1201,8 +1046,7 @@ class TraderEngine(private val rest: BitunixRest) {
         price: Double,
         confidence: Double,
         openPositions: JSONArray? = null,
-        atr: Double? = null,
-    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions, atr)
+    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
 
     /**
      * One-tap manual entry (paper or live).
@@ -1215,20 +1059,17 @@ class TraderEngine(private val rest: BitunixRest) {
             val px = symbolPrice(sym)
             if (px <= 0) return "No price for $sym."
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
-            val atr = Indicators.atr(runCatching { candles(sym, PRICE_TIMEFRAME) }.getOrDefault(emptyList()))
-            val atrPct = if (atr != null && atr > 0.0 && px > 0.0) atr / px else null
-            val (lev, levNote) = entryLeverage(sym, atrPct)
+            val (lev, levNote) = entryLeverage(sym)
             val pos = broker.openSized(
-                sym, dir, px, lev, sizeFraction, risk, maxOpenPositions, entryMmr(sym, lev), atr,
+                sym, dir, px, lev, sizeFraction, risk, maxOpenPositions,
             ) ?: return "SKIP $sym: could not open."
             noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
-                "stop ${fmt(pos.stop)} (paper)" + (levNote?.let { " · $it" } ?: "")
+                "stop ${pos.stop?.let { fmt(it) } ?: "none"} (paper)" + (levNote?.let { " · $it" } ?: "")
         }
         val px = symbolPrice(sym)
         if (px <= 0) return "No price for $sym."
-        val atr = Indicators.atr(runCatching { candles(sym, PRICE_TIMEFRAME) }.getOrDefault(emptyList()))
-        return placeLive(sym, dir, px, sizeFraction, null, atr = atr)
+        return placeLive(sym, dir, px, sizeFraction, null)
     }
 
     /** Closes every open position (paper: simulated, live: market close-all). */
@@ -1261,22 +1102,6 @@ class TraderEngine(private val rest: BitunixRest) {
         } catch (e: Exception) {
             "Cancel failed: ${e.message ?: e.javaClass.simpleName}"
         }
-    }
-
-    /**
-     * The symbol's volatility as a fraction of its price: ATR(14) on the price
-     * timeframe.
-     *
-     * This is what the stop is measured against. A stop closer than the
-     * symbol's own noise gets gapped through, and at high leverage that costs
-     * several times the intended loss.
-     */
-    fun atrPct(symbol: String, price: Double): Double? {
-        if (price <= 0.0) return null
-        val series = runCatching { candles(symbol, PRICE_TIMEFRAME) }.getOrDefault(emptyList())
-        val atr = Indicators.atr(series) ?: return null
-        if (atr <= 0.0) return null
-        return atr / price
     }
 
     /** Last price for a symbol (exchange first, candles as fallback). */
@@ -1323,7 +1148,6 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
         openPositions: JSONArray? = null,
-        atr: Double? = null,
     ): String {
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
@@ -1347,28 +1171,21 @@ class TraderEngine(private val rest: BitunixRest) {
                 return "SKIP $symbol: live position already open."
             }
         }
-        // The volatility of this symbol, as a fraction of its price. The scan
-        // already fetched the candles, so this costs no extra request.
-        val atrPct = if (atr != null && atr > 0.0 && price > 0.0) atr / price else null
-        val (lev, levNote) = entryLeverage(symbol, atrPct)
+        // The leverage an entry may use — nothing invented: PAPER simulates at
+        // the user's setting; LIVE checks the selected leverage against the
+        // symbol's own live tiered risk-limit table and refuses when it does
+        // not cover the order.
+        val (lev, levNote) = entryLeverage(symbol)
+        if (lev <= 0) return levNote ?: "SKIP $symbol"
         val levLine = levNote?.let { " · $it" } ?: ""
         // The maintenance margin rate of the tier this entry lands in — the
         // official liquidation price is Entry × (1 − 1/Leverage + MMR), so the
-        // MMR decides how much room the position really has.
+        // MMR decides how much room the position really has. Every tier
+        // rate comes from the symbol's get_position_tiers table.
         val mmr = mmrFor(symbol, available * marginFraction * lev)
-        // Liquidation-aware stop: refuse the trade when the configured stop
-        // fraction would put the stop at or beyond the liquidation price. The
-        // stop must stay inside liquidation with a safety margin; clamping it
-        // silently would hide the risk, so the trade is refused instead.
-        if (!TpSlPlanner.stopFits(price, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple)) {
-            return "SKIP $symbol: stop would hit liquidation first at ${risk.stopFractionOfLiqPct.toInt()}% " +
-                "of the liquidation distance (${lev}x leverage, MMR ${fmt1(mmr * 100)}%). " +
-                "Lower stop frac or lower leverage.$levLine"
-        }
         val openCount = runCatching { livePositions.length() }.getOrDefault(0)
         // Margin sizing: the configured share, capped by what the free position
-        // slots can carry, minus the fee/margin buffer (committing 100% of the
-        // balance makes Bitunix answer 20003 "insufficient balance").
+        // slots can carry.
         var margin = MarginSizing.compute(available, marginFraction * 100.0, openCount, maxOpenPositions)
         // The exchange's minimum order size sets a floor: below it no order can
         // be placed at all, so raise the margin to that minimum when the
@@ -1393,7 +1210,7 @@ class TraderEngine(private val rest: BitunixRest) {
         }.getOrNull()
         val triggerBasis = mark ?: price
         val plan = TpSlPlanner.plan(
-            triggerBasis, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr, atr, risk.stopAtrMultiple,
+            triggerBasis, dir, lev, risk.slPct / 100.0, mmr,
         )
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
@@ -1416,14 +1233,14 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         try {
-            // TP sits tpR × the stop distance away from entry (set tp r <n>).
-            // Previously the FIRST ladder rung (1R) was attached — a very short TP.
-            val rDist = kotlin.math.abs(triggerBasis - plan.stop).coerceAtLeast(1e-12)
-            val tp = if (dir > 0) triggerBasis + tpR * rDist else triggerBasis - tpR * rDist
+            // TP sits tpR × the stop distance away from entry (set tp r <n>) —
+            // exists only when the user configured a stop (set sl <pct>).
+            val rDist = plan.stop?.let { kotlin.math.abs(triggerBasis - it) }?.coerceAtLeast(1e-12)
+            val tp = rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
-                tpPrice = formatPrice(symbol, tp),
-                slPrice = formatPrice(symbol, plan.stop),
+                tpPrice = tp?.let { formatPrice(symbol, it) },
+                slPrice = plan.stop?.let { formatPrice(symbol, it) },
                 reduceOnly = false,
             )
             val orderId = order.optString("orderId")
@@ -1604,7 +1421,6 @@ class TraderEngine(private val rest: BitunixRest) {
         for (sym in closedSymbols) {
             seenLive.remove(sym)
             liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym)
-            liqGuardWarned.remove(sym)
             // Pull the net result from history so the user immediately sees the PnL.
             val net = runCatching {
                 val h = rest.historyPositions(sym, limit = 1)
@@ -1636,8 +1452,11 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             val lev = p.optString("leverage").toIntOrNull()?.takeIf { it > 0 } ?: effectiveLeverage(sym)
             // This symbol's maintenance margin rate — the official liquidation
-            // price is Entry × (1 − 1/Leverage + MMR).
-            val mmr = mmrFor(sym, entry * lev)
+            // price is Entry × (1 − 1/Leverage + MMR). The tiered risk limit is
+            // keyed on the position's actual value, so use qty × entry, not
+            // price × leverage (that overstates the notional on high-priced
+            // symbols and understates it on low-priced/high-qty ones).
+            val mmr = posNotional(p)?.let { mmrFor(sym, it) } ?: TpSlPlanner.PAPER_SIMULATED_MMR
             val mark = wsMarketData(sym)?.optDouble("mp")?.takeIf { it > 0 && !it.isNaN() }
                 ?: runCatching { rest.markPrice(sym).optString("markPrice").toDoubleOrNull() }
                     .getOrNull()?.takeIf { it > 0 }
@@ -1645,51 +1464,6 @@ class TraderEngine(private val rest: BitunixRest) {
             val prevBest = liveBest[sym]
             val best = if (dir > 0) maxOf(mark, prevBest ?: mark) else minOf(mark, prevBest ?: mark)
             liveBest[sym] = best
-            val roi = TpSlPlanner.roi(entry, mark, dir, lev)
-            // Liquidation guard — the backstop for the day the exchange SL is
-            // missing, rejected or gapped through: warn once, then flash-close
-            // at market BEFORE the exchange's liquidation engine can take the
-            // position. With a healthy SL this never fires (the SL sits at
-            // 30% of the liq distance by default).
-            if (risk.liqGuardRoiPct > 0) {
-                val roiPct = roi * 100.0
-                val warned = liqGuardWarned[sym] == true
-                // The exchange's OWN liquidation price when it publishes one
-                // (liqPrice ≤ 0 means "no liquidation price"); otherwise the
-                // official formula with this symbol's MMR.
-                val exchangeLiq = p.optString("liqPrice").toDoubleOrNull()?.takeIf { it > 0 }
-                val liq = exchangeLiq ?: TpSlPlanner.liqPrice(entry, dir, lev, mmr)
-                // The threshold is anchored to the DISTANCE to liquidation, not
-                // to a flat ROI: at 75x with MMR 0.65% the exchange liquidates
-                // at −51.2% ROI, so a flat −60% guard would only fire AFTER the
-                // exchange had already taken the position.
-                val closeThreshold = TpSlPlanner.guardThresholdRoiPct(risk.liqGuardRoiPct, entry, liq, lev)
-                val warnThreshold = closeThreshold + 15.0
-                // Room left before liquidation, in % of the current price.
-                val dist = if (mark > 0) dir * (mark - liq) / mark * 100.0 else 0.0
-                if (roiPct <= closeThreshold) {
-                    liqGuardWarned.remove(sym)
-                    try {
-                        rest.flashClose(positionId)
-                        events.add(
-                            "LIQ GUARD closed $sym @ ~${fmt(mark)} — ROI ${fmt1(roiPct)}%, " +
-                                "~${fmt1(dist)}% from the liquidation price; closed before the exchange could.",
-                        )
-                    } catch (e: Exception) {
-                        events.add(
-                            "LIQ GUARD: closing $sym failed — ${e.message ?: e.javaClass.simpleName} " +
-                                "(close it manually NOW: close position $sym)",
-                        )
-                    }
-                    continue
-                } else if (roiPct <= warnThreshold && !warned) {
-                    liqGuardWarned[sym] = true
-                    events.add(
-                        "LIQ GUARD WARNING $sym: ROI ${fmt1(roiPct)}% — the exchange can " +
-                            "liquidate ~${fmt1(dist)}% from here. Close it or add margin.",
-                    )
-                }
-            }
             // Current SL baseline: what this engine last set, else the exchange's
             // pending SL.
             var curStop = liveLastStop[sym]
@@ -1702,9 +1476,9 @@ class TraderEngine(private val rest: BitunixRest) {
             // position. Without a baseline the trailing rule could never fire
             // — that is exactly the "trailing did nothing" report.
             if (curStop == null) {
-                curStop = TpSlPlanner.plan(entry, dir, lev, risk.stopFractionOfLiqPct / 100.0, mmr).stop
+                curStop = TpSlPlanner.plan(entry, dir, lev, risk.slPct / 100.0, mmr).stop
             }
-            liveLastStop[sym] = curStop
+            if (curStop != null) liveLastStop[sym] = curStop else liveLastStop.remove(sym)
             // Breakeven: SL to entry once ROI passes the level. The "done" flag
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
@@ -1737,7 +1511,6 @@ class TraderEngine(private val rest: BitunixRest) {
             liveBest.remove(sym)
             liveLastStop.remove(sym)
             liveBreakevenDone.remove(sym)
-            liqGuardWarned.remove(sym)
         }
         return events
     }
@@ -1865,7 +1638,7 @@ class TraderEngine(private val rest: BitunixRest) {
         if (isLoopRunning) return
         loopTask = loopExecutor.scheduleWithFixedDelay({
             try {
-                // The risk manager (breakeven, trailing, the liquidation guard) must
+                // The risk manager (breakeven, trailing) must
                 // keep working on OPEN positions even when new entries are switched
                 // off: "stop trading" stops entries, it must not abandon the
                 // positions that are already running.
@@ -1906,14 +1679,14 @@ class TraderEngine(private val rest: BitunixRest) {
 
     /**
      * Stops new entries but leaves the loop alive while positions are open: the
-     * risk manager (breakeven, trailing, liquidation guard) must not abandon a
+     * risk manager (breakeven, trailing) must not abandon a
      * position the moment the user stops opening new ones.
      */
     fun stopTrading(): String {
         trading = false
         return if (hasOpenPositions()) {
             "Trading stopped — no new entries. Open positions stay managed " +
-                "(breakeven, trailing, liquidation guard)."
+                "(breakeven, trailing)."
         } else {
             "Trading stopped — no new entries, nothing open."
         }
@@ -2057,7 +1830,7 @@ class TraderEngine(private val rest: BitunixRest) {
             t.startsWith("positions") -> if (live) liveStatus() else
                 (if (broker.positions.isEmpty()) "No open paper positions."
                 else broker.positions.values.joinToString("\n") { p ->
-                    "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} qty ${fmt(p.qty)} entry ${fmt(p.entry)} stop ${fmt(p.stop)}"
+                    "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} qty ${fmt(p.qty)} entry ${fmt(p.entry)} stop ${p.stop?.let { fmt(it) } ?: "none"}"
                 })
             t.startsWith("trades_history") -> if (live) {
                 "LIVE mode: use 'history orders' or 'positions history' for exchange fills. The paper trade log is not shown in LIVE."
@@ -2074,11 +1847,9 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Orders failed: ${e.message}"
                 }
             } else "Paper mode: orders are simulated instantly."
-            t.startsWith("tpsl_history") -> "TP/SL plan: initial stop ${fmt0(risk.stopFractionOfLiqPct)}% toward liquidation, " +
-                "ladder 1R..4R each 25%, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
-                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}, " +
-                "liq guard ${if (risk.liqGuardRoiPct > 0) "closes at -${fmt0(risk.liqGuardRoiPct)}% ROI, and always before 85% of the way to liquidation" else "off"}. " +
-                "New entries keep liquidation ≥${fmt0(liqBufferPct)}% away (liq buffer ${if (liqBufferPct > 0) "on" else "off"})."
+            t.startsWith("tpsl_history") -> "TP/SL: stop ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct>)"}, " +
+                "ladder 1R..4R each 25% of the stop distance, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             t.startsWith("tiers") -> {
                 val sym = t.removePrefix("tiers").trim().uppercase().ifEmpty { "BTCUSDT" }
                 try {
@@ -2118,7 +1889,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     "${i + 1}R ${fmt(price)} (${fmt0(frac * 100)}%, $state)"
                 }.joinToString(", ")
                 "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} entry ${fmt(p.entry)} " +
-                    "stop ${fmt(p.stop)} liq ${fmt(p.plan.liquidation)}\n" +
+                    "stop ${p.stop?.let { fmt(it) } ?: "none"} liq ${fmt(p.plan.liquidation)}\n" +
                     "  TP ladder: $ladder\n" +
                     "  breakeven ${if (p.breakeven) "done" else "pending"}, " +
                     "paper TP/SL is simulated locally"
@@ -2194,11 +1965,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     leverage = v
                     configRev++
-                    "Leverage set to $v x." + if (liqBufferPct > 0.0) {
-                        "\nNote: the liquidation buffer (liq buffer ${fmt0(liqBufferPct)}%) may cap new entries " +
-                            "lower. The exact cap depends on the symbol's tier and its maintenance margin rate — " +
-                            "the chat line on each entry says what it was clamped to (see: tiers)."
-                    } else ""
+                    "Leverage set to $v x. The exact limit for each symbol comes from its own live tier table (see: tiers)."
                 }
             }
             t.startsWith("set risk") -> {
@@ -2243,33 +2010,21 @@ class TraderEngine(private val rest: BitunixRest) {
                 else {
                     tpR = v
                     configRev++
-                    val slPct = risk.stopFractionOfLiqPct
-                    "TP set to ${v}× the stop distance (SL is ${fmt0(slPct)}% toward liquidation)."
+                    val slPct = risk.slPct
+                    if (slPct > 0.0)
+                        "TP set to ${v}× the stop distance (SL is ${fmt1(slPct)}% from entry)."
+                    else
+                        "TP set to ${v}× the stop distance. No stop is configured (set sl <pct>), so no TP is attached on new entries."
                 }
             }
-            t.startsWith("set stop frac") -> {
-                val v = extractNumber(t.removePrefix("set stop fraction").removePrefix("set stop frac"))
-                if (v == null || v !in 1.0..95.0) "Usage: set stop frac <10-90> (percent of the way to liquidation)"
+            t.startsWith("set sl") -> {
+                val v = extractNumber(t.removePrefix("set sl"))
+                if (v == null || v !in 0.0..50.0) "Usage: set sl <pct> (stop distance from entry, % of price; 0 = none)"
                 else {
-                    risk = risk.copy(stopFractionOfLiqPct = v)
+                    risk = risk.copy(slPct = v)
                     configRev++
-                    "Initial stop set to ${fmt0(v)}% of the way to liquidation."
-                }
-            }
-            t.startsWith("set stop atr") -> {
-                val v = extractNumber(t.removePrefix("set stop atr"))
-                if (v == null || v !in 0.0..10.0)
-                    "Usage: set stop atr <n> (the stop sits this many ATRs from the entry, 0 = off)"
-                else {
-                    risk = risk.copy(stopAtrMultiple = v)
-                    configRev++
-                    if (v <= 0.0) {
-                        "Volatility floor off — the stop sits only at ${fmt0(risk.stopFractionOfLiqPct)}% of the " +
-                            "liquidation distance, which is inside the noise at high leverage."
-                    } else {
-                        "Volatility floor set to ${fmt1(v)}×ATR — the stop now sits at least that far from the " +
-                            "entry, and the leverage is capped so the stop still fits inside the liquidation distance."
-                    }
+                    if (v <= 0.0) "Stop off — new entries carry no SL (a plain market order)."
+                    else "Stop set to ${fmt1(v)}% from the entry."
                 }
             }
             t.startsWith("set max positions") -> {
@@ -2279,33 +2034,6 @@ class TraderEngine(private val rest: BitunixRest) {
                     maxOpenPositions = v
                     configRev++
                     "Max open positions set to $v."
-                }
-            }
-            t.startsWith("set liq guard") -> {
-                val v = extractNumber(t.removePrefix("set liq guard"))
-                if (v == null || v !in 0.0..100.0)
-                    "Usage: set liq guard <pct> (0 = off) — close a position when its loss reaches this % of its margin, before the exchange can liquidate"
-                else {
-                    risk = risk.copy(liqGuardRoiPct = v)
-                    configRev++
-                    "Liquidation guard on: a position is closed at -${fmt0(v)}% ROI " +
-                        "(warn at -${fmt0(v - 15.0)}%). Set 0 to turn off."
-                }
-            }
-            t.startsWith("set liq buffer") -> {
-                val v = extractNumber(t.removePrefix("set liq buffer"))
-                if (v == null || v !in 0.0..100.0)
-                    "Usage: set liq buffer <pct> (0 = off) — new entries keep the estimated liquidation at least this % from entry (caps the leverage)"
-                else {
-                    liqBufferPct = v
-                    if (v > 0.0) {
-                        "Liquidation buffer set to ${fmt0(v)}% — new entries may be capped lower. The exact cap " +
-                            "depends on the symbol's tier and its maintenance margin rate, so it is reported on " +
-                            "each entry (see: tiers)."
-                    } else {
-                        "Liquidation buffer off — your leverage is used as set, capped only by the symbol's own " +
-                            "tier limit (see: tiers)."
-                    }
                 }
             }
             t.startsWith("set guard") -> {
@@ -2609,6 +2337,19 @@ internal fun posEntry(p: org.json.JSONObject): String =
     p.optString("avgOpenPrice").ifBlank { p.optString("entryPrice") }
 
 /**
+ * Position notional in quote currency: `qty × entry`. The tiered risk limit is
+ * keyed on the position's ACTUAL value ("the maintenance margin rate will be
+ * calculated based on the actual value of the position and order"), not on
+ * price × leverage. Null when the qty or the entry price is missing/non-positive.
+ */
+internal fun posNotional(p: org.json.JSONObject): Double? {
+    val qty = posQty(p).toDoubleOrNull() ?: return null
+    val entry = posEntry(p).toDoubleOrNull() ?: return null
+    if (qty <= 0.0 || entry <= 0.0) return null
+    return qty * entry
+}
+
+/**
  * Liquidation price display. Per the docs, liqPrice <= 0 means the position is
  * at low risk and no liquidation price exists at that moment.
  */
@@ -2680,32 +2421,12 @@ internal fun tierFor(tiers: List<RiskTier>, notional: Double): RiskTier? {
 }
 
 /**
- * The largest leverage whose position would land in a tier that ALLOWS it.
- *
- * The position's notional is margin × leverage, so the leverage that keeps it
- * inside tier T is
- *
- *   ceil(T.startValue / margin) ≤ L ≤ ceil(T.endValue / margin) − 1
- *
- * and the tier additionally caps it at [RiskTier.maxLeverage] — the exchange
- * rejects an order above it. The answer is the largest such L over all tiers,
- * never above [wanted].
- *
- * Worked example (BTCUSDT, margin 26 666.67 USDT): the 1M–4M tier allows 75x
- * and a 75x position is worth 2M, so 75x is allowed and is the answer — the
- * 4M–10M tier allows only 50x, and it would need a 4M notional that 75x does
- * not reach.
+ * The tier a SELECTED leverage maps to, per the official rule: "the risk
+ * limit tier of the position is calculated by the leverage the user selects"
+ * (Bitunix example: 50x → tier 3). That is the largest tier level whose
+ * maximum leverage still covers the selection — e.g. with the documented
+ * BTC table, 200x → tier 1, 150x → tier 2, 100x → tier 3, 75x → tier 4.
  */
-internal fun maxTierLeverage(tiers: List<RiskTier>, margin: Double, wanted: Int): Int {
-    if (margin <= 0.0 || wanted <= 0) return 1
-    var best = 1
-    for (t in tiers) {
-        val lo = if (t.startValue <= 0.0) 1 else ceil(t.startValue / margin).toInt().coerceAtLeast(1)
-        val hi = if (!t.endValue.isFinite()) Int.MAX_VALUE
-        else ceil(t.endValue / margin).toInt() - 1
-        val lev = minOf(t.maxLeverage, hi, wanted)
-        if (lev >= lo && lev > best) best = lev
-    }
-    return best.coerceAtLeast(1)
-}
+internal fun tierForLeverage(tiers: List<RiskTier>, wanted: Int): RiskTier? =
+    tiers.filter { it.maxLeverage >= wanted }.maxByOrNull { it.level }
 
