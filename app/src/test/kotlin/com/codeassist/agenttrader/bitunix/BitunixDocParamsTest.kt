@@ -295,4 +295,53 @@ class BitunixDocParamsTest {
             rest.modifyPositionTpSl("BTCUSDT", "1", tpPrice = null, slPrice = null)
         }
     }
+
+    // ---- Documented required flags ----
+
+    @Test
+    fun a_limit_order_always_carries_an_effect() {
+        // Docs: effect is "Required if the orderType is limit"; the documented
+        // default value is GTC.
+        val limit = BitunixRest.placeOrderBody(
+            symbol = "BTCUSDT", qty = "0.5", side = "BUY", orderType = "LIMIT",
+        )
+        assertEquals("GTC", limit.getString("effect"))
+
+        val market = BitunixRest.placeOrderBody(
+            symbol = "BTCUSDT", qty = "0.5", side = "BUY", orderType = "MARKET",
+        )
+        assertFalse(market.has("effect"))
+
+        val item = BitunixRest.batchOrderItem(qty = "0.1", side = "BUY", orderType = "LIMIT")
+        assertEquals("GTC", item.getString("effect"))
+    }
+
+    @Test
+    fun modify_order_needs_a_qty() {
+        // Docs: qty is required ("Amount (base coin)").
+        val rest = BitunixRest("k", "s")
+        assertFailsWith<IllegalArgumentException> { rest.modifyOrder(orderId = "1") }
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyOrder(orderId = "1", price = "60000")
+        }
+    }
+
+    @Test
+    fun adjust_position_margin_needs_a_side_or_a_position_id() {
+        // Docs: "Either side or positionId required".
+        val rest = BitunixRest("k", "s")
+        assertFailsWith<IllegalArgumentException> {
+            rest.adjustPositionMargin("BTCUSDT", "10")
+        }
+    }
+
+    @Test
+    fun account_endpoints_carry_their_documented_rate_limits() {
+        // get_trading_settings / get_position_mode: "Rate Limit: 20 req/sec/uid".
+        assertEquals(20, BitunixRest.RATE_LIMITS["/api/v1/futures/account/trading_settings"])
+        assertEquals(20, BitunixRest.RATE_LIMITS["/api/v1/futures/account/position_mode"])
+        // The global 8 req/s cap stays the binding limit for both.
+        assertEquals(125L, BitunixRest.minIntervalMs("/api/v1/futures/account/trading_settings"))
+        assertEquals(125L, BitunixRest.minIntervalMs("/api/v1/futures/account/position_mode"))
+    }
 }
