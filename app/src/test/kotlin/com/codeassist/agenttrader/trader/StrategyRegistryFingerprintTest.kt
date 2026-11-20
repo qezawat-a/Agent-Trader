@@ -51,14 +51,24 @@ class StrategyRegistryFingerprintTest {
         Triple("Bollinger squeeze breakout", Vote(0, 0), Vote(0, 0)),
         Triple("Volume breakout", Vote(0, 0), Vote(0, 0)),
         Triple("Bollinger Upper Band Breakout", Vote(0, 0), Vote(0, 0)),
-        Triple("Mid-Band MACD Cross", Vote(-1, 70), Vote(-1, 70)),
-        Triple("TEMA 20 trend", Vote(-1, 65), Vote(1, 65)),
+        // The four strategies below used to be pinned to a side on this
+        // perfectly LINEAR ramp. On a linear ramp the TEMA coincides with the
+        // price and the MACD is flat, so the old values were pure rounding
+        // noise - and the "Mid-Band MACD Cross" was SHORT on BOTH ramps
+        // (REVIEW.md, open finding #2). These strategies now abstain when
+        // there is no decisive difference; their real sides are pinned on a
+        // geometric trend in StrategySideCorrectnessTest.
+        Triple("Mid-Band MACD Cross", Vote(0, 0), Vote(0, 0)),
+        Triple("TEMA 20 trend", Vote(0, 0), Vote(0, 0)),
         Triple("DEMA 20 trend", Vote(1, 65), Vote(-1, 65)),
-        Triple("MACD histogram trend", Vote(-1, 60), Vote(1, 60)),
+        Triple("MACD histogram trend", Vote(0, 0), Vote(0, 0)),
         Triple("MA200 Cross MACD Confirm", Vote(1, 75), Vote(-1, 75)),
         Triple("Vegas Tunnel Trend-Confirmed Bullish", Vote(1, 70), Vote(0, 0)),
         Triple("TEMA Cross Above VWAP Confirm", Vote(1, 70), Vote(-1, 70)),
-        Triple("DEMA55 Bullish Trend Follow", Vote(-1, 70), Vote(-1, 70)),
+        // The price sits 0.014 above the lagging DEMA on the rising ramp, so
+        // the bullish strategy reads LONG there. On the falling ramp it is not
+        // a long any more, and it abstains rather than voting the wrong side.
+        Triple("DEMA55 Bullish Trend Follow", Vote(1, 70), Vote(0, 0)),
         Triple("VWAP Bullish Confirmation", Vote(1, 70), Vote(-1, 70)),
         Triple("Three White Soldiers Trend Confirm", Vote(1, 75), Vote(0, 0)),
         Triple("RSI momentum 50", Vote(1, 60), Vote(-1, 60)),
