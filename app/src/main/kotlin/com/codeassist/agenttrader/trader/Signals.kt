@@ -215,6 +215,22 @@ object TpSlPlanner {
     const val PAPER_SIMULATED_MMR = 0.005
 
     /**
+     * The SL distance the app puts on signal entries when the user set no
+     * `set sl` base. As a % of the price — the same unit the user's `set sl`
+     * and [plan] work in.
+     */
+    const val AUTO_SL_BASE_PCT = 2.0
+
+    /**
+     * The SL distance for a signal entry, in % of the price: the user's own
+     * [baseSlPct] when they set one, else [AUTO_SL_BASE_PCT]; scaled by the
+     * signal's strength ([strength] = confidence/100) so a strong signal gets
+     * a wider stop and a weak one a tighter one. Strength 0 → 0 (no stop).
+     */
+    fun slPctAt(baseSlPct: Double, strength: Double): Double =
+        (if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT) * strength.coerceIn(0.0, 1.0)
+
+    /**
      * The liquidation distance from the entry, in price units:
      *   Entry × (1/leverage − MMR)
      *

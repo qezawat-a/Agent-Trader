@@ -36,8 +36,9 @@ data class Position(
 
 /**
  * Exit rules — every value is user-changeable (chat or Control screen).
- * No stop exists unless the user sets one (`set sl <pct>`); the app never
- * invents a distance, a fraction of liquidation, or a volatility floor.
+ * No stop exists for manual entries unless the user sets one (`set sl <pct>`);
+ * the app never invents a distance or a fraction of liquidation — signal
+ * entries get the automatic stop (`set auto tpsl` on by default).
  */
 data class RiskSettings(
     /** Stop moves to entry once ROI reaches this % (0 = breakeven off). */
@@ -48,7 +49,8 @@ data class RiskSettings(
     val trailDistanceRoiPct: Double = 25.0,
     /**
      * Stop-loss distance from the entry, as a % of the price (e.g. 2 = 2%).
-     * 0 = no stop — a plain market order, no invented placement.
+     * 0 = no user stop — signal entries still get the automatic stop
+     * (`set auto tpsl` on by default), a manual entry carries none.
      *
      * Kept separate from TP/SL endpoints deliberately: when > 0, the TP ladder
      * is sized on this distance (R = entry − SL).
@@ -300,6 +302,14 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Take-profit distance as an R-multiple of the stop distance (live orders attach
      *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
     var tpR: Double = 1.0
+
+    /**
+     * Signal-driven entries get an automatic TP/SL: a stop scaled by the signal
+     * strength (user's `set sl` base, or [TpSlPlanner.AUTO_SL_BASE_PCT] when unset)
+     * plus the 1R–4R TP ladder. Manual entries keep the user's own stop only.
+     */
+    var autoTpsl: Boolean = true
+        set(value) { field = value; configRev++ }
 
     // Live-position mid-management state, keyed by symbol.
     private val liveBest = java.util.concurrent.ConcurrentHashMap<String, Double>()
@@ -985,12 +995,14 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the strength-scaled stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the 1R–4R TP ladder" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
             "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
             "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set sl <pct> · " +
             "set tp r <n> (TP = n× the stop distance) · " +
+            "set auto tpsl on|off · " +
             "set max positions <n> · set guard <sec>")
     }.trim()
 
@@ -1027,7 +1039,10 @@ class TraderEngine(private val rest: BitunixRest) {
             } else {
                 if (broker.positions.containsKey(sym)) continue
                 val (lev, levNote) = entryLeverage(sym)
-                broker.open(sym, sig.dir, price, lev, risk)?.let {
+                // Signal entries get the strength-scaled auto stop; the risk
+                // manager keeps its own values for management and manual entry.
+                val riskAt = risk.copy(slPct = slPctForSignal(sig.confidence / 100.0))
+                broker.open(sym, sig.dir, price, lev, riskAt)?.let {
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
@@ -1140,6 +1155,15 @@ class TraderEngine(private val rest: BitunixRest) {
         return broker.unrealized(prices) / margin
     }
 
+    /**
+     * The SL distance, as a % of the price, for a signal entry of the given
+     * strength: auto mode scales the user's `set sl` base (or
+     * [TpSlPlanner.AUTO_SL_BASE_PCT]) by the strength. Null strength = manual
+     * entry — it keeps the user's own stop only.
+     */
+    fun slPctForSignal(strength: Double?): Double =
+        if (autoTpsl && strength != null) TpSlPlanner.slPctAt(risk.slPct, strength) else risk.slPct
+
     /** Shared live order path used by the scanner and the one-tap trade button. */
     private fun placeLive(
         symbol: String,
@@ -1210,7 +1234,7 @@ class TraderEngine(private val rest: BitunixRest) {
         }.getOrNull()
         val triggerBasis = mark ?: price
         val plan = TpSlPlanner.plan(
-            triggerBasis, dir, lev, risk.slPct / 100.0, mmr,
+            triggerBasis, dir, lev, slPctForSignal(confidence) / 100.0, mmr,
         )
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
@@ -1476,7 +1500,7 @@ class TraderEngine(private val rest: BitunixRest) {
             // position. Without a baseline the trailing rule could never fire
             // — that is exactly the "trailing did nothing" report.
             if (curStop == null) {
-                curStop = TpSlPlanner.plan(entry, dir, lev, risk.slPct / 100.0, mmr).stop
+                curStop = TpSlPlanner.plan(entry, dir, lev, slPctForSignal(1.0) / 100.0, mmr).stop
             }
             if (curStop != null) liveLastStop[sym] = curStop else liveLastStop.remove(sym)
             // Breakeven: SL to entry once ROI passes the level. The "done" flag
@@ -1739,6 +1763,7 @@ class TraderEngine(private val rest: BitunixRest) {
         return when {
             lower.startsWith("min volume") -> "set $text"
             lower.startsWith("auto universe") -> "set $text"
+            lower.startsWith("auto tpsl") -> "set $text"
             lower.startsWith("auto rank") -> "set $text"
             lower.startsWith("auto on") -> "set auto universe on"
             lower.startsWith("auto off") -> "set auto universe off"
@@ -1847,9 +1872,16 @@ class TraderEngine(private val rest: BitunixRest) {
                     "Orders failed: ${e.message}"
                 }
             } else "Paper mode: orders are simulated instantly."
-            t.startsWith("tpsl_history") -> "TP/SL: stop ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct>)"}, " +
-                "ladder 1R..4R each 25% of the stop distance, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
-                "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
+            t.startsWith("tpsl_history") -> {
+                val base = slPctForSignal(1.0)
+                val stop = if (base > 0) {
+                    "${fmt1(base)}% from entry" +
+                        (if (autoTpsl) " — auto: scales with the signal's strength (set auto tpsl off or set sl 0 to change)" else " (set sl 0 for none)")
+                } else "none (set sl <pct>)"
+                "TP/SL: stop $stop, " +
+                    "ladder 1R..4R each 25% of the stop distance, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                    "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
+            }
             t.startsWith("tiers") -> {
                 val sym = t.removePrefix("tiers").trim().uppercase().ifEmpty { "BTCUSDT" }
                 try {
@@ -2014,16 +2046,16 @@ class TraderEngine(private val rest: BitunixRest) {
                     if (slPct > 0.0)
                         "TP set to ${v}× the stop distance (SL is ${fmt1(slPct)}% from entry)."
                     else
-                        "TP set to ${v}× the stop distance. No stop is configured (set sl <pct>), so no TP is attached on new entries."
+                        "TP set to ${v}× the stop distance. No user stop is set (set sl <pct>); with auto tpsl on, signal entries still get the automatic stop and this ladder on new entries."
                 }
             }
             t.startsWith("set sl") -> {
                 val v = extractNumber(t.removePrefix("set sl"))
-                if (v == null || v !in 0.0..50.0) "Usage: set sl <pct> (stop distance from entry, % of price; 0 = none)"
+                if (v == null || v !in 0.0..50.0) "Usage: set sl <pct> (stop distance from entry, % of price; 0 = none — signal entries still get the automatic stop)"
                 else {
                     risk = risk.copy(slPct = v)
                     configRev++
-                    if (v <= 0.0) "Stop off — new entries carry no SL (a plain market order)."
+                    if (v <= 0.0) "Stop off — new entries carry no user stop (signal entries still get the automatic stop; set auto tpsl off to disable it)."
                     else "Stop set to ${fmt1(v)}% from the entry."
                 }
             }
@@ -2146,6 +2178,22 @@ class TraderEngine(private val rest: BitunixRest) {
                         (if (autoUniverse) "each scan refreshes the universe to the top $scanTop by $autoRankBy " +
                         "(min ${autoMinVolumeUsd.toLong()} USDT 24h vol)" else "fixed universe from set universe")
                     if (autoUniverse) "$head\n${refreshAutoUniverse()}" else head
+                }
+            }
+            t.startsWith("set auto tpsl") -> {
+                val v = t.removePrefix("set auto tpsl").trim().lowercase()
+                val on = v in listOf("on", "true", "1", "yes")
+                val off = v in listOf("off", "false", "0", "no")
+                if (!on && !off) {
+                    "Usage: set auto tpsl on|off"
+                } else {
+                    autoTpsl = on
+                    configRev++
+                    if (autoTpsl)
+                        "Automatic TP/SL ON — signal entries get the strength-scaled stop " +
+                            "(the user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) plus the 1R–4R TP ladder."
+                    else
+                        "Automatic TP/SL OFF — entries carry the user's stop only (set sl <pct>)."
                 }
             }
             t.startsWith("set min volume") -> {
