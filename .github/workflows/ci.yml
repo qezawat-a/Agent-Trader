@@ -46,3 +46,8 @@ jobs:
 
       - name: Run the unit tests
         run: gradle :app:testDebugUnitTest --stacktrace
+
+      - name: Run Android Lint
+        # The naming, unused-import and permission rules are checked here so
+        # they do not depend on a human reviewer spotting them.
+        run: gradle :app:lintDebug --stacktrace

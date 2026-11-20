@@ -46,17 +46,23 @@ object Notifier {
                 open?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            NotificationManagerCompat.from(context).notify(
-                text.hashCode(),
-                NotificationCompat.Builder(context, CHANNEL_ID)
-                    .setSmallIcon(context.applicationInfo.icon)
-                    .setContentTitle(title)
-                    .setContentText(text.take(180))
-                    .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                    .setAutoCancel(true)
-                    .setContentIntent(intent)
-                    .build(),
-            )
+            val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(context.applicationInfo.icon)
+                .setContentTitle(title)
+                .setContentText(text.take(180))
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(intent)
+                .build()
+            // The permission is checked HERE, right before the post: Android
+            // lint only accepts a check it can see in this method, and the
+            // user can revoke POST_NOTIFICATIONS between the check in
+            // [allowed] and this call.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+            ) return
+            NotificationManagerCompat.from(context).notify(text.hashCode(), notification)
         } catch (_: Exception) {
         }
     }

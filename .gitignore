@@ -11,3 +11,6 @@ captures/
 .idea/
 *.iml
 .DS_Store
+
+# Stale IDE download scaffold (older project variant), not source
+data/data/Download/
