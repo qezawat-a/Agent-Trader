@@ -110,4 +110,12 @@ class AgentBrainTest {
         assertTrue(ctx.contains("Positions: none"))
         assertTrue(ctx.contains("Market mood: CALM"))
     }
+
+    @Test
+    fun the_prompt_forbids_inventing_position_details() {
+        val prompt = AgentBrain.buildSystemPrompt(soul = "Calm and honest.")
+        assertTrue(prompt.contains("Never invent a position"), prompt)
+        assertTrue(prompt.contains("positions history", ignoreCase = true), prompt)
+        assertTrue(prompt.contains("overrides anything"), prompt)
+    }
 }

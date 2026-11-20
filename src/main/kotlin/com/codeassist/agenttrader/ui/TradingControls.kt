@@ -749,7 +749,8 @@ fun TradeScreen(
                             color = scheme.onSurfaceVariant,
                         )
                     } else {
-                        engine.broker.positions.values.forEach { p ->
+                        engine.broker.snapshot().forEach { e ->
+                            val p = e.value
                             Row(
                                 Modifier.fillMaxWidth().padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,

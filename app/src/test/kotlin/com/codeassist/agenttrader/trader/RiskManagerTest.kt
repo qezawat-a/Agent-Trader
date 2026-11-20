@@ -59,6 +59,35 @@ class RiskManagerTest {
         assertTrue("max open positions" in blocked, blocked)
     }
 
+    @Test
+    fun max_open_positions_also_caps_live_entries() {
+        // The paper broker knows nothing about the real account, so LIVE must
+        // cap on the EXCHANGE's open positions — otherwise the cap silently
+        // does not apply exactly when real money is at stake.
+        val e = engine()
+        e.live = true
+        e.maxOpenPositions = 2
+        e.liveOpenCount = 1
+        assertNull(e.riskBlock())
+        e.liveOpenCount = 2
+        val blocked = e.riskBlock()
+        assertNotNull(blocked)
+        assertTrue("max open positions" in blocked, blocked)
+    }
+
+    @Test
+    fun the_paper_positions_snapshot_is_stable_while_the_loop_writes() {
+        val e = engine()
+        e.broker.open("BTCUSDT", 1, 100.0, 10)
+        e.broker.open("ETHUSDT", 1, 100.0, 10)
+        val snap = e.broker.snapshot()
+        assertEquals(listOf("BTCUSDT", "ETHUSDT"), snap.map { it.key })
+        // A write after the snapshot must not change the copy the UI reads.
+        e.broker.open("SOLUSDT", 1, 100.0, 10)
+        assertEquals(2, snap.size)
+        assertEquals(3, e.broker.positionCount())
+    }
+
     // ---- liquidation guard (paper broker) ----
 
     @Test
