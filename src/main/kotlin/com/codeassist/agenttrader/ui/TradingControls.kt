@@ -238,7 +238,7 @@ fun ControlScreen(
                         ),
                     )
 
-                    Text("Margin per trade — ${risk.toInt()}% of balance", style = MaterialTheme.typography.bodyMedium)
+                    Text("Margin per trade — ${risk.toInt()}% of free balance", style = MaterialTheme.typography.bodyMedium)
                     Slider(
                         value = risk,
                         onValueChange = { risk = it },
@@ -607,7 +607,7 @@ fun TradeScreen(
     modifier: Modifier = Modifier,
 ) {
     var symbol by remember { mutableStateOf("BTCUSDT") }
-    var sizePct by remember { mutableStateOf((engine.riskFraction * 100).toFloat()) }
+    var sizePct by remember(engine.configRev) { mutableStateOf((engine.riskFraction * 100).toFloat()) }
     var price by remember { mutableStateOf(0.0) }
     val scheme = MaterialTheme.colorScheme
     // LIVE must list exchange positions, not the paper book.
@@ -665,7 +665,7 @@ fun TradeScreen(
                         }
                     }
                     Spacer(Modifier.height(10.dp))
-                    Text("Size — ${sizePct.toInt()}% of balance", style = MaterialTheme.typography.bodyMedium)
+                    Text("Size — ${sizePct.toInt()}% of free balance", style = MaterialTheme.typography.bodyMedium)
                     Slider(
                         value = sizePct,
                         onValueChange = { sizePct = it },

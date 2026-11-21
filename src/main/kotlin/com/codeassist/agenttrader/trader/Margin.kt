@@ -6,32 +6,34 @@ import kotlin.math.pow
 /**
  * How much margin one position may commit.
  *
- *  1. the configured share of the available balance;
- *  2. a HARD CAP: the book can never hold more margin than the balance divided
- *     by the number of free position slots. Without it, 5 positions at 60% each
- *     ask for 300% of the balance and the exchange simply refuses;
- *  3. a floor at the minimum margin that still clears the exchange's minimum
+ *  1. the configured share of the FREE balance;
+ *  2. a floor at the minimum margin that still clears the exchange's minimum
  *     order size, so a small account can open a position at all.
+ *
+ * "Free" is the exchange's own word: the futures account reports `available`
+ * as the "available quantity in the account" — the balance minus the margin
+ * the open positions hold ("locked quantity of positions") minus the funds
+ * frozen by open orders. A new position is a share of what is really free, so
+ * the book can never ask for more than the account has.
+ *
+ * There is no second, invented cap. The old rule divided the balance by the
+ * number of free position slots, so a 50% setting silently became 33% with
+ * three open slots and kept shrinking as the book filled: the position never
+ * grew to the size the user had set.
  */
 object MarginSizing {
 
     /**
      * Margin one position may use.
      *
-     * @param available free balance on the exchange (USDT)
-     * @param marginPct configured share of the balance per trade (percent)
-     * @param openPositions positions already open
-     * @param maxPositions the configured maximum number of open positions
+     * @param available the FREE balance (USDT): what is left after the open
+     *   positions took their margin
+     * @param marginPct configured share of the free balance per trade (percent)
      */
-    fun compute(available: Double, marginPct: Double, openPositions: Int, maxPositions: Int): Double {
+    fun compute(available: Double, marginPct: Double): Double {
         if (available <= 0.0) return 0.0
         val pct = (marginPct / 100.0).coerceIn(0.0001, 1.0)
-        var margin = available * pct
-        // Hard cap: the remaining slots must be able to carry the rest.
-        val slotsLeft = maxOf(1, maxPositions - openPositions)
-        val cap = available / slotsLeft
-        if (margin > cap) margin = cap
-        return maxOf(0.0, margin)
+        return available * pct
     }
 
     /**
