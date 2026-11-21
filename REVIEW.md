@@ -59,7 +59,7 @@ source explicit and remove the paper path from LIVE entirely.
 ## Status — resolved in v2.7.2
 
 The owner signed off on the changes below ("fix everything"), so the findings that needed a
-trading-behaviour decision are now closed. The suite is at **388 tests, 0 failures**.
+trading-behaviour decision are now closed. The suite is at **397 tests, 0 failures**.
 
 | Finding | Resolution in v2.7.2 |
 |---|---|

@@ -65,7 +65,7 @@ object CommandRouter {
         // universe on" fell through to the LLM, which answered in prose and
         // changed nothing: the app looked like it ignored the command.
         // Both the "set ..." form and the spoken form are routed to the engine.
-        "set auto universe", "set min volume", "set auto rank",
+        "set auto universe", "set auto tpsl", "set min volume", "set auto rank",
         "min volume", "auto universe", "auto rank", "auto on", "auto off",
         "auto gainers", "auto volume", "auto losers", "auto movers",
         "refresh auto", "scan top", "set live", "live mode", "paper mode",
