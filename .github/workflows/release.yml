@@ -119,6 +119,8 @@ jobs:
             echo "- Bitunix futures engine: signed REST (marginCoin, per-endpoint rate limits, retry), WS on wss://fapi.bitunix.com/public + /private, live order path with TP/SL"
             echo "- Agentic chat: multi-turn LLM memory, wired slash commands, provider tester"
             echo "- LIVE balance always comes from the exchange (never the paper account)"
+            echo "- The live position context comes from the exchange too: the chat and the screens read the REST position list and reconcile it on every snapshot, so the app never describes a position it has not seen — and \`positions history\` is labelled CLOSED"
+            echo "- The \"N strategies agree\" gate counts independent market views, not names: three copies of one signal can no longer open it, and the strategies that used to vote the wrong side now abstain instead of guessing"
             echo "- DNS/network outages are reported as connectivity issues, not model failures"
             echo "- Dark trading theme with chat bubbles and quick actions"
           } > release-notes.md
