@@ -77,6 +77,21 @@ trading-behaviour decision are now closed. The suite is at **397 tests, 0 failur
 
 ---
 
+## Status — resolved in v2.8.2
+
+The reported bug was "the position size does not get bigger". Two independent rules
+were shrinking it, both of them silently:
+
+| Finding | Resolution in v2.8.2 |
+|---|---|
+| 6 — PAPER signal entries ignored the configured size | **Fixed.** The paper path opened every signal entry with a hardcoded 10% margin (`PaperBroker.MARGIN_FRACTION`), whatever `set risk` said, while LIVE used the setting. Both paths now use the engine's configured margin per trade (`TraderEngine.openPaper`). Pinned by `PositionSizeConsistencyTest`. |
+| 7 — the size was capped by the free position slots | **Fixed.** `MarginSizing.compute` divided the balance by the number of free slots, so a 50% setting silently became 33% with three slots and kept shrinking as the book filled. That cap was the app's own invention: the exchange's `available` is already the free balance (the futures account reports it as the "available quantity in the account" — the balance minus the margin the positions hold), so the share can be taken as the user set it. The margin can never exceed what is free, so the book still cannot over-commit. |
+| 8 — the paper book did not reserve margin | **Fixed.** The simulated account kept the whole balance free while a position was open, so the next entry could commit margin that was already in use. The paper broker now tracks `committedMargin()` / `availableMargin()` exactly like the exchange's `margin` / `available` fields, the account line shows the free balance, and the P&L percentage is measured against the margin actually committed. |
+
+The suite is at **404 tests, 0 failures** (7 new).
+
+---
+
 ## Open findings (need an owner decision — they change trading behaviour)
 
 ### 1. Duplicate and inverted strategies inflate the "N strategies agree" gate

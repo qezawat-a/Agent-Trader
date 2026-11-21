@@ -104,17 +104,34 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
     fun open(
         symbol: String, dir: Int, price: Double, leverage: Int,
         risk: RiskSettings = RiskSettings(),
-    ): Position? = openSized(symbol, dir, price, leverage, MARGIN_FRACTION, risk)
+        marginFraction: Double = MARGIN_FRACTION,
+    ): Position? = openSized(symbol, dir, price, leverage, marginFraction, risk)
 
-    /** Opens a position committing [marginFraction] of the balance as margin. */
+    /**
+     * The margin the open positions hold — the paper twin of the exchange's
+     * `margin` field ("locked quantity of positions").
+     */
+    fun committedMargin(): Double =
+        snapshot().sumOf { (_, p) -> if (p.leverage > 0) p.qty * p.entry / p.leverage else 0.0 }
+
+    /**
+     * The free balance — the paper twin of the exchange's `available` field
+     * ("available quantity in the account"). A new position takes a share of
+     * THIS, so the simulated book reserves margin exactly like the exchange
+     * and can never commit more than the account holds.
+     */
+    fun availableMargin(): Double = maxOf(0.0, balance - committedMargin())
+
+    /** Opens a position committing [marginFraction] of the FREE balance as margin. */
     fun openSized(
         symbol: String, dir: Int, price: Double, leverage: Int,
         marginFraction: Double, risk: RiskSettings = RiskSettings(),
-        maxPositions: Int = 5,
     ): Position? {
         if (positions.containsKey(symbol)) return null
-        // Same sizing as the live path: configured share, capped by the free slots.
-        val margin = MarginSizing.compute(balance, marginFraction * 100.0, positions.size, maxPositions)
+        // Same sizing as the live path: the configured share of the free
+        // balance — the margin the open positions hold is already locked.
+        val margin = MarginSizing.compute(availableMargin(), marginFraction * 100.0)
+        if (margin <= 0.0) return null
         val qty = margin * leverage / price
         // Simulated market: the same plan semantics as LIVE — the stop is
         // exactly the user's configured distance (none by default).
@@ -796,12 +813,12 @@ class TraderEngine(private val rest: BitunixRest) {
         return wanted to null
     }
 
-    /** The margin one entry commits: the configured share of the available balance. */
+    /** The margin one entry commits: the configured share of the FREE balance. */
     private fun marginForEntry(): Double {
         val available = if (live) {
             runCatching { rest.availableUsdt() }.getOrNull() ?: liveBalanceSnapshot() ?: broker.balance
-        } else broker.balance
-        return available * riskFraction
+        } else broker.availableMargin()
+        return MarginSizing.compute(available, riskFraction * 100.0)
     }
 
     /**
@@ -1101,7 +1118,8 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         "Balance ${liveBalanceText()} · open $positions$hint"
     } else {
-        "Balance ${fmt2(broker.balance)} USDT (paper) · realized ${fmt(broker.realizedPnl)} · open ${broker.positions.size}"
+        "Balance ${fmt2(broker.balance)} USDT (paper) · free ${fmt2(broker.availableMargin())} · " +
+            "realized ${fmt(broker.realizedPnl)} · open ${broker.positions.size}"
     }
 
     /**
@@ -1142,7 +1160,7 @@ class TraderEngine(private val rest: BitunixRest) {
             (if (autoUniverse) " · AUTO: $autoRankBy, min ${autoMinVolumeUsd.toLong()} USDT 24h vol" else ""))
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
-        appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
+        appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
         appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the strength-scaled stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the 1R–4R TP ladder" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
@@ -1198,10 +1216,11 @@ class TraderEngine(private val rest: BitunixRest) {
                 // Signal entries get the strength-scaled auto stop; the risk
                 // manager keeps its own values for management and manual entry.
                 val riskAt = risk.copy(slPct = slPctForSignal(sig.confidence / 100.0))
-                broker.open(sym, sig.dir, price, lev, riskAt)?.let {
+                openPaper(sym, sig.dir, price, lev, riskAt)?.let { pos ->
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
+                            " · margin ${fmt(pos.qty * pos.entry / pos.leverage)} USDT" +
                             (levNote?.let { " · $it" } ?: ""),
                     )
                 }
@@ -1220,6 +1239,18 @@ class TraderEngine(private val rest: BitunixRest) {
     ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
 
     /**
+     * A PAPER entry sized exactly like the LIVE one: the configured margin per
+     * trade ([riskFraction]) of the free balance.
+     *
+     * The old paper path used a fixed 10% margin no matter what "margin per
+     * trade" said, so the position never grew past a tenth of the account —
+     * while the live path used the setting. One rule, both books.
+     */
+    internal fun openPaper(
+        symbol: String, dir: Int, price: Double, leverage: Int, riskAt: RiskSettings,
+    ): Position? = broker.open(symbol, dir, price, leverage, riskAt, riskFraction)
+
+    /**
      * One-tap manual entry (paper or live).
      * [sizeFraction] is the share of the account margin committed (0.10 = 10%).
      */
@@ -1232,11 +1263,13 @@ class TraderEngine(private val rest: BitunixRest) {
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
             val (lev, levNote) = entryLeverage(sym)
             val pos = broker.openSized(
-                sym, dir, px, lev, sizeFraction, risk, maxOpenPositions,
+                sym, dir, px, lev, sizeFraction, risk,
             ) ?: return "SKIP $sym: could not open."
             noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
-                "stop ${pos.stop?.let { fmt(it) } ?: "none"} (paper)" + (levNote?.let { " · $it" } ?: "")
+                "stop ${pos.stop?.let { fmt(it) } ?: "none"} (paper)" +
+                " · margin ${fmt(pos.qty * pos.entry / pos.leverage)} USDT" +
+                (levNote?.let { " · $it" } ?: "")
         }
         val px = symbolPrice(sym)
         if (px <= 0) return "No price for $sym."
@@ -1308,7 +1341,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val open = broker.snapshot()
         if (open.isEmpty()) return null
         val prices = open.associate { it.key to symbolPrice(it.key) }
-        val margin = broker.balance * riskFraction * broker.positions.size
+        val margin = broker.committedMargin()
         if (margin <= 0) return null
         return broker.unrealized(prices) / margin
     }
@@ -1365,10 +1398,10 @@ class TraderEngine(private val rest: BitunixRest) {
         // MMR decides how much room the position really has. Every tier
         // rate comes from the symbol's get_position_tiers table.
         val mmr = mmrFor(symbol, available * marginFraction * lev)
-        val openCount = runCatching { livePositions.length() }.getOrDefault(0)
-        // Margin sizing: the configured share, capped by what the free position
-        // slots can carry.
-        var margin = MarginSizing.compute(available, marginFraction * 100.0, openCount, maxOpenPositions)
+        // Margin sizing: the configured share of the FREE balance. The
+        // exchange's `available` already excludes the margin the open positions
+        // hold, so the size is the size the user set.
+        var margin = MarginSizing.compute(available, marginFraction * 100.0)
         // The exchange's minimum order size sets a floor: below it no order can
         // be placed at all, so raise the margin to that minimum when the
         // balance can carry it.
@@ -1432,7 +1465,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 liveOpenCount += 1
                 noteEntry()
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                    "| order $orderId $status$levLine"
+                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine"
             }
             // Accepted but never filled (min qty, insufficient margin, TP/SL
             // rejected — the exchange cancels right after placement). The old code

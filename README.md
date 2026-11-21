@@ -281,6 +281,12 @@ position's mark price, applies breakeven/trailing, and updates the exchange stop
 **trading** off stops new entries, it does not abandon the positions that are already open.
 `riskBlock()` checks guard interval → max open positions before any entry; `tpsl_history`
 and `settings trade` always show the current configured values.
+- **The position size is the size you set.** `set risk <pct>` (or the "Margin per trade"
+  slider) is the share of the **free** balance one position may use — the balance minus the
+  margin the open positions hold, which is the exchange's own `available` field. PAPER and
+  LIVE use the same rule, the paper book reserves the margin like the exchange does, and
+  nothing shrinks the size behind your back: the number of open positions is capped
+  separately (`set max positions`), and every entry line prints the margin it committed.
 - LIVE entries check the selected leverage against the symbol's own tiered risk-limit table
   (`get_position_tiers`), which carries per tier: the nominal-value range, the **maximum
   leverage** the tier allows and the **maintenance margin rate** that applies there:
