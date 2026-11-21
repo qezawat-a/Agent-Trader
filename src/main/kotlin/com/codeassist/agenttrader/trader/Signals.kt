@@ -7,8 +7,20 @@ import kotlin.math.abs
 /** Aggregated view of one timeframe. dir is 1, -1, or 0 when nothing qualifies. */
 data class TfSignal(val dir: Int, val confidence: Double, val agreeing: Int)
 
-/** One strategy's named vote, kept so the signal board can explain itself. */
-data class StrategyVote(val name: String, val group: String, val dir: Int, val confidence: Int)
+/**
+ * One strategy's named vote, kept so the signal board can explain itself.
+ *
+ * [origin] is the market signal the strategy reads: strategies that share an
+ * origin are the same view under different names and count ONCE toward the
+ * "N strategies agree" gate.
+ */
+data class StrategyVote(
+    val name: String,
+    val group: String,
+    val dir: Int,
+    val confidence: Int,
+    val origin: String = name,
+)
 
 /** A timeframe's full evaluation: the decision plus every strategy's vote. */
 data class TfEvaluation(
@@ -48,21 +60,32 @@ object SignalAggregator {
     fun votes(candles: List<Candle>): List<StrategyVote> =
         StrategyRegistry.all.map { st ->
             val v = st.vote(candles)
-            StrategyVote(st.name, st.group, v.dir, v.confidence)
+            StrategyVote(st.name, st.group, v.dir, v.confidence, st.origin)
         }
 
-    /** Evaluates one timeframe and keeps the per-strategy detail for the board. */
-    fun evaluateTimeframe(timeframe: String, candles: List<Candle>): TfEvaluation {
-        val all = votes(candles)
+    /**
+     * Aggregates already-cast votes into one timeframe decision.
+     *
+     * The gate counts DISTINCT ORIGINS, not strategies: a hammer and a
+     * "hammer oversold bounce" are one market view, so together they must not
+     * satisfy MIN_AGREEING on their own. Abstentions (dir 0) belong to no side
+     * and never count. The confidence stays the average over the side's votes.
+     */
+    fun evaluateVotes(timeframe: String, all: List<StrategyVote>): TfEvaluation {
         var best = TfEvaluation(timeframe, 0, 0.0, 0, all)
         for (dir in listOf(1, -1)) {
             val mine = all.filter { it.dir == dir }
-            if (mine.size < MIN_AGREEING) continue
+            val origins = mine.map { it.origin }.distinct()
+            if (origins.size < MIN_AGREEING) continue
             val conf = mine.map { it.confidence.toDouble() }.average()
-            if (conf > best.confidence) best = TfEvaluation(timeframe, dir, conf, mine.size, all)
+            if (conf > best.confidence) best = TfEvaluation(timeframe, dir, conf, origins.size, all)
         }
         return best
     }
+
+    /** Evaluates one timeframe and keeps the per-strategy detail for the board. */
+    fun evaluateTimeframe(timeframe: String, candles: List<Candle>): TfEvaluation =
+        evaluateVotes(timeframe, votes(candles))
 
     fun timeframe(candles: List<Candle>): TfSignal {
         val e = evaluateTimeframe("", candles)
@@ -96,7 +119,7 @@ object SignalAggregator {
                     -1 -> "SHORT"
                     else -> "no side"
                 }
-                detail += "${e.timeframe}: $sideVar, ${e.agreeing} strategies at ${fmt0(e.confidence)}%" +
+                detail += "${e.timeframe}: $sideVar, ${e.agreeing} independent signals at ${fmt0(e.confidence)}%" +
                     " (need ${gates.minAgreeing} at >=${gates.minTfConfidence.toInt()}%)"
             }
             val withSide = rows.filter { it.dir != 0 }

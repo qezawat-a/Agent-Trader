@@ -56,6 +56,27 @@ source explicit and remove the paper path from LIVE entirely.
 
 ---
 
+## Status — resolved in v2.7.2
+
+The owner signed off on the changes below ("fix everything"), so the findings that needed a
+trading-behaviour decision are now closed. The suite is at **388 tests, 0 failures**.
+
+| Finding | Resolution in v2.7.2 |
+|---|---|
+| 1 — duplicate/inverted strategies inflate the agree gate | **Fixed.** Every strategy declares the market signal it reads (`origin`). The gate counts distinct signals, not names: a hammer and a "hammer oversold bounce" are one view and count once. Pinned by `SignalGateOriginTest`. |
+| 2 — three strategies vote the wrong side | **Fixed.** `Mid-Band MACD Cross` compares the MACD with its signal line *and* the price with the mid-band, and only votes when both point the same way; `DEMA55 Bullish Trend Follow` is long-only and abstains otherwise; `TEMA 20 trend` and `MACD histogram trend` abstain unless the difference is decisive. Pinned by `StrategySideCorrectnessTest`. |
+| 3 — `Engine.handle()` is a 300-line `when` | **Still open, deliberately.** Splitting it is a readability refactor with a real regression risk in the command router; it is not a bug and does not belong in a release that changes trading behaviour. |
+| 4 — LIVE did not enforce `maxOpenPositions` | **Fixed.** The cap now counts the exchange's open positions in LIVE and the paper positions in PAPER (`liveOpenCount` / `broker.positionCount()`). |
+| 5 — engine state shared across threads without a contract | **Fixed.** The paper broker's map and list are synchronized and read through snapshots (`snapshot()`, `historySnapshot()`), and the shared engine flags are `@Volatile`. |
+| Magic numbers | **Fixed.** `WS_PRICE_STALE_MS`, `SIGNAL_BOARD_MAX_AGE_MS`, `MOOD_CACHE_MAX_AGE_MS`, `AUTO_UNIVERSE_MAX_AGE_MS`, `NOTIFICATION_REQUEST_CODE`, `SELL_OFF_DROP_PCT`. |
+| `AgentConfig` carries four unused fields | **Already gone.** `maxSteps`, `thinking`, `autonomousSec` and `rateLimitWindow` no longer exist in the tree. |
+| `data/data/Download/Agent_Trader/` committed to git | **Fixed.** It is an old download of a previous project variant (namespace `com.agent.trader`, v1.3.0) with source folders that do not exist; it is untracked and ignored now. |
+| No linting in CI | **Fixed.** The one lint error (the notification permission check was hidden behind a helper) is fixed and CI runs `:app:lintDebug`. |
+| README numbers drift | **Fixed.** The test count and the gate wording match the code again. |
+| The mirror is still two copies | **Still open, deliberately.** The on-device CodeAssist build needs the layout; CI fails the build when the two copies drift. |
+
+---
+
 ## Open findings (need an owner decision — they change trading behaviour)
 
 ### 1. Duplicate and inverted strategies inflate the "N strategies agree" gate

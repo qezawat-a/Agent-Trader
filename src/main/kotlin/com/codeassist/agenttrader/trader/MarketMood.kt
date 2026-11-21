@@ -6,6 +6,9 @@ import com.codeassist.agenttrader.util.fmt3
 import kotlin.math.abs
 import kotlin.math.max
 
+/** A 24h drop of this size or more reads as a sell-off, not a wobble. */
+private const val SELL_OFF_DROP_PCT = 2.5
+
 /**
  * Turns market data into a feeling: how stressed the tape is, what drives it,
  * and how the trader's own P&L feels right now. The agent brain uses this so it
@@ -67,7 +70,7 @@ object MarketMoodCalc {
             if (dropPct >= 5.0) {
                 stress += 30
                 drivers += "price ${fmt1(dropPct)}% off the recent high"
-            } else if (dropPct >= 2.5) {
+            } else if (dropPct >= SELL_OFF_DROP_PCT) {
                 stress += 16
                 drivers += "price ${fmt1(dropPct)}% below the recent high"
             }

@@ -34,7 +34,7 @@ and a keyless public WebSocket market feed (tickers + price) that keeps engine p
 |---|---|
 | **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
 | **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
-| **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many of the 37 strategies agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
+| **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many independent signals agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, **notifications**, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
 
@@ -134,6 +134,14 @@ user message
 The second pass is what makes it agentic: the model does not guess the balance or the open
 positions, it asks the engine.
 
+In LIVE mode the position context is read from REST on every turn, not from the private
+WebSocket cache. The feed pushes only *changes*, so a position that closes while the socket
+reconnects sends no removal and used to linger in the prompt. The cache is now reconciled
+from every REST snapshot (reconnect, tick, `positions`, and the chat itself), the context
+carries only the exchange's own fields, and the prompt forbids inventing a leverage, stop,
+take-profit or PnL. `positions history` is explicitly labelled CLOSED — it never lists an
+open position.
+
 ## Bitunix integration
 
 Verified against the live API and the official docs (2026-11):
@@ -218,6 +226,7 @@ endpoint clamps `limit` to the documented maximum.
 | `Loop error: EOFException` | The connection dropped mid-response — the request was fine, the stream was cut. Reported once per window, not every cycle |
 | `SKIP scan: the futures wallet is empty` | The Futures wallet holds nothing (funds in the Funding wallet do not pay for futures orders). Transfer funds, or trade paper: `set live off` |
 | The chat stops replying and the balance stops updating | Two engine methods held the same monitor while doing HTTP — the signal board across ~30 REST calls, the balance across one. The chat and the balance queued behind each other. No lock is held across a network call any more, and the chat reads the cached board instead of triggering a sweep |
+| The chat described a position that was already closed, with invented leverage/SL/PnL | The LIVE context now reads REST and carries only exchange-reported fields; the feed cache is reconciled from every snapshot, and `positions history` is labelled CLOSED |
 
 ## Trading logic
 
@@ -236,10 +245,12 @@ endpoint clamps `limit` to the documented maximum.
   asking the agent (it can read the config with `settings trade` and edit it for you).
   Everything persists across restarts.
 - A **signal** is the verdict of 37 strategies over your configured timeframes
-  (default 15m + 1h): each timeframe needs at least **3 strategies
+  (default 15m + 1h): each timeframe needs at least **3 independent signals
   agreeing at ≥60%**, both timeframes must point the same way, and their combined
-  confidence must be **≥70%** (all three gates are configurable). Anything less is
-  reported as *no trade*, with the failing
+  confidence must be **≥70%** (all three gates are configurable). "Independent" means
+  the *market view*, not the name: a hammer and a "hammer oversold bounce" read the same
+  candle, so together they count once — three copies of one view cannot open the gate.
+  Anything less is reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
 - TP/SL plan: partial TP ladder 1R–4R at 25% each (sized on the configured SL distance, and
@@ -301,7 +312,7 @@ and `settings trade` always show the current configured values.
 The repo builds with standard Gradle (no wrapper checked in; CI installs Gradle 8.14.3):
 
 ```bash
-gradle :app:testDebugUnitTest   # 353 JVM unit tests
+gradle :app:testDebugUnitTest   # 388 JVM unit tests
 gradle :app:assembleDebug       # app/build/outputs/apk/debug/app-debug.apk
 gradle :app:assembleRelease     # signed when KEYSTORE_* env/secrets are set
 ```

@@ -115,6 +115,9 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
+/** Request code for the Android 13+ POST_NOTIFICATIONS permission dialog. */
+private const val NOTIFICATION_REQUEST_CODE = 1001
+
 class MainActivity : ComponentActivity() {
     private val ui = Handler(Looper.getMainLooper())
 
@@ -346,7 +349,7 @@ fun AgentApp(
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             ActivityCompat.requestPermissions(
-                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001,
+                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_REQUEST_CODE,
             )
             say("Notifications ON — accept the Android permission dialog so events can reach the status bar.")
             return
@@ -661,10 +664,12 @@ fun AgentApp(
         // confidently quote a paper number as the real account.
         balance = engine.balanceText(),
         positionsSummary = if (engine.live) {
-            engine.feedPositions().joinToString(", ")
-                .ifEmpty { "none on the private feed — use <tool>positions</tool>" }
+            // REST, not the WS cache: the feed pushes only CHANGES, so a position
+            // closed during a reconnect used to linger in the prompt and the model
+            // filled the missing leverage/SL/PnL with invented numbers.
+            engine.livePositionsSummary()
         } else {
-            engine.broker.positions.entries.joinToString(", ") {
+            engine.broker.snapshot().joinToString(", ") {
                 "${it.key} ${if (it.value.dir > 0) "LONG" else "SHORT"} qty ${fmt(it.value.qty)} @ ${fmt(it.value.entry)}"
             }.ifEmpty { "none" }
         },
@@ -756,7 +761,7 @@ fun AgentApp(
             ) != PackageManager.PERMISSION_GRANTED
         ) {
             ActivityCompat.requestPermissions(
-                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1001,
+                appContext as Activity, arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_REQUEST_CODE,
             )
         }
     }

@@ -329,6 +329,10 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         positionId: String? = null,
         marginCoin: String = "USDT",
     ): JSONObject {
+        // Docs: "Either side or positionId required".
+        require(side != null || positionId != null) {
+            "adjust_position_margin needs a side or a positionId"
+        }
         val body = JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("amount", amount)
         if (side != null) body.put("side", side)
@@ -593,9 +597,11 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     /**
-     * Cancels specific orders (max 20 per call). Docs: symbol + orderList only;
-     * each list entry carries `orderId` OR `clientId` (orderId wins when both
-     * are sent). `marginCoin` is sent per project rule.
+     * Cancels specific orders. Docs: symbol + orderList only; each list entry
+     * carries `orderId` OR `clientId` (orderId wins when both are sent).
+     * The doc page states no maximum, so the 20-order cap below is the
+     * exchange's live-verified limit, not a documented one.
+     * `marginCoin` is sent per project rule.
      */
     fun cancelOrders(symbol: String, orderIds: List<String>, marginCoin: String = "USDT"): JSONObject =
         cancelOrdersByRef(symbol, orderIds.map { OrderRef(orderId = it) }, marginCoin)
@@ -651,11 +657,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(!orderId.isNullOrBlank() || !clientId.isNullOrBlank()) {
             "modify_order needs an orderId or a clientId"
         }
+        // Docs: qty is required ("Amount (base coin)").
+        require(qty != null) { "modify_order needs a qty" }
         val body = JSONObject()
         if (orderId != null) body.put("orderId", orderId)
         if (clientId != null) body.put("clientId", clientId)
         if (symbol != null) body.put("symbol", symbol)
-        if (qty != null) body.put("qty", qty)
+        body.put("qty", qty) // required by the docs, so it is never null here
         if (price != null) body.put("price", price)
         if (tpPrice != null) body.put("tpPrice", tpPrice)
         if (tpStopType != null) body.put("tpStopType", tpStopType)
@@ -909,7 +917,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             "/api/v1/futures/account/change_margin_mode" to 10,
             "/api/v1/futures/account/change_position_mode" to 10,
             "/api/v1/futures/account/get_leverage_margin_mode" to 10,
-            "/api/v1/futures/account/trading_settings" to 10,
+            "/api/v1/futures/account/trading_settings" to 20,
+            "/api/v1/futures/account/position_mode" to 20,
             "/api/v1/futures/position/get_history_positions" to 10,
             "/api/v1/futures/position/get_pending_positions" to 10,
             "/api/v1/futures/trade/cancel_orders" to 10,
@@ -1013,9 +1022,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             // (project rule, live-verified).
             body.put("marginCoin", marginCoin)
             if (price != null) body.put("price", price)
+            // Docs: effect is "Required if the orderType is limit"; GTC is the
+            // documented default, so a LIMIT order never goes out without one.
+            if (effect != null) body.put("effect", effect)
+            else if (orderType.equals("LIMIT", ignoreCase = true)) body.put("effect", "GTC")
             if (tradeSide != null) body.put("tradeSide", tradeSide)
             if (positionId != null) body.put("positionId", positionId)
-            if (effect != null) body.put("effect", effect)
             if (clientId != null) body.put("clientId", clientId)
             if (reduceOnly != null) body.put("reduceOnly", reduceOnly)
             if (tpPrice != null) body.put("tpPrice", tpPrice)
@@ -1036,7 +1048,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             marginCoin: String = "USDT",
         ): JSONObject {
             require(refs.isNotEmpty()) { "cancel_orders needs at least one order reference" }
-            require(refs.size <= 20) { "cancel_orders accepts at most 20 orders (got ${refs.size})" }
+            require(refs.size <= 20) { "cancel_orders accepts at most 20 orders (got ${refs.size})" } // live-verified exchange limit
             val list = JSONArray()
             for (ref in refs) {
                 require(ref.orderId != null || ref.clientId != null) {
@@ -1091,9 +1103,11 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             .put("orderType", orderType)
             .apply {
                 if (price != null) put("price", price)
+                // Docs: effect is "Required if the orderType is limit" (GTC default).
+                if (effect != null) put("effect", effect)
+                else if (orderType.equals("LIMIT", ignoreCase = true)) put("effect", "GTC")
                 if (tradeSide != null) put("tradeSide", tradeSide)
                 if (positionId != null) put("positionId", positionId)
-                if (effect != null) put("effect", effect)
                 if (clientId != null) put("clientId", clientId)
                 if (reduceOnly != null) put("reduceOnly", reduceOnly)
                 if (tpPrice != null) put("tpPrice", tpPrice)
