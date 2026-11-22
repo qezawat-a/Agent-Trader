@@ -6,7 +6,7 @@
 
 Reviewed against the **coding-standards** skill (readability, KISS, DRY, YAGNI, descriptive
 naming, error handling, test coverage, code smells). Everything below was verified by
-building the project and running the unit tests (236 tests, 0 failures).
+building the project and running the unit tests (408 tests, 0 failures).
 
 ---
 
@@ -14,7 +14,7 @@ building the project and running the unit tests (236 tests, 0 failures).
 
 The code is in good shape: the Bitunix client is documented down to the signature formula,
 the REST layer is verified against the official endpoint contract, and the trading logic
-is covered by 236 JVM tests. The gaps are not in the trading algorithm — they are in
+is covered by 408 JVM tests. The gaps are not in the trading algorithm — they are in
 **duplication that has started to drift**, **dead code**, **magic numbers**, and a handful
 of **genuine bugs** in the strategy registry and the command router.
 
@@ -92,6 +92,28 @@ The suite is at **404 tests, 0 failures** (7 new).
 
 ---
 
+## Status — resolved in v2.9.0
+
+A build-and-verify pass over the paper book. Four defects, all in the simulated
+account, all reproducible with a unit test; no live-trading rule was touched.
+
+| Finding | Resolution in v2.9.0 |
+|---|---|
+| **A full close after a partial take-profit booked the ladder twice.** `PaperBroker.realize()` sized the close on `Position.originalQty` even when `fraction == 1`. After TP1 had taken 25% off, "close the rest" booked 100% of the original size again: 25% of the position was paid out twice and the paper balance drifted up on every ladder. | `realize()` now books `p.qty` (what is still open) on a full close, and `minOf(originalQty * fraction, qty)` on a partial. Pinned by `PaperBookTest.aFullCloseAfterPartialTpBooksOnlyTheRemainder` (balance 1005 → 1020, realized 20) and `theWholeLadderAddsUpToTheFullMove` (realized 50, position gone, committed margin 0). |
+| **An empty (or 0%-sized) account opened zero-quantity positions.** `openSized()` computed `qty = margin * leverage / price` and opened regardless. With `available == 0` (or `set risk 0`) the book gained a position that held no margin, counted against `maxOpenPositions`, and could never produce a fill. | `openSized()` returns `null` when `qty <= 0`. Pinned by `anEmptyAccountOpensNothing`. |
+| **Paper stops and take-profits were only evaluated on the 15m candle close.** `tick()` marked paper positions with the last 15m close, so a stop the price had already gone through was not acted on until that candle closed — up to fifteen minutes of unmanaged exposure, and a paper fill at a price the market had long left. | `tick()` now marks with `symbolPrice(sym)` — the same WS last price, REST last price, then candle close the app displays — so a level is honoured on the tick that crosses it. |
+| **`SuspiciousIndentation` lint error in the private WebSocket listener.** The `when (ch)` inside `runCatching` was indented as if it were a branch body, implying a grouping the code did not have. | Re-indented; `gradle :app:lintDebug` is clean (0 errors). |
+
+The paper book is also now explicitly thread-safe: `positions` is a
+`Collections.synchronizedMap`, `history` a `synchronizedList`, and every read path goes
+through `snapshot()` / `historySnapshot()` (this closes the `ConcurrentModificationException`
+half of open finding #5 — the `@Volatile` flags are still a convention, not a contract).
+
+The suite is at **408 tests, 0 failures** (7 new in `PaperBookTest`), and the root `src/`
+mirror is byte-for-byte identical to `app/src/` again (`diff -rq` clean, the CI gate).
+
+---
+
 ## Open findings (need an owner decision — they change trading behaviour)
 
 ### 1. Duplicate and inverted strategies inflate the "N strategies agree" gate
@@ -146,10 +168,11 @@ list, not `broker.positions`).
 
 ### 5. Engine state is shared across threads without a contract
 
-`broker.positions` is a `LinkedHashMap` written by the trading loop and read by the
-Compose thread (the Trade screen) — a classic `ConcurrentModificationException` waiting
-for a busy market. The same applies to the `var engineOn/trading/risk` fields. The
-WebSocket caches use `ConcurrentHashMap` correctly; the paper broker does not.
+The paper broker's `positions` / `history` are now synchronized and only read through
+`snapshot()` / `historySnapshot()` (v2.9.0), so the `ConcurrentModificationException`
+half of this is closed. What remains is the `var engineOn/trading/risk` fields: they are
+`@Volatile`, which gives visibility but not atomicity, and the rule for which thread may
+write them is still a convention rather than a documented contract.
 
 ---
 
@@ -165,7 +188,7 @@ WebSocket caches use `ConcurrentHashMap` correctly; the paper broker does not.
   It should be ignored, not tracked.
 * **No linting** — there is no `ktlint`/`detekt`/Android-Lint gate in CI, so the naming and
   unused-import rules depend on review. `gradle :app:lintDebug` would catch the rest.
-* **README numbers drift** — it claims 75 unit tests (there are 236) and lists 21
+* **README numbers drift** — it claims 75 unit tests (there are 408) and lists 21
   strategies in one place. Fixed in this pass for the test count.
 * **The mirror is still two copies** — `src/` duplicates `app/src/main/`. A single source
   of truth (the CodeAssist `module.toml` pointing at `app/src/main`) would remove the
@@ -177,7 +200,8 @@ WebSocket caches use `ConcurrentHashMap` correctly; the paper broker does not.
 ## What was verified
 
 ```
-gradle :app:testDebugUnitTest   →  236 tests, 0 failures
+gradle :app:testDebugUnitTest   →  408 tests, 0 failures
+gradle :app:lintDebug           →  0 errors
 gradle :app:assembleDebug       →  builds clean (only pre-existing deprecation notes)
 ```
 

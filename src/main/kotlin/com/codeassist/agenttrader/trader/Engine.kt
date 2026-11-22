@@ -132,6 +132,10 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         // balance — the margin the open positions hold is already locked.
         val margin = MarginSizing.compute(availableMargin(), marginFraction * 100.0)
         val qty = margin * leverage / price
+        // No margin (an empty account, or a 0% setting) must not create a
+        // position that holds nothing: it would show in the book, count
+        // against the position cap and never produce a fill.
+        if (qty <= 0.0) return null
         // Simulated market: the same plan semantics as LIVE — the stop is
         // exactly the user's configured distance (none by default).
         val plan = TpSlPlanner.plan(
@@ -191,17 +195,31 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         return "CLOSE $symbol @ ${fmt(price)}"
     }
 
+    /**
+     * Books [fraction] of the position at [price].
+     *
+     * A FULL close ([fraction] = 1) realizes what is still open, not the
+     * original size: after TP1 has taken 25% off, closing the rest must book
+     * the remaining 75% only. Sizing it on [Position.originalQty] booked the
+     * ladder's already-closed part a second time and inflated the paper
+     * balance by a quarter of the position on every "close the rest".
+     */
     private fun realize(p: Position, price: Double, fraction: Double) {
-        val closeQty = p.originalQty * fraction
+        val closeQty = if (fraction >= 1.0) p.qty else minOf(p.originalQty * fraction, p.qty)
+        if (closeQty <= 0.0) {
+            positions.remove(p.symbol)
+            return
+        }
         val pnl = p.dir * (price - p.entry) * closeQty
         realizedPnl += pnl
         balance += pnl
         p.qty -= closeQty
-        history.add("PARTIAL ${p.symbol} ${fmt(pnl)} USDT")
-        if (p.qty <= 1e-12 || fraction >= 1.0) positions.remove(p.symbol)
+        val done = p.qty <= 1e-12
+        history.add("${if (done) "CLOSE" else "PARTIAL"} ${p.symbol} ${fmt(pnl)} USDT")
+        if (done) positions.remove(p.symbol)
     }
 
-    fun unrealized(prices: Map<String, Double>): Double = positions.values.sumOf { p ->
+    fun unrealized(prices: Map<String, Double>): Double = snapshot().sumOf { (_, p) ->
         val px = prices[p.symbol] ?: p.entry
         p.dir * (px - p.entry) * p.qty
     }
@@ -551,27 +569,27 @@ class TraderEngine(private val rest: BitunixRest) {
                 // A Throwable that escapes an OkHttp callback thread kills the
                 // app: the feed dies AND the whole process goes with it.
                 runCatching {
-                when (ch) {
-                    "balance" -> parseBalance(data)?.let { available ->
-                        exchangeBalance.set(available)
-                        exchangeBalanceAt.set(System.currentTimeMillis())
-                    }
-                    "position" -> {
-                        val sym = data.optString("symbol").ifBlank { symbol ?: "" }
-                        val qty = data.optString("qty").toDoubleOrNull() ?: 0.0
-                        if (sym.isNotBlank()) {
-                            if (qty == 0.0) wsPositions.remove(sym) else wsPositions[sym] = data
+                    when (ch) {
+                        "balance" -> parseBalance(data)?.let { available ->
+                            exchangeBalance.set(available)
+                            exchangeBalanceAt.set(System.currentTimeMillis())
+                        }
+                        "position" -> {
+                            val sym = data.optString("symbol").ifBlank { symbol ?: "" }
+                            val qty = data.optString("qty").toDoubleOrNull() ?: 0.0
+                            if (sym.isNotBlank()) {
+                                if (qty == 0.0) wsPositions.remove(sym) else wsPositions[sym] = data
+                            }
+                        }
+                        "tpsl" -> {
+                            val id = data.optString("orderId")
+                            if (id.isNotBlank()) {
+                                wsTpSl.remove(id)
+                                wsTpSl[id] = data
+                                while (wsTpSl.size > 50) wsTpSl.remove(wsTpSl.keys.first())
+                            }
                         }
                     }
-                    "tpsl" -> {
-                        val id = data.optString("orderId")
-                        if (id.isNotBlank()) {
-                            wsTpSl.remove(id)
-                            wsTpSl[id] = data
-                            while (wsTpSl.size > 50) wsTpSl.remove(wsTpSl.keys.first())
-                        }
-                    }
-                }
                 }
                 val line = feedEventLine(ch, data, symbol)
                 if (line.isNotEmpty()) onEvent?.invoke(line)
@@ -1298,7 +1316,8 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /** Last price for a symbol (exchange first, candles as fallback). */
-    fun symbolPrice(symbol: String): Double {        wsLivePrice(symbol)?.let { return it }
+    fun symbolPrice(symbol: String): Double {
+        wsLivePrice(symbol)?.let { return it }
         val live = runCatching { rest.lastPrice(symbol) }.getOrNull() ?: 0.0
         if (live > 0) return live
         return candles(symbol, PRICE_TIMEFRAME).lastOrNull()?.close ?: 0.0
@@ -1549,13 +1568,20 @@ class TraderEngine(private val rest: BitunixRest) {
         if (live) wsPositions.isNotEmpty() else broker.positions.isNotEmpty()
 
     /** Manages open positions against current prices. */
-    fun tick(): List<String> {        val events = mutableListOf<String>()
+    fun tick(): List<String> {
+        val events = mutableListOf<String>()
         // The paper book is only managed in PAPER mode. In LIVE it must not
         // produce "breakeven"/"close" events for positions that do not exist
         // on the exchange.
         if (!live) {
             for (sym in broker.snapshot().map { it.key }) {
-                val price = candles(sym, PRICE_TIMEFRAME).lastOrNull()?.close ?: continue
+                // Mark with the same price the app shows: WS last price, then
+                // the exchange's REST last price, then the candle close.
+                // Managing on the last 15m candle close meant a stop or a TP
+                // level was only noticed when that candle closed — up to
+                // fifteen minutes after the price had already gone through it.
+                val price = runCatching { symbolPrice(sym) }.getOrDefault(0.0)
+                if (price <= 0) continue
                 events.addAll(broker.manage(sym, price, risk))
             }
         } else events.addAll(manageLiveStops())
