@@ -20,12 +20,14 @@ object AgentBrain {
     val TOOLS: List<String> = ToolPolicy.commands
 
     private val moodCues: List<Pair<Mood, List<String>>> = listOf(
-        Mood.ANGRY to listOf("furious", "angry", "pissed", "mad", "annoyed", "frustrated", "wtf", "ridiculous"),
-        Mood.ANXIOUS to listOf("scared", "afraid", "worried", "nervous", "panic", "anxious", "stressed", "stress"),
-        Mood.EXHAUSTED to listOf("tired", "exhausted", "sleepless", "burned out", "burnt out", "fed up"),
-        Mood.DISCOURAGED to listOf("losing money", "lost money", "down again", "hopeless", "give up", "stuck", "sad", "depressed"),
+        Mood.ANGRY to listOf("furious", "angry", "pissed", "mad", "annoyed", "frustrated", "wtf", "ridiculous", "عصبی", "عصبانی", "کفری"),
+        Mood.ANXIOUS to listOf("scared", "afraid", "worried", "nervous", "panic", "anxious", "stressed", "stress", "نگران", "استرس", "ترسیدم", "می\u200cترسم"),
+        Mood.EXHAUSTED to listOf("tired", "exhausted", "sleepless", "burned out", "burnt out", "fed up", "خسته"),
+        Mood.DISCOURAGED to listOf("losing money", "lost money", "down again", "hopeless", "give up", "stuck", "sad", "depressed", "ناامید", "ضرر کردم", "باختم"),
         Mood.EUPHORIC to listOf("amazing", "awesome", "printing", "easy money", "lucky", "huge profit", "moon"),
-        Mood.CONFUSED to listOf("confused", "don't understand", "dont understand", "what does", "why did", "no idea", "lost"),
+        // "what does" and "why did" are ordinary questions, not confusion: they used to put
+        // the confused tone on every question about a signal or a close.
+        Mood.CONFUSED to listOf("confused", "don't understand", "dont understand", "no idea", "i'm lost", "گیج", "نمی\u200cفهمم", "نمیفهمم"),
         Mood.FOCUSED to listOf("let's go", "lets go", "execute", "deploy", "scale in", "hunt", "let's trade"),
     )
 
@@ -98,6 +100,7 @@ object AgentBrain {
         appendLine()
         appendLine("HOW YOU WORK:")
         appendLine("- Answer the actual question asked. No lectures, no repeated disclaimers.")
+        appendLine("- Reply in the language the user writes in: Persian in, Persian out; English in, English out. For Finglish or a mix, match the mix. Keep symbols, command names and numbers as written.")
         appendLine("- Be concrete: numbers, levels, actions. If you are unsure, say so in one line.")
         appendLine("- You may act on the trading engine. To do that, emit a tool call on its own line:")
         appendLine("  <tool>status</tool>   <tool>positions</tool>   <tool>funding</tool>   <tool>scan once</tool>")

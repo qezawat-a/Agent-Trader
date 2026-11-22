@@ -1,5 +1,7 @@
 package com.codeassist.agenttrader.trader
 
+import com.codeassist.agenttrader.util.toAsciiDigits
+
 import com.codeassist.agenttrader.bitunix.BitunixApiException
 import com.codeassist.agenttrader.bitunix.BitunixRest
 import com.codeassist.agenttrader.bitunix.BitunixWs
@@ -887,6 +889,10 @@ class TraderEngine(private val rest: BitunixRest) {
             .toDouble()
         // Only a literally non-positive order is not placed.
         if (qty <= 0) return null
+        // The exchange rejects anything under its minimum (error 30016: "amount should be
+        // larger than 10 NEAR"). Checked after flooring to the base precision, so the caller
+        // reports "below min volume" instead of sending an order that is certain to fail.
+        if (info.minTradeVolume > 0 && qty < info.minTradeVolume) return null
         return BigDecimalFormat.format(qty, info.basePrecision)
     }
 
@@ -1975,7 +1981,7 @@ class TraderEngine(private val rest: BitunixRest) {
         } else ""
 
     fun handle(text: String): String {
-        val raw = normalizeCommand(text.trim())
+        val raw = normalizeCommand(toAsciiDigits(text.trim()))
         val t = raw.lowercase()
         return when {
             t.startsWith("engine on") -> {

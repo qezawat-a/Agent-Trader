@@ -43,32 +43,35 @@ object CommandRouter {
         data class Chat(val text: String) : Parsed()
     }
 
-    private val traderPrefixes = listOf(
+    /**
+     * Engine commands that take no argument. They count only when the whole message is the
+     * command, ignoring trailing punctuation. Before this, any sentence that merely began with
+     * one of these words ("balance chetor?", "signals look weak, why?") was run as the engine
+     * command, so the question was never answered.
+     */
+    private val exactTraderCommands = setOf(
         "engine on", "engine off", "start trading", "stop trading",
-        "status", "balance", "positions history", "positions", "orders",
-        "pnl", "trades_history", "tpsl_history", "tpsl", "funding",
-        "tiers", "signals", "history orders", "cancel orders",
-        "report on", "report off", "report interval",
-        "settings trade", "scan on", "scan off", "scan once",
-        "close position", "close all", "manual entry", "set leverage", "set risk",
-        "mid management",
-        // v1.1.1 scanner & gate commands — without these they fell through to the LLM,
-        // which happily answered "Set." while nothing ran on the engine.
+        "status", "balance", "positions", "positions history", "orders", "history orders",
+        "cancel orders", "pnl", "trades_history", "tpsl_history", "tpsl", "funding",
+        "tiers", "signals", "settings trade", "mid management",
+        "scan on", "scan off", "scan once", "report on", "report off",
+        "close all", "live mode", "paper mode", "refresh auto", "auto on", "auto off",
+    )
+
+    /**
+     * Engine commands that take an argument. They count when the message starts with the
+     * command followed by a space: "set leverage 20", "set universe BTCUSDT,ETHUSDT".
+     */
+    private val argTraderCommands = listOf(
         "set universe", "set symbols", "set symbol", "set timeframes", "set scan top",
-        "set min agree", "set min tf", "set min conf",
-        // v1.1.7 risk manager & exits — same lesson: route to the engine, never the LLM
-        "set breakeven", "set trail trigger", "set trail distance",
-        "set sl",
+        "set min agree", "set min tf", "set min conf", "set tf agree",
+        "set auto universe", "set auto tpsl", "set auto rank", "set min volume",
+        "set breakeven", "set trail trigger", "set trail distance", "set sl",
         "set max positions", "set maxpos", "set guard",
-        "set tp r", "set tp ", "set tf agree",
-        // v.2.4.4 — the auto-universe commands were MISSING here, so "set auto
-        // universe on" fell through to the LLM, which answered in prose and
-        // changed nothing: the app looked like it ignored the command.
-        // Both the "set ..." form and the spoken form are routed to the engine.
-        "set auto universe", "set auto tpsl", "set min volume", "set auto rank",
-        "min volume", "auto universe", "auto rank", "auto on", "auto off",
-        "auto gainers", "auto volume", "auto losers", "auto movers",
-        "refresh auto", "scan top", "set live", "live mode", "paper mode",
+        "set tp r", "set tp", "set leverage", "set risk", "set live",
+        "min volume", "auto universe", "auto rank", "auto gainers", "auto volume",
+        "auto losers", "auto movers", "scan top",
+        "close position", "manual entry", "report interval",
     )
 
     fun parse(input: String): Parsed {
@@ -77,9 +80,14 @@ object CommandRouter {
             val parts = text.split(Regex("\\s+"), limit = 2)
             return Parsed.Agent(parts[0].lowercase(), parts.getOrElse(1) { "" })
         }
-        val lower = text.lowercase()
-        if (traderPrefixes.any { lower.startsWith(it) }) return Parsed.Trader(text)
+        if (isTraderCommand(text.lowercase())) return Parsed.Trader(text)
         return Parsed.Chat(text)
+    }
+
+    /** True when [lower] is an engine command, not a sentence that happens to start with one. */
+    internal fun isTraderCommand(lower: String): Boolean {
+        if (lower.trimEnd(' ', '?', '!', '.', '\u061F') in exactTraderCommands) return true
+        return argTraderCommands.any { lower.startsWith("$it ") }
     }
 
     fun helpText(): String = AGENT_COMMANDS.joinToString("\n") { (cmd, desc) -> "$cmd — $desc" }
