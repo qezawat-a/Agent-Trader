@@ -1755,6 +1755,15 @@ class TraderEngine(private val rest: BitunixRest) {
     ): Boolean {
         return try {
             rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
+            // The endpoint returns success even when the exchange keeps the old SL
+            // (the new price is not a real improvement, or the SL is rejected).
+            // Verify before marking the rule done, or the SL stays static and
+            // breakeven/trailing never fire again.
+            val applied = runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
+            if (applied != null && applied > 0 && kotlin.math.abs(applied - sl) > 0.005) {
+                events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
+                return false
+            }
             liveLastStop[sym] = sl
             events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
             true
