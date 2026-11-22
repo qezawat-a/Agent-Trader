@@ -131,7 +131,6 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         // Same sizing as the live path: the configured share of the free
         // balance — the margin the open positions hold is already locked.
         val margin = MarginSizing.compute(availableMargin(), marginFraction * 100.0)
-        if (margin <= 0.0) return null
         val qty = margin * leverage / price
         // Simulated market: the same plan semantics as LIVE — the stop is
         // exactly the user's configured distance (none by default).
@@ -858,7 +857,7 @@ class TraderEngine(private val rest: BitunixRest) {
             ?: TpSlPlanner.PAPER_SIMULATED_MMR
     }
 
-    /** Formats qty to the symbol's base precision, floored, never below minTradeVolume. */
+    /** Formats qty to the symbol's base precision, floored. */
     fun formatQty(symbol: String, raw: Double): String? = formatQty(symbol, raw, pairInfo(symbol))
 
     internal fun formatQty(symbol: String, raw: Double, info: PairInfo?): String? {
@@ -868,10 +867,8 @@ class TraderEngine(private val rest: BitunixRest) {
         val qty = java.math.BigDecimal.valueOf(raw)
             .setScale(info.basePrecision, java.math.RoundingMode.FLOOR)
             .toDouble()
-        // Skip instead of clamping up: an order floored to zero or below the min
-        // volume must never be silently upsized beyond the intended risk.
+        // Only a literally non-positive order is not placed.
         if (qty <= 0) return null
-        if (info.minTradeVolume > 0 && qty < info.minTradeVolume) return null
         return BigDecimalFormat.format(qty, info.basePrecision)
     }
 
@@ -1176,15 +1173,6 @@ class TraderEngine(private val rest: BitunixRest) {
     /** One scan cycle: analyse each symbol and open a paper trade when the signal passes. */
     fun scanOnce(): List<String> {
         val out = mutableListOf<String>()
-        // One balance check for the whole scan. An empty futures wallet cannot
-        // fund anything, so the scan stops here instead of sending one order
-        // per symbol per tick — every one of them rejected by the exchange.
-        if (live) {
-            val available = runCatching { rest.availableUsdt() }.getOrNull()
-            if (available != null && available < MIN_FUTURES_BALANCE_USDT) {
-                return listOf("SKIP scan: ${emptyFuturesWalletNote(available)}")
-            }
-        }
         val symbols = runCatching {
             if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
             if (scanOn) rankUniverse(scanTop) else universe.toList()
@@ -1370,13 +1358,6 @@ class TraderEngine(private val rest: BitunixRest) {
         exchangeBalance.set(available)
         exchangeBalanceAt.set(System.currentTimeMillis())
         riskBlock()?.let { return it }
-        // An empty futures wallet cannot fund anything. Without this the loop
-        // kept trying, once per symbol and once per tick, and the exchange
-        // rejected every attempt — an error line every cycle for a condition
-        // the user can fix in one tap. Say it once, clearly.
-        if (available < MIN_FUTURES_BALANCE_USDT) {
-            return "SKIP $symbol: ${emptyFuturesWalletNote(available)}"
-        }
         // The open positions are ONE account-wide query, not one per symbol:
         // the scan asks for it once and hands it down. Asking again for every
         // symbol doubled the request rate of every tick.
@@ -1401,23 +1382,7 @@ class TraderEngine(private val rest: BitunixRest) {
         // Margin sizing: the configured share of the FREE balance. The
         // exchange's `available` already excludes the margin the open positions
         // hold, so the size is the size the user set.
-        var margin = MarginSizing.compute(available, marginFraction * 100.0)
-        // The exchange's minimum order size sets a floor: below it no order can
-        // be placed at all, so raise the margin to that minimum when the
-        // balance can carry it.
-        val info = pairInfo(symbol)
-        if (info != null && info.minTradeVolume > 0) {
-            val minMargin = MarginSizing.minMarginForMinOrder(
-                price, info.minTradeVolume, lev, info.basePrecision,
-            )
-            if (minMargin > margin) {
-                if (minMargin > available) {
-                    return "SKIP $symbol: one ${info.minTradeVolume} contract needs ${fmt2(minMargin)} USDT " +
-                        "margin, the account has ${fmt2(available)} USDT."
-                }
-                margin = minMargin
-            }
-        }
+        val margin = MarginSizing.compute(available, marginFraction * 100.0)
         // TP/SL triggers are LAST_PRICE per project rule, so plan the levels from
         // the signal price; fall back to the mark price when the exchange publishes one.
         val mark = runCatching {
