@@ -1198,7 +1198,10 @@ class TraderEngine(private val rest: BitunixRest) {
     fun scanOnce(): List<String> {
         val out = mutableListOf<String>()
         val symbols = runCatching {
-            if (scanOn && autoUniverse) refreshAutoUniverseIfStale()
+            // Auto-universe (gainers/volume/...) must refresh even when the
+            // scanner is off: otherwise the trading loop keeps scanning the
+            // default BTC/ETH/SOL list instead of today's gainers.
+            if (autoUniverse) refreshAutoUniverseIfStale()
             if (scanOn) rankUniverse(scanTop) else universe.toList()
         }.getOrElse { universe.toList() }
         // The open positions are ONE account-wide query for the whole scan.
