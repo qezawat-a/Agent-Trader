@@ -367,6 +367,8 @@ class TraderEngine(private val rest: BitunixRest) {
         set(value) { field = value; configRev++ }
 
     private var autoCacheAt: Long = 0
+    /** The rank mode the cached universe was built with (see [refreshAutoUniverseIfStale]). */
+    private var autoRankByUsed: String = ""
 
     var minAgreeing: Int = SignalAggregator.MIN_AGREEING
     var minTfConfidence: Double = SignalAggregator.TIMEFRAME_CONFIDENCE
@@ -988,7 +990,11 @@ class TraderEngine(private val rest: BitunixRest) {
     internal fun refreshAutoUniverseIfStale(maxAgeMs: Long = AUTO_UNIVERSE_MAX_AGE_MS): String {
         if (!autoUniverse) return ""
         val now = System.currentTimeMillis()
-        if (now - autoCacheAt <= maxAgeMs && universe.size >= scanTop) return ""
+        // The size check is the bug: if the cached universe already has scanTop
+        // symbols it never re-picks, so selecting Gainers (or changing the
+        // rank mode/min volume) leaves the old set in place. A manual refresh
+        // (maxAgeMs = 0) must always refresh.
+        if (now - autoCacheAt <= maxAgeMs && universe.size >= scanTop && autoRankByUsed == autoRankBy) return ""
         val picked = try {
             val tradable = tradableSymbols()
             autoUniverseSymbols(
@@ -1006,6 +1012,7 @@ class TraderEngine(private val rest: BitunixRest) {
         universe.addAll(picked)
         signalCacheAt = 0
         autoCacheAt = now
+        autoRankByUsed = autoRankBy
         configRev++
         return "Auto-universe: ${picked.size} symbols → ${picked.joinToString(", ")}"
     }
