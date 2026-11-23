@@ -63,19 +63,26 @@ object SignalAggregator {
             StrategyVote(st.name, st.group, v.dir, v.confidence, st.origin)
         }
 
+    /** Extra lift per agreeing vote ABOVE the minimum, capped so only an overwhelming consensus reaches 100. */
+    const val AGREEMENT_BONUS_PER_VOTE = 1.5
+
     /**
-     * A side's confidence: the sum of its strong votes (≥ the per-timeframe
-     * gate) divided by [need] — the number of agreeing timeframes the trade
-     * requires.
+     * A side's confidence: the average of its strong votes (≥ the per-timeframe
+     * gate) plus a small bonus for every agreeing vote ABOVE [need].
      *
-     * At the minimum (`strong.size == need`) this is the plain average of the
-     * strong votes; every extra agreeing voter above the minimum lifts the
-     * value, and the whole scale is capped at 100. The 0–100 range is
-     * therefore reachable: a modest consensus shows the average (60–80), a
-     * decisive one shows 80–100.
+     * The average is the honest base — 3 modest votes at 66% stay at 66% and are
+     * blocked, not inflated. Extra agreement then lifts it gradually: the
+     * canonical rising series (15 strong LONG votes, average 68.7) reaches
+     * ~87% instead of being stuck under 70 — but it does NOT pin every signal to
+     * 100. Only a near-unanimous, high-confidence consensus can reach the top.
      */
-    internal fun sideConfidence(strong: List<Double>, need: Int): Double =
-        if (strong.isEmpty() || need <= 0) 0.0 else (strong.sum() / need).coerceIn(0.0, 100.0)
+    internal fun sideConfidence(strong: List<Double>, need: Int): Double {
+        if (strong.isEmpty() || need <= 0) return 0.0
+        val base = strong.average()
+        val extra = (strong.size - need).coerceAtLeast(0)
+        val bonus = minOf(extra * AGREEMENT_BONUS_PER_VOTE, 100.0 - base)
+        return (base + bonus).coerceIn(0.0, 100.0)
+    }
 
     /**
      * Aggregates already-cast votes into one timeframe decision.

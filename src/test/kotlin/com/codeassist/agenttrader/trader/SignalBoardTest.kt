@@ -271,4 +271,35 @@ class SignalBoardTest {
         assertTrue(text.contains("margin per trade 12%"), text)
         assertTrue(text.contains("set timeframes"), text)
     }
+
+    // ---- confidence curve (average + bounded agreement bonus) ----
+
+    @Test
+    fun minimum_agreement_is_the_plain_average() {
+        // 3 votes at 66 — only the minimum agreement — stay at 66 and are blocked.
+        assertEquals(66.0, SignalAggregator.sideConfidence(listOf(66.0, 66.0, 66.0), 3))
+        assertEquals(68.67, SignalAggregator.sideConfidence(listOf(70.0, 65.0, 70.0, 60.0, 75.0, 75.0, 65.0, 75.0, 70.0, 70.0, 70.0, 70.0, 75.0, 60.0, 60.0), 15), 0.01)
+    }
+
+    @Test
+    fun extra_agreement_lifts_but_does_not_pin_to_hundred() {
+        // The canonical rising series: 15 strong LONG votes (need 3) — average
+        // 68.67, +12 extras × 1.5 = +18 → ~86.7, NOT 100.
+        val risingStrong = listOf(70.0, 65.0, 70.0, 60.0, 75.0, 75.0, 65.0, 75.0, 70.0, 70.0, 70.0, 70.0, 75.0, 60.0, 60.0)
+        val conf = SignalAggregator.sideConfidence(risingStrong, SignalAggregator.MIN_AGREEING)
+        assertTrue(conf > 85.0 && conf < 95.0, "rising confidence should be ~87, got $conf")
+        // Every value is distinct across consensus sizes — no 100 clamp avalanche.
+        val weak = SignalAggregator.sideConfidence(listOf(66.0, 66.0, 66.0), 3)
+        val mid = SignalAggregator.sideConfidence(risingStrong.take(8), 3)
+        assertTrue(weak < mid && mid < conf, "$weak < $mid < $conf")
+    }
+
+    @Test
+    fun only_overwhelming_consensus_reaches_hundred() {
+        // 15 votes averaging 92 + 18 bonus → capped at 100.
+        assertEquals(100.0, SignalAggregator.sideConfidence(List(15) { 92.0 }, 3))
+        // But a single strong group never does.
+        val conf = SignalAggregator.sideConfidence(listOf(75.0, 80.0), 2)
+        assertTrue(conf < 80.0, "2 votes should stay near the average, got $conf")
+    }
 }
