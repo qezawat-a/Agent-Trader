@@ -772,6 +772,80 @@ class TraderEngine(private val rest: BitunixRest) {
 
     private fun candles(symbol: String, tf: String): List<Candle> = rest.klines(symbol, tf, 200)
 
+    /** Mark price for the board: WS first, then REST — never a made-up number. */
+    private fun boardMark(symbol: String, fallback: Double = 0.0): Double =
+        wsLivePrice(symbol)
+            ?: runCatching { rest.markPrice(symbol).optString("markPrice").toDoubleOrNull() }
+                .getOrNull()?.takeIf { it > 0.0 }
+            ?: runCatching { rest.lastPrice(symbol) }.getOrDefault(fallback)
+
+    /**
+     * What the Trade screen shows while a position is open: position facts,
+     * its TP/SL levels, and the pending order list.
+     *
+     * BLOCKING (REST) — callers must run it off the UI thread. Each endpoint is
+     * fetched independently so one failed call still leaves the rest visible.
+     */
+    fun tradeBoard(): TradeBoard {
+        if (!live) {
+            val positions = broker.snapshot().map { (sym, p) ->
+                val mark = boardMark(sym, p.entry)
+                val margin = if (p.leverage > 0) p.qty * p.entry / p.leverage else p.qty * p.entry
+                val pnl = (mark - p.entry) * p.qty * p.dir
+                BoardPosition(
+                    symbol = p.symbol,
+                    side = if (p.dir > 0) "LONG" else "SHORT",
+                    qty = p.qty,
+                    entry = p.entry,
+                    mark = mark,
+                    leverage = p.leverage,
+                    margin = margin,
+                    pnl = pnl,
+                    pnlPct = if (margin > 0.0) pnl / margin * 100.0 else 0.0,
+                    liq = p.plan.liquidation.takeIf { it > 0.0 },
+                    stop = p.stop,
+                    tps = p.plan.ladder.mapIndexed { i, (price, frac) ->
+                        BoardTp("${i + 1}R", price, "${fmt0(frac * 100)}%", i < p.nextRung)
+                    },
+                    paper = true,
+                )
+            }
+            return TradeBoard(
+                positions = positions,
+                orders = emptyList(),
+                note = "PAPER — TP/SL and liquidation are simulated locally; no exchange orders.",
+            )
+        }
+
+        val problems = ArrayList<String>()
+        val posArr = try {
+            rest.pendingPositions()
+        } catch (e: Exception) {
+            problems += "positions: ${e.message ?: e.javaClass.simpleName}"
+            org.json.JSONArray()
+        }
+        val ordArr = try {
+            rest.pendingOrders(limit = 50)
+        } catch (e: Exception) {
+            problems += "orders: ${e.message ?: e.javaClass.simpleName}"
+            org.json.JSONArray()
+        }
+        val tpArr = try {
+            rest.pendingTpSlOrders(limit = 50)
+        } catch (e: Exception) {
+            problems += "TP/SL: ${e.message ?: e.javaClass.simpleName}"
+            org.json.JSONArray()
+        }
+        val positions = (0 until posArr.length()).mapNotNull { i ->
+            val p = posArr.optJSONObject(i) ?: return@mapNotNull null
+            val sym = p.optString("symbol")
+            val parsed = parseBoardPosition(p, boardMark(sym))
+            val (stop, tps) = tpslFor(tpArr, sym)
+            parsed.copy(stop = stop, tps = tps)
+        }
+        return TradeBoard(positions, parseBoardOrders(ordArr, tpArr), problems.joinToString(" · "))
+    }
+
     /** Loads and caches contract specs for a symbol (best effort; returns null offline). */
     fun pairInfo(symbol: String): PairInfo? {
         pairs[symbol]?.let { return it }

@@ -610,13 +610,6 @@ fun TradeScreen(
     var sizePct by remember(engine.configRev) { mutableStateOf((engine.riskFraction * 100).toFloat()) }
     var price by remember { mutableStateOf(0.0) }
     val scheme = MaterialTheme.colorScheme
-    // LIVE must list exchange positions, not the paper book.
-    val livePositions by produceState(initialValue = engine.feedPositions(), engine, engine.live) {
-        while (engine.live) {
-            value = engine.feedPositions()
-            kotlinx.coroutines.delay(2_000)
-        }
-    }
     val symbols = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
 
     LazyColumn(
@@ -704,79 +697,10 @@ fun TradeScreen(
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Open positions", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    if (engine.live) {
-                        if (livePositions.isEmpty()) {
-                            Text(
-                                "No live positions on the private feed " +
-                                    "(${if (engine.liveFeedOn) "feed connected" else "feed off"}). " +
-                                    "Use Positions for the exchange snapshot.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = scheme.onSurfaceVariant,
-                            )
-                        } else {
-                            livePositions.forEach { sym ->
-                                Row(
-                                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            sym,
-                                            style = MaterialTheme.typography.bodyMedium,
-                                            fontWeight = FontWeight.SemiBold,
-                                        )
-                                        Text(
-                                            "live on the exchange — use Positions for qty/entry/stop",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = scheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    AssistChip(
-                                        onClick = { onClose(sym) },
-                                        label = { Text("Close") },
-                                        leadingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) },
-                                    )
-                                }
-                            }
-                        }
-                    } else if (engine.broker.positions.isEmpty()) {
-                        Text(
-                            "No open positions.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = scheme.onSurfaceVariant,
-                        )
-                    } else {
-                        engine.broker.snapshot().forEach { e ->
-                            val p = e.value
-                            Row(
-                                Modifier.fillMaxWidth().padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"}",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                    )
-                                    Text(
-                                        "qty ${fmt(p.qty)} · entry ${fmt(p.entry)} · stop ${p.stop?.let { fmt(it) } ?: "none"}",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = scheme.onSurfaceVariant,
-                                    )
-                                }
-                                AssistChip(
-                                    onClick = { onClose(p.symbol) },
-                                    label = { Text("Close") },
-                                    leadingIcon = { Icon(Icons.Default.Close, null, Modifier.size(14.dp)) },
-                                )
-                            }
-                        }
-                    }
-                }
-            }
+            // Position / order / TP-SL / liquidation board. It renders itself
+            // only while a position is open and reads the exchange off the UI
+            // thread, so it replaces the old static "Open positions" card.
+            PositionBoardCard(engine = engine, onClose = onClose)
         }
     }
 }
