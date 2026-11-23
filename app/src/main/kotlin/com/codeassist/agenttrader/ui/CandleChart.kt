@@ -211,7 +211,7 @@ fun CandleChartCard(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
 
-    val sym = symbol.trim().uppercase(Locale.getDefault())
+    val sym = symbol.trim().uppercase(Locale.ROOT)
 
     // Debounced: typing a symbol one letter at a time must not spam the API.
     LaunchedEffect(sym, interval, refreshKey) {
