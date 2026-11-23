@@ -1172,7 +1172,7 @@ class TraderEngine(private val rest: BitunixRest) {
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
             val symbol = o.optString("symbol", "").trim().uppercase()
             if (symbol.isBlank()) return@mapNotNull null
-            val status = o.optString("symbolStatus", o.optString("status", "OPEN"))
+            val status = o.optString("symbolStatus", "OPEN")
             val apiOk = if (o.has("isApiSupported")) o.optBoolean("isApiSupported", true) else true
             val quote = o.optString("quote", "USDT")
             if (status.equals("OPEN", true) && apiOk && quote.equals("USDT", true)) symbol else null
@@ -1637,6 +1637,11 @@ class TraderEngine(private val rest: BitunixRest) {
                     o.optInt("longLeverage", o.optInt("leverage", 0))
                 else o.optInt("leverage", 0)
                 if (curMode.isNotBlank() && curMode != marginMode) {
+                    val openOrders = runCatching { rest.pendingOrders(limit = 100) }
+                        .getOrDefault(JSONArray())
+                    if (livePositions.length() > 0 || openOrders.length() > 0) {
+                        return "SKIP $symbol: cannot switch margin mode with open positions or orders"
+                    }
                     rest.changeMarginMode(symbol, mode = marginMode)
                 }
                 if (curLev > 0 && curLev != lev) rest.changeLeverage(symbol, leverage = lev)
@@ -1656,7 +1661,7 @@ class TraderEngine(private val rest: BitunixRest) {
             val orderId = order.optString("orderId")
             val status = waitForFill(orderId)
             val conf = if (confidence != null) " conf ${fmt0(confidence)}" else ""
-            if (status == "FILLED" || status == "PART_FILLED") {
+            if (status == "FILLED") {
                 liveOpenCount += 1
                 noteEntry()
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
@@ -1692,14 +1697,14 @@ class TraderEngine(private val rest: BitunixRest) {
         }
     }
 
-    /** Polls an order until terminal status (FILLED / CANCELED / PART_FILLED_CANCELED / EXPIRED). */
+    /** Polls an order until a documented terminal status (FILLED / CANCELED). */
     private fun waitForFill(orderId: String, tries: Int = 5): String {
         if (orderId.isBlank()) return "(no orderId)"
         repeat(tries) {
             try {
                 val d = rest.orderDetail(orderId)
-                val status = d.optString("status", d.optString("orderStatus", "?"))
-                if (status in listOf("FILLED", "CANCELED", "PART_FILLED_CANCELED", "EXPIRED")) return status
+                val status = d.optString("status")
+                if (status == "FILLED" || status == "CANCELED") return status
                 Thread.sleep(500)
             } catch (_: Exception) {
                 return "?"
@@ -2333,8 +2338,8 @@ class TraderEngine(private val rest: BitunixRest) {
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val o = arr.getJSONObject(i)
-                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
-                            "id ${o.optString("id")} qty ${o.optString("qty")} ${o.optString("status")}"
+                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} (${o.optString("tpQty")}) " +
+                            "sl ${o.optString("slPrice")} (${o.optString("slQty")}) id ${o.optString("id")}"
                     }
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
@@ -2812,16 +2817,11 @@ internal fun feedEventLine(ch: String, data: JSONObject, symbol: String?): Strin
  * Risk tier covering a notional value, or null when the value falls outside the
  * tier table. Tiers: level, startValue, endValue, leverage, maintenanceMarginRate.
  */
-/**
- * Position quantity. The REST docs name it `qty`; `holdQty` is accepted as a
- * fallback because some order payloads use it.
- */
-internal fun posQty(p: org.json.JSONObject): String =
-    p.optString("qty").ifBlank { p.optString("holdQty") }
+/** Position quantity, named `qty` in the REST docs. */
+internal fun posQty(p: org.json.JSONObject): String = p.optString("qty")
 
-/** Average entry price: `avgOpenPrice` per the REST docs, `entryPrice` as fallback. */
-internal fun posEntry(p: org.json.JSONObject): String =
-    p.optString("avgOpenPrice").ifBlank { p.optString("entryPrice") }
+/** Average entry price, named `avgOpenPrice` in the REST docs. */
+internal fun posEntry(p: org.json.JSONObject): String = p.optString("avgOpenPrice")
 
 /**
  * Position notional in quote currency: `qty × entry`. The tiered risk limit is

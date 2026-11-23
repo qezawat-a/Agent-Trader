@@ -127,6 +127,7 @@ class BitunixDocParamsTest {
             "BTCUSDT",
             listOf(OrderRef(orderId = "11111"), OrderRef(clientId = "22223")),
         )
+        assertEquals(setOf("symbol", "orderList"), keysOf(body))
         val list = body.getJSONArray("orderList")
         assertEquals(2, list.length())
         assertEquals("11111", list.getJSONObject(0).getString("orderId"))
@@ -317,13 +318,23 @@ class BitunixDocParamsTest {
     }
 
     @Test
-    fun modify_order_needs_a_qty() {
-        // Docs: qty is required ("Amount (base coin)").
+    fun modify_order_needs_a_qty_and_a_price() {
         val rest = BitunixRest("k", "s")
         assertFailsWith<IllegalArgumentException> { rest.modifyOrder(orderId = "1") }
         assertFailsWith<IllegalArgumentException> {
             rest.modifyOrder(orderId = "1", price = "60000")
         }
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyOrder(orderId = "1", qty = "0.1")
+        }
+    }
+
+    @Test
+    fun modify_order_body_has_no_undocumented_fields() {
+        val body = BitunixRest.modifyOrderBody(
+            orderId = "1", qty = "0.1", price = "60000",
+        )
+        assertEquals(setOf("orderId", "qty", "price"), keysOf(body))
     }
 
     @Test

@@ -267,6 +267,17 @@ fun CandleChartCard(
         }
     }
 
+    // Live WebSocket kline feed — subscribes once per symbol+interval pair.
+    LaunchedEffect(sym, interval) {
+        if (sym.isBlank()) return@LaunchedEffect
+        // Subscribe once; further changes to sym/interval will trigger re-subscription
+        val result = withContext(Dispatchers.IO) {
+            runCatching { engine.startMarketKlineFeed(sym, interval) }
+        }
+        result.onSuccess { _ -> }
+        result.onFailure { _ -> }
+    }
+
     // Debounced: typing a symbol one letter at a time must not spam the API.
     LaunchedEffect(sym, interval, refreshKey) {
         if (sym.isBlank()) {

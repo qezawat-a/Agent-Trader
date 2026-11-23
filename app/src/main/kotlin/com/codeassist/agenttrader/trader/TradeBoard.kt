@@ -51,16 +51,16 @@ private fun sideOf(raw: String): String = when (raw.uppercase()) {
     else -> raw.ifBlank { "?" }
 }
 
-private fun doubleOf(p: JSONObject, key: String, fallback: String = ""): Double =
-    (p.optString(key).ifBlank { fallback }).toDoubleOrNull() ?: 0.0
+private fun doubleOf(p: JSONObject, key: String): Double =
+    p.optString(key).toDoubleOrNull() ?: 0.0
 
 /**
  * A live position from `get_pending_positions`. Missing exchange fields stay
  * missing (0 / null) instead of being guessed — the UI prints "—" for them.
  */
 internal fun parseBoardPosition(p: JSONObject, markPrice: Double = 0.0): BoardPosition {
-    val qty = doubleOf(p, "qty", p.optString("holdQty"))
-    val entry = doubleOf(p, "avgOpenPrice", p.optString("entryPrice"))
+    val qty = doubleOf(p, "qty")
+    val entry = doubleOf(p, "avgOpenPrice")
     val margin = doubleOf(p, "margin")
     val pnl = doubleOf(p, "unrealizedPNL")
     val liq = doubleOf(p, "liqPrice").takeIf { it > 0.0 }
@@ -91,20 +91,17 @@ internal fun parseBoardOrders(orders: JSONArray, tpsls: JSONArray): List<BoardOr
             kind = o.optString("orderType").ifBlank { "ORDER" },
             side = o.optString("side").ifBlank { "—" },
             price = doubleOf(o, "price"),
-            qty = doubleOf(o, "qty", o.optString("holdQty")),
+            qty = doubleOf(o, "qty"),
             status = o.optString("status"),
         )
     }
     for (i in 0 until tpsls.length()) {
         val o = tpsls.optJSONObject(i) ?: continue
         val symbol = o.optString("symbol")
-        val side = o.optString("side").ifBlank { "—" }
-        val status = o.optString("status")
-        val qty = doubleOf(o, "qty")
         val tp = doubleOf(o, "tpPrice")
         val sl = doubleOf(o, "slPrice")
-        if (tp > 0.0) out += BoardOrder(symbol, "TP", side, tp, qty, status)
-        if (sl > 0.0) out += BoardOrder(symbol, "SL", side, sl, qty, status)
+        if (tp > 0.0) out += BoardOrder(symbol, "TP", "—", tp, doubleOf(o, "tpQty"), "")
+        if (sl > 0.0) out += BoardOrder(symbol, "SL", "—", sl, doubleOf(o, "slQty"), "")
     }
     return out
 }
@@ -118,7 +115,7 @@ internal fun tpslFor(tpsls: JSONArray, symbol: String): Pair<Double?, List<Board
         if (o.optString("symbol") != symbol) continue
         val tp = doubleOf(o, "tpPrice")
         if (tp > 0.0) {
-            val qty = doubleOf(o, "tpQty").takeIf { it > 0.0 } ?: doubleOf(o, "qty")
+            val qty = doubleOf(o, "tpQty")
             prices += BoardTp("TP", tp, if (qty > 0.0) "qty $qty" else "", false)
         }
         val sl = doubleOf(o, "slPrice")

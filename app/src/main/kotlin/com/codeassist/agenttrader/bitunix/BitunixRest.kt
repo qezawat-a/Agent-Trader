@@ -293,13 +293,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun account(marginCoin: String = "USDT"): JSONObject = dataObject(signedGet(
         "/api/v1/futures/account", mapOf("marginCoin" to marginCoin)))
 
-    fun availableUsdt(): Double {
-        val a = account()
-        return a.optString("available").toDoubleOrNull()
-            ?: a.optString("balance").toDoubleOrNull()
-            ?: a.optString("allBalance").toDoubleOrNull()
-            ?: 0.0
-    }
+    fun availableUsdt(): Double = account().optString("available").toDoubleOrNull() ?: 0.0
 
     fun changeLeverage(symbol: String, marginCoin: String = "USDT", leverage: Int): JSONObject =
         signedPost("/api/v1/futures/account/change_leverage", JSONObject()
@@ -516,7 +510,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         endTime: Long? = null,
         skip: Int = 0,
         limit: Int = 20,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
@@ -526,7 +519,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             if (startTime != null) put("startTime", startTime.toString())
             if (endTime != null) put("endTime", endTime.toString())
             put("skip", skip.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
             put("limit", limit.coerceIn(1, 100).toString())
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_pending_orders", q))
@@ -543,7 +535,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         endTime: Long? = null,
         skip: Int = 0,
         limit: Int = 20,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
@@ -552,7 +543,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             if (startTime != null) put("startTime", startTime.toString())
             if (endTime != null) put("endTime", endTime.toString())
             put("skip", skip.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
             put("limit", limit.coerceIn(1, 100).toString())
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_history_trades", q))
@@ -577,7 +567,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         limit: Int = 20,
         queryCanceled: Boolean? = null,
         subAccountId: Long? = null,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
@@ -591,7 +580,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             put("limit", limit.coerceIn(1, 100).toString())
             if (queryCanceled != null) put("queryCanceled", queryCanceled.toString())
             if (subAccountId != null) put("subAccountId", subAccountId.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_history_orders", q))
     }
@@ -601,24 +589,19 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      * carries `orderId` OR `clientId` (orderId wins when both are sent).
      * The doc page states no maximum, so the 20-order cap below is the
      * exchange's live-verified limit, not a documented one.
-     * `marginCoin` is sent per project rule.
      */
-    fun cancelOrders(symbol: String, orderIds: List<String>, marginCoin: String = "USDT"): JSONObject =
-        cancelOrdersByRef(symbol, orderIds.map { OrderRef(orderId = it) }, marginCoin)
+    fun cancelOrders(symbol: String, orderIds: List<String>): JSONObject =
+        cancelOrdersByRef(symbol, orderIds.map { OrderRef(orderId = it) })
 
     /** Cancels orders addressed by order id or client id — the documented orderList shape. */
-    fun cancelOrdersByRef(
-        symbol: String,
-        refs: List<OrderRef>,
-        marginCoin: String = "USDT",
-    ): JSONObject {
-        val body = cancelOrdersBody(symbol, refs, marginCoin)
+    fun cancelOrdersByRef(symbol: String, refs: List<OrderRef>): JSONObject {
+        val body = cancelOrdersBody(symbol, refs)
         return signedPost("/api/v1/futures/trade/cancel_orders", body)
     }
 
     /** Cancels all open orders. `symbol` is optional per the docs — omitted when blank. */
-    fun cancelAllOrders(symbol: String = "", marginCoin: String = "USDT"): JSONObject {
-        val body = JSONObject().put("marginCoin", marginCoin) // not in the docs; sent per project rule
+    fun cancelAllOrders(symbol: String = ""): JSONObject {
+        val body = JSONObject()
         if (symbol.isNotBlank()) body.put("symbol", symbol)
         return signedPost("/api/v1/futures/trade/cancel_all_orders", body)
     }
@@ -642,7 +625,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun modifyOrder(
         orderId: String? = null,
         clientId: String? = null,
-        symbol: String? = null,
         qty: String? = null,
         price: String? = null,
         tpPrice: String? = null,
@@ -657,23 +639,21 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(!orderId.isNullOrBlank() || !clientId.isNullOrBlank()) {
             "modify_order needs an orderId or a clientId"
         }
-        // Docs: qty is required ("Amount (base coin)").
-        require(qty != null) { "modify_order needs a qty" }
-        val body = JSONObject()
-        if (orderId != null) body.put("orderId", orderId)
-        if (clientId != null) body.put("clientId", clientId)
-        if (symbol != null) body.put("symbol", symbol)
-        body.put("qty", qty) // required by the docs, so it is never null here
-        if (price != null) body.put("price", price)
-        if (tpPrice != null) body.put("tpPrice", tpPrice)
-        if (tpStopType != null) body.put("tpStopType", tpStopType)
-        if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
-        if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
-        if (slPrice != null) body.put("slPrice", slPrice)
-        if (slStopType != null) body.put("slStopType", slStopType)
-        if (slOrderType != null) body.put("slOrderType", slOrderType)
-        if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
-        return signedPost("/api/v1/futures/trade/modify_order", body)
+        require(qty != null && price != null) { "modify_order needs a qty and a price" }
+        return signedPost("/api/v1/futures/trade/modify_order", modifyOrderBody(
+            orderId = orderId,
+            clientId = clientId,
+            qty = qty,
+            price = price,
+            tpPrice = tpPrice,
+            tpStopType = tpStopType,
+            tpOrderType = tpOrderType,
+            tpOrderPrice = tpOrderPrice,
+            slPrice = slPrice,
+            slStopType = slStopType,
+            slOrderType = slOrderType,
+            slOrderPrice = slOrderPrice,
+        ))
     }
 
     // ---- TP/SL ----
@@ -853,11 +833,10 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         return dataArray(signedGet("/api/v1/futures/tpsl/get_history_orders", q))
     }
 
-    /** Market-closes one position by id. Docs list positionId only; `marginCoin`
-     *  is sent per project rule. */
-    fun flashClose(positionId: String, marginCoin: String = "USDT"): JSONObject =
+    /** Market-closes one position by id. */
+    fun flashClose(positionId: String): JSONObject =
         dataObject(signedPost("/api/v1/futures/trade/flash_close_position", JSONObject()
-            .put("positionId", positionId).put("marginCoin", marginCoin)))
+            .put("positionId", positionId)))
 
     /** Market-closes everything. `symbol` is optional per the docs — omitted when blank. */
     fun closeAllPositions(symbol: String = ""): JSONObject {
@@ -896,9 +875,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         /** Depth gears the endpoint accepts ("1", "5", "15", "50", "max"). */
         val DEPTH_LIMITS = listOf("1", "5", "15", "50", "max")
 
-        /** Kline intervals the docs list (3m is live-verified but undocumented). */
+        /** REST kline intervals listed in the official docs. */
         val KLINE_INTERVALS = listOf(
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
+            "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
             "1d", "3d", "1w", "1M",
         )
 
@@ -991,6 +970,36 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             if (subAccountId != null) put("subAccountId", subAccountId.toString())
         }
 
+        fun modifyOrderBody(
+            orderId: String? = null,
+            clientId: String? = null,
+            qty: String,
+            price: String,
+            tpPrice: String? = null,
+            tpStopType: String? = null,
+            tpOrderType: String? = null,
+            tpOrderPrice: String? = null,
+            slPrice: String? = null,
+            slStopType: String? = null,
+            slOrderType: String? = null,
+            slOrderPrice: String? = null,
+        ): JSONObject {
+            val body = JSONObject()
+            if (orderId != null) body.put("orderId", orderId)
+            if (clientId != null) body.put("clientId", clientId)
+            body.put("qty", qty)
+            body.put("price", price)
+            if (tpPrice != null) body.put("tpPrice", tpPrice)
+            if (tpStopType != null) body.put("tpStopType", tpStopType)
+            if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
+            if (tpOrderPrice != null) body.put("tpOrderPrice", tpOrderPrice)
+            if (slPrice != null) body.put("slPrice", slPrice)
+            if (slStopType != null) body.put("slStopType", slStopType)
+            if (slOrderType != null) body.put("slOrderType", slOrderType)
+            if (slOrderPrice != null) body.put("slOrderPrice", slOrderPrice)
+            return body
+        }
+
         /** Documented Place-Order body — every documented field, nothing invented. */
         fun placeOrderBody(
             symbol: String,
@@ -1045,7 +1054,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         fun cancelOrdersBody(
             symbol: String,
             refs: List<OrderRef>,
-            marginCoin: String = "USDT",
         ): JSONObject {
             require(refs.isNotEmpty()) { "cancel_orders needs at least one order reference" }
             require(refs.size <= 20) { "cancel_orders accepts at most 20 orders (got ${refs.size})" } // live-verified exchange limit
@@ -1061,7 +1069,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             }
             return JSONObject()
                 .put("symbol", symbol)
-                .put("marginCoin", marginCoin) // not in the docs; sent per project rule
                 .put("orderList", list)
         }
 

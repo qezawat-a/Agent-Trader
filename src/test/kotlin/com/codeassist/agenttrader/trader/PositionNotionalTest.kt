@@ -41,11 +41,11 @@ class PositionNotionalTest {
     }
 
     @Test
-    fun notional_falls_back_to_holdqty_like_posqty_does() {
+    fun notional_is_null_when_only_undocumented_qty_fields_are_present() {
         val p = JSONObject()
             .put("symbol", "BTCUSDT").put("positionId", "1")
             .put("holdQty", "0.5").put("avgOpenPrice", "100")
-        assertEquals(50.0, posNotional(p)!!, 1e-9)
+        assertNull(posNotional(p))
     }
 
     @Test

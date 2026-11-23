@@ -108,10 +108,10 @@ class PositionMathTest {
     }
 
     @Test
-    fun legacy_field_names_are_accepted_as_fallbacks() {
+    fun undocumented_field_names_are_ignored() {
         val legacy = org.json.JSONObject("""{"holdQty":"2","entryPrice":"10"}""")
-        assertEquals("2", posQty(legacy))
-        assertEquals("10", posEntry(legacy))
+        assertEquals("", posQty(legacy))
+        assertEquals("", posEntry(legacy))
     }
 
     @Test

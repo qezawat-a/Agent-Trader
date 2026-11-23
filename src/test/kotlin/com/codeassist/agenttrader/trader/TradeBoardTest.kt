@@ -46,9 +46,9 @@ class TradeBoardTest {
     }
 
     @Test
-    fun legacy_entry_field_is_accepted() {
+    fun undocumented_entry_field_is_ignored() {
         val p = parseBoardPosition(JSONObject("""{"symbol":"X","qty":"2","entryPrice":"10","side":"BUY"}"""))
-        assertEquals(10.0, p.entry, 1e-9)
+        assertEquals(0.0, p.entry, 1e-9)
         assertEquals("LONG", p.side)
     }
 
@@ -64,6 +64,12 @@ class TradeBoardTest {
         assertEquals(59_000.0, rows[0].price, 1e-9)
         assertTrue(rows.any { it.kind == "TP" && it.price == 62_000.0 })
         assertTrue(rows.any { it.kind == "SL" && it.price == 58_000.0 })
+        val tp = rows.first { it.kind == "TP" }
+        val sl = rows.first { it.kind == "SL" }
+        assertEquals(0.25, tp.qty, 1e-9)
+        assertEquals(0.5, sl.qty, 1e-9)
+        assertEquals("—", tp.side)
+        assertEquals("", tp.status)
     }
 
     @Test
