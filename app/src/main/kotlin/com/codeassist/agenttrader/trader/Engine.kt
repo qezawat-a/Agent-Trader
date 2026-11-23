@@ -1004,6 +1004,20 @@ class TraderEngine(private val rest: BitunixRest) {
         BigDecimalFormat.format(price, quotePrecision ?: 1)
 
     /**
+     * A stop-loss trigger is formatted to the symbol's precision but biased to the
+     * safe side of the entry: DOWN for a long, UP for a short. Bitunix rejects an
+     * SL on the losing side of the average entry price (30009/30010), and the
+     * plain [formatPrice] always floors — which would turn a short's breakeven
+     * stop into a price BELOW its entry.
+     */
+    internal fun formatSlPrice(symbol: String, price: Double, dir: Int): String =
+        formatSlPrice(price, dir, pairInfo(symbol)?.quotePrecision ?: 1)
+
+    internal fun formatSlPrice(price: Double, dir: Int, quotePrecision: Int): String =
+        if (dir > 0) BigDecimalFormat.format(price, quotePrecision)
+        else BigDecimalFormat.formatUp(price, quotePrecision)
+
+    /**
      * Highest leverage the slider may offer. Bitunix does not publish a single
      * account-wide maximum in the docs — the authority is the per-symbol
      * maxLeverage from trading_pairs (verified live: BTCUSDT/ETHUSDT = 200x,
@@ -1781,12 +1795,6 @@ class TraderEngine(private val rest: BitunixRest) {
                 else -> continue
             }
             val lev = p.optString("leverage").toIntOrNull()?.takeIf { it > 0 } ?: effectiveLeverage(sym)
-            // This symbol's maintenance margin rate — the official liquidation
-            // price is Entry × (1 − 1/Leverage + MMR). The tiered risk limit is
-            // keyed on the position's actual value, so use qty × entry, not
-            // price × leverage (that overstates the notional on high-priced
-            // symbols and understates it on low-priced/high-qty ones).
-            val mmr = posNotional(p)?.let { mmrFor(sym, it) } ?: TpSlPlanner.PAPER_SIMULATED_MMR
             val mark = wsMarketData(sym)?.optDouble("mp")?.takeIf { it > 0 && !it.isNaN() }
                 ?: runCatching { rest.markPrice(sym).optString("markPrice").toDoubleOrNull() }
                     .getOrNull()?.takeIf { it > 0 }
@@ -1802,18 +1810,17 @@ class TraderEngine(private val rest: BitunixRest) {
                     ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
             }
             // No exchange SL visible (never attached, rejected, or the query
-            // failed): fall back to the engine's OWN initial stop for this
-            // position. Without a baseline the trailing rule could never fire
-            // — that is exactly the "trailing did nothing" report.
-            if (curStop == null) {
-                curStop = TpSlPlanner.plan(entry, dir, lev, slPctForSignal(1.0) / 100.0, mmr).stop
-            }
+            // failed) is NOT a reason to invent one. The rules still fire from a
+            // null baseline; applyLiveSl then PLACES the one position TP/SL the
+            // docs allow instead of trying to modify an order that does not exist.
             if (curStop != null) liveLastStop[sym] = curStop else liveLastStop.remove(sym)
-            // Breakeven: SL to entry once ROI passes the level. The "done" flag
-            // is set only when the stop really moved — a rejected or failed move
-            // is retried on the next tick instead of being given up on.
+            // Breakeven: SL to entry once ROI passes the level. Once the rule has
+            // fired successfully it must stop being considered, or a stop stored
+            // below entry by price rounding keeps re-triggering it on every tick
+            // and the `continue` below starves trailing forever.
             val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
-            val be = breakevenStopFor(dir, entry, best, lev, curStop, risk)
+            val be = if (liveBreakevenDone[sym] == true) null
+            else breakevenStopFor(dir, entry, best, lev, curStop, risk)
             if (be != null) {
                 if (applyLiveSl(sym, positionId, be, dir, mark, "Breakeven", bestRoi, events)) {
                     liveBreakevenDone[sym] = true
@@ -1862,19 +1869,32 @@ class TraderEngine(private val rest: BitunixRest) {
         // a pullback. Bitunix rejects that (30023) on every retry — skip quietly,
         // keep the existing stop and try again when price comes back.
         if (!slTriggerValid(dir, sl, mark)) return false
+        // Compare the exchange's answer with the price we actually SENT. The old
+        // check compared the raw double with a 0.005 tolerance: every symbol with
+        // a 0.01+ tick then looked like a rejected move, so the rule retried
+        // forever and trailing was never reached.
+        val slText = formatSlPrice(sym, sl, dir)
+        val requested = slText.toDoubleOrNull() ?: return false
         return try {
-            rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
-            // The endpoint returns success even when the exchange keeps the old SL
-            // (the new price is not a real improvement, or the SL is rejected).
-            // Verify before marking the rule done, or the SL stays static and
-            // breakeven/trailing never fire again.
+            val pending = runCatching { rest.pendingTpSlOrders(sym, positionId) }.getOrNull()
+            val knownSl = pending?.let { findSlPrice(it) } ?: liveLastStop[sym]
+            // The docs allow ONE position-level TP/SL per position. Modify it when
+            // it exists; place one when the entry never carried an SL (a manual
+            // entry with `set sl 0` has nothing to modify).
+            if (knownSl != null) rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = slText)
+            else rest.placePositionTpSl(sym, positionId, tpPrice = null, slPrice = slText)
             val applied = runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
-            if (applied != null && applied > 0 && kotlin.math.abs(applied - sl) > 0.005) {
-                events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
+                ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
+            if (applied == null) {
+                events.add("Risk manager: no SL on $sym after the move — retrying")
                 return false
             }
-            liveLastStop[sym] = sl
-            events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
+            if (kotlin.math.abs(applied - requested) > priceTolerance(slText)) {
+                events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(requested)}, retrying")
+                return false
+            }
+            liveLastStop[sym] = requested
+            events.add("SL moved to ${fmt(requested)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
             true
         } catch (e: Exception) {
             events.add("Risk manager: SL move on $sym failed — ${e.message ?: e.javaClass.simpleName}")
@@ -1986,7 +2006,10 @@ class TraderEngine(private val rest: BitunixRest) {
                 // keep working on OPEN positions even when new entries are switched
                 // off: "stop trading" stops entries, it must not abandon the
                 // positions that are already running.
-                if (!trading && !engineOn && !hasOpenPositions()) return@scheduleWithFixedDelay
+                // LIVE positions are found by manageLiveStops() through REST, so
+                // the feed cache must not decide whether management runs. Only a
+                // flat PAPER book can safely skip a tick.
+                if (!live && !trading && !engineOn && !hasOpenPositions()) return@scheduleWithFixedDelay
                 val events = tick() + if (trading) scanOnce() else emptyList()
                 // A successful poll means the exchange is reachable again, so a
                 // stale DNS failure must not keep showing in /diagnose. The
@@ -2228,7 +2251,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val o = arr.getJSONObject(i)
                         "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
-                            "qty ${o.optString("qty")} ${o.optString("status")}"
+                            "id ${o.optString("id")} qty ${o.optString("qty")} ${o.optString("status")}"
                     }
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
@@ -2649,6 +2672,19 @@ object BigDecimalFormat {
         .stripTrailingZeros()
         .toPlainString()
         .ifEmpty { "0" }
+
+    fun formatUp(value: Double, decimals: Int): String = java.math.BigDecimal.valueOf(value)
+        .setScale(decimals, java.math.RoundingMode.CEILING)
+        .stripTrailingZeros()
+        .toPlainString()
+        .ifEmpty { "0" }
+}
+
+/** One price tick at the precision of [text] — the tolerance for verifying a
+ * stop the exchange stored at the symbol's (floored/ceiled) price precision. */
+internal fun priceTolerance(text: String): Double {
+    val decimals = text.substringAfter('.', "").length
+    return if (decimals == 0) 1.0 else Math.pow(10.0, -decimals.toDouble()) + 1e-9
 }
 
 /**

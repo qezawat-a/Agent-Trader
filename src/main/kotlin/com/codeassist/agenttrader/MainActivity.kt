@@ -176,13 +176,13 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             // old backup carries no flag: a non-zero value was chosen by the
             // user, a zero one falls back to the engine default.
             if (config.breakevenSet || config.breakevenRoiPct > 0) {
-                risk = risk.copy(breakevenRoiPct = config.breakevenRoiPct.toDouble())
+                risk = risk.copy(breakevenRoiPct = config.breakevenRoiPct)
             }
             if (config.trailTriggerSet || config.trailTriggerRoiPct > 0) {
-                risk = risk.copy(trailingTriggerRoiPct = config.trailTriggerRoiPct.toDouble())
+                risk = risk.copy(trailingTriggerRoiPct = config.trailTriggerRoiPct)
             }
             if (config.trailDistanceSet || config.trailDistanceRoiPct > 0) {
-                risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct.toDouble())
+                risk = risk.copy(trailDistanceRoiPct = config.trailDistanceRoiPct)
             }
             if (config.slPct > 0) {
                 risk = risk.copy(slPct = config.slPct.toDouble())
@@ -295,9 +295,9 @@ fun AgentApp(
         config.minTfConfidence = engine.minTfConfidence.toInt()
         config.minConfidence = engine.minConfidence.toInt()
         config.minSideTfs = if (engine.minSideTfs == Int.MAX_VALUE) 0 else engine.minSideTfs
-        config.breakevenRoiPct = engine.risk.breakevenRoiPct.toInt()
-        config.trailTriggerRoiPct = engine.risk.trailingTriggerRoiPct.toInt()
-        config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct.toInt()
+        config.breakevenRoiPct = engine.risk.breakevenRoiPct
+        config.trailTriggerRoiPct = engine.risk.trailingTriggerRoiPct
+        config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct
         config.slPct = engine.risk.slPct.toInt()
         config.tpR = engine.tpR.toFloat()
         config.autoUniverse = engine.autoUniverse

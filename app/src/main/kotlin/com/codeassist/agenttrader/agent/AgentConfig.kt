@@ -6,6 +6,17 @@ import android.content.Context
 class AgentConfig(context: Context) {
     private val prefs = context.getSharedPreferences("agent_config", Context.MODE_PRIVATE)
 
+    /** Reads a Float setting written by the current build or an Int from an older one. */
+    private fun storedPercent(key: String): Double = try {
+        prefs.getFloat(key, 0f).toDouble()
+    } catch (_: ClassCastException) {
+        prefs.getInt(key, 0).toDouble()
+    }
+
+    private fun storePercent(key: String, value: Double, chosenKey: String) {
+        prefs.edit().putFloat(key, value.toFloat()).putBoolean(chosenKey, true).apply()
+    }
+
     var baseUrl: String
         get() = prefs.getString("base_url", "") ?: ""
         set(value) = prefs.edit().putString("base_url", value.trim().trimEnd('/')).apply()
@@ -122,25 +133,25 @@ class AgentConfig(context: Context) {
      * Zero is a real setting ("off"), not "unset". [breakevenSet] tells the two
      * apart, otherwise turning it off reverted to the engine default on restart.
      */
-    var breakevenRoiPct: Int
-        get() = prefs.getInt("breakeven_roi", 0)
-        set(value) = prefs.edit().putInt("breakeven_roi", value).putBoolean("breakeven_roi_set", true).apply()
+    var breakevenRoiPct: Double
+        get() = storedPercent("breakeven_roi")
+        set(value) = storePercent("breakeven_roi", value, "breakeven_roi_set")
 
     val breakevenSet: Boolean
         get() = prefs.getBoolean("breakeven_roi_set", false)
 
     /** Trailing trigger ROI % (0 = off). */
-    var trailTriggerRoiPct: Int
-        get() = prefs.getInt("trail_trigger", 0)
-        set(value) = prefs.edit().putInt("trail_trigger", value).putBoolean("trail_trigger_set", true).apply()
+    var trailTriggerRoiPct: Double
+        get() = storedPercent("trail_trigger")
+        set(value) = storePercent("trail_trigger", value, "trail_trigger_set")
 
     val trailTriggerSet: Boolean
         get() = prefs.getBoolean("trail_trigger_set", false)
 
     /** Trailing distance behind best ROI %. */
-    var trailDistanceRoiPct: Int
-        get() = prefs.getInt("trail_distance", 0)
-        set(value) = prefs.edit().putInt("trail_distance", value).putBoolean("trail_distance_set", true).apply()
+    var trailDistanceRoiPct: Double
+        get() = storedPercent("trail_distance")
+        set(value) = storePercent("trail_distance", value, "trail_distance_set")
 
     val trailDistanceSet: Boolean
         get() = prefs.getBoolean("trail_distance_set", false)
@@ -263,9 +274,9 @@ class AgentConfig(context: Context) {
         // Old backups carry the values but no "chosen" flag. A non-zero value can
         // only have come from the engine, so it was chosen; an explicit 0 without
         // the flag is the pre-v2.6 default and must keep the engine default.
-        restoreChosen(int("breakeven_roi"), bool("breakeven_roi_set")) { breakevenRoiPct = it }
-        restoreChosen(int("trail_trigger"), bool("trail_trigger_set")) { trailTriggerRoiPct = it }
-        restoreChosen(int("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
+        restoreChosen(num("breakeven_roi"), bool("breakeven_roi_set")) { breakevenRoiPct = it }
+        restoreChosen(num("trail_trigger"), bool("trail_trigger_set")) { trailTriggerRoiPct = it }
+        restoreChosen(num("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
         int("sl_pct")?.let { slPct = it }
         num("tp_r")?.let { tpR = it.toFloat() }
         bool("auto_universe")?.let { autoUniverse = it }
@@ -297,4 +308,9 @@ class AgentConfig(context: Context) {
 private fun restoreChosen(value: Int?, chosen: Boolean?, apply: (Int) -> Unit) {
     if (value == null) return
     if (chosen == true || (chosen == null && value != 0)) apply(value)
+}
+
+private fun restoreChosen(value: Double?, chosen: Boolean?, apply: (Double) -> Unit) {
+    if (value == null) return
+    if (chosen == true || (chosen == null && value != 0.0)) apply(value)
 }

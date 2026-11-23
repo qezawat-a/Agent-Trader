@@ -134,4 +134,27 @@ class StopRulesTest {
         assertEquals(100, lev)
         assertNull(note)
     }
+
+    // ---- the live move/verify path ----
+
+    @Test
+    fun verification_tolerance_uses_the_precision_actually_sent() {
+        // 0.005 rejected every floored stop on a 0.1-tick symbol; the exchange
+        // stores 100.2 and the raw candidate was 100.237.
+        assertEquals(0.1, priceTolerance("100.2"), 1e-9)
+        assertEquals(0.001, priceTolerance("100.234"), 1e-9)
+        assertEquals(1.0, priceTolerance("100"), 1e-9)
+        assertTrue(kotlin.math.abs(100.2 - 100.237) <= priceTolerance("100.2"))
+    }
+
+    @Test
+    fun stop_price_rounds_to_the_safe_side_of_entry() {
+        val e = engine()
+        // A long's stop may floor toward a loss; a short's must ceil, or a
+        // breakeven stop ends up BELOW its entry (Bitunix 30009).
+        assertEquals("100.1", e.formatSlPrice(100.137, 1, 1))
+        assertEquals("100.2", e.formatSlPrice(100.137, -1, 1))
+        assertEquals("0.06159", e.formatSlPrice(0.061598, 1, 5))
+        assertEquals("0.0616", e.formatSlPrice(0.061598, -1, 5))
+    }
 }
