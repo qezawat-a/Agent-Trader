@@ -244,7 +244,7 @@ fun CandleChartCard(
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
-    val intervals = listOf("5m", "15m", "1h", "4h", "1d")
+    val intervals = listOf("1m", "3m", "5m", "15m")
     var interval by remember { mutableStateOf("15m") }
     var lineMode by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
