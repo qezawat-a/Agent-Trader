@@ -144,7 +144,7 @@ fun CandleChart(
                 for (i in 1 until points.size) {
                     val prev = points[i - 1]
                     val cur = points[i]
-                    quadraticBezierTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
+                    quadraticTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
                 }
                 lineTo(points.last().x, points.last().y)
             }
@@ -182,7 +182,7 @@ fun CandleChart(
             style = TextStyle(color = Color(0xFF06121F), fontSize = 9.sp, fontWeight = FontWeight.Bold),
         )
 
-        val formatter = SimpleDateFormat(timePattern(interval), Locale.getDefault())
+        val formatter = SimpleDateFormat(timePattern(interval), Locale.ROOT)
         for (i in 0..3) {
             val idx = (n - 1) * i / 3
             val x = slot * (idx + 0.5f) - 20.dp.toPx()
@@ -307,7 +307,7 @@ fun CandleChartCard(
             if (candles.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 Text("Recent candles", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
-                val df = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                val df = SimpleDateFormat("MM-dd HH:mm", Locale.ROOT)
                 candles.takeLast(6).asReversed().forEach { c ->
                     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
                         Text(df.format(Date(c.time)), Modifier.weight(1.35f), fontSize = 10.sp, color = scheme.onSurfaceVariant)
