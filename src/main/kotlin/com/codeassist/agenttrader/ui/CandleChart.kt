@@ -41,7 +41,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.bitunix.Candle
-import com.codeassist.agenttrader.trader.BoardPosition
+import com.codeassist.agenttrader.trader.TradeBoard
 import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.util.fmt
 import com.codeassist.agenttrader.util.fmt2
@@ -60,11 +60,17 @@ private val LINE_BLUE = Color(0xFF42A5F5)
 /** Position levels to draw on top of the candles while a position is open. */
 data class ChartOverlay(
     val side: String,
+    val qty: Double,
+    val pnlPct: Double,
     val entry: Double,
     val stop: Double?,
     val liq: Double?,
     val tps: List<Pair<String, Double>>,
+    val otherOrders: List<Pair<String, Double>>,
 )
+
+private fun distancePct(entry: Double, level: Double): Double =
+    if (entry > 0.0) kotlin.math.abs((level - entry) / entry * 100.0) else 0.0
 
 private const val MAX_DRAWN_CANDLES = 80
 
@@ -190,12 +196,32 @@ fun CandleChart(
         // open, the way the Bitunix client marks entry / SL / TP / liquidation.
         if (overlay != null) {
             val dashed = PathEffect.dashPathEffect(floatArrayOf(10.dp.toPx(), 6.dp.toPx()), 0f)
-            val levels = ArrayList<Triple<String, Double, Color>>()
-            levels += Triple("E", overlay.entry, Color(0xFFFFC107))
-            overlay.stop?.let { if (it > 0.0) levels += Triple("SL", it, CANDLE_DOWN) }
-            overlay.liq?.let { if (it > 0.0) levels += Triple("LQ", it, Color(0xFFFF7043)) }
-            overlay.tps.forEach { (tag, price) -> if (price > 0.0) levels += Triple(tag, price, CANDLE_UP) }
-            levels.forEach { (tag, price, color) ->
+            val levels = ArrayList<Triple<String, Pair<Double, Color>>>()
+            val marker = if (overlay.side == "LONG") "B" else "S"
+            levels += Triple(
+                "$marker ${fmt(overlay.qty)}  ${if (overlay.pnlPct >= 0) "+" else ""}${fmt2(overlay.pnlPct)}%",
+                overlay.entry to Color(0xFFFFC107),
+            )
+            overlay.stop?.let { price ->
+                if (price > 0.0) levels += Triple(
+                    "SL +${fmt2(distancePct(overlay.entry, price))}%",
+                    price to CANDLE_DOWN,
+                )
+            }
+            overlay.tps.forEach { (tag, price) ->
+                if (price > 0.0) levels += Triple(
+                    "$tag +${fmt2(distancePct(overlay.entry, price))}%",
+                    price to CANDLE_UP,
+                )
+            }
+            overlay.liq?.let { price ->
+                if (price > 0.0) levels += Triple("LQ ${fmt2(price)}", price to Color(0xFFFF7043))
+            }
+            overlay.otherOrders.forEach { (tag, price) ->
+                if (price > 0.0) levels += Triple("$tag ${fmt2(price)}", price to LINE_BLUE)
+            }
+            levels.forEach { (text, level) ->
+                val (price, color) = level
                 if (price in minPrice..maxPrice) {
                     val y = yOf(price)
                     drawLine(
@@ -204,12 +230,12 @@ fun CandleChart(
                         strokeWidth = 1.2.dp.toPx(),
                         pathEffect = dashed,
                     )
-                    drawRect(color, topLeft = Offset(0f, y - 8.dp.toPx()), size = Size(22.dp.toPx(), 16.dp.toPx()))
-                    drawText(
-                        measurer, tag,
-                        topLeft = Offset(3.dp.toPx(), y - 6.dp.toPx()),
-                        style = TextStyle(color = Color(0xFF06121F), fontSize = 8.sp, fontWeight = FontWeight.Bold),
+                    val labelStyle = TextStyle(
+                        color = Color(0xFF06121F), fontSize = 8.sp, fontWeight = FontWeight.Bold,
                     )
+                    val pillW = measurer.measure(text, labelStyle).size.width + 10.dp.toPx()
+                    drawRect(color, topLeft = Offset(0f, y - 8.dp.toPx()), size = Size(pillW, 16.dp.toPx()))
+                    drawText(measurer, text, topLeft = Offset(4.dp.toPx(), y - 6.dp.toPx()), style = labelStyle)
                 }
             }
         }
@@ -249,27 +275,37 @@ fun CandleChartCard(
     var lineMode by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
     var candles by remember { mutableStateOf<List<Candle>>(emptyList()) }
-    var position by remember { mutableStateOf<BoardPosition?>(null) }
+    var board by remember { mutableStateOf(TradeBoard(emptyList(), emptyList())) }
+    var activeSymbol by remember { mutableStateOf(symbol.trim().uppercase(Locale.ROOT)) }
+    var lastPositionSymbols by remember { mutableStateOf<Set<String>>(emptySet()) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf("") }
 
-    val sym = symbol.trim().uppercase(Locale.ROOT)
+    val typedSymbol = symbol.trim().uppercase(Locale.ROOT)
+    val activePosition = board.positions.firstOrNull { it.symbol.equals(activeSymbol, ignoreCase = true) }
 
-    // The chart is always visible; position levels appear on it only when a
-    // position for this symbol is actually open.
-    LaunchedEffect(engine, sym) {
+    // One authoritative read from the engine. Whenever a position is open the
+    // chart follows that symbol automatically; otherwise it follows Quick trade.
+    LaunchedEffect(engine, typedSymbol) {
         while (true) {
             val result = withContext(Dispatchers.IO) { runCatching { engine.tradeBoard() } }
-            result.onSuccess { board ->
-                position = board.positions.firstOrNull { it.symbol.equals(sym, ignoreCase = true) }
+            result.onSuccess { fresh ->
+                board = fresh
+                val symbols = fresh.positions.map { it.symbol.uppercase(Locale.ROOT) }.toSet()
+                if (symbols != lastPositionSymbols) {
+                    lastPositionSymbols = symbols
+                    activeSymbol = symbols.firstOrNull() ?: typedSymbol
+                } else if (symbols.isEmpty()) {
+                    activeSymbol = typedSymbol
+                }
             }
-            delay(5_000)
+            delay(4_000)
         }
     }
 
     // Debounced: typing a symbol one letter at a time must not spam the API.
-    LaunchedEffect(sym, interval, refreshKey) {
-        if (sym.isBlank()) {
+    LaunchedEffect(activeSymbol, interval, refreshKey) {
+        if (activeSymbol.isBlank()) {
             candles = emptyList()
             error = "Enter a symbol above."
             loading = false
@@ -278,11 +314,11 @@ fun CandleChartCard(
         loading = true
         delay(300)
         val result = withContext(Dispatchers.IO) {
-            runCatching { engine.chartCandles(sym, interval, 120) }
+            runCatching { engine.chartCandles(activeSymbol, interval, 120) }
         }
         result.onSuccess { rows ->
             candles = rows
-            error = if (rows.isEmpty()) "No candles for $sym ($interval)." else ""
+            error = if (rows.isEmpty()) "No candles for $activeSymbol ($interval)." else ""
         }.onFailure { e ->
             candles = emptyList()
             error = e.message?.take(140) ?: e.javaClass.simpleName
@@ -307,10 +343,27 @@ fun CandleChartCard(
                 )
             }
             Text(
-                "$sym  ·  $interval  ·  closed candles",
+                "$activeSymbol  ·  $interval  ·  closed candles",
                 style = MaterialTheme.typography.labelSmall,
                 color = scheme.onSurfaceVariant,
             )
+
+            // Every symbol with an open position gets a chip. The first one is
+            // selected automatically by the engine poll above.
+            if (board.positions.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                LazyRow {
+                    items(board.positions) { p ->
+                        val ps = p.symbol.uppercase(Locale.ROOT)
+                        FilterChip(
+                            selected = activeSymbol == ps,
+                            onClick = { activeSymbol = ps },
+                            label = { Text(ps, fontSize = 11.sp) },
+                        )
+                        Spacer(Modifier.width(6.dp))
+                    }
+                }
+            }
 
             Spacer(Modifier.height(6.dp))
             LazyRow {
@@ -354,7 +407,7 @@ fun CandleChartCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = scheme.onSurfaceVariant,
                 )
-                val openPosition = position
+                val openPosition = activePosition
                 if (openPosition != null) {
                     Spacer(Modifier.height(2.dp))
                     Text(
@@ -364,6 +417,7 @@ fun CandleChartCard(
                             openPosition.stop?.let { append("  SL ").append(fmt2(it)) }
                             append("  liq ").append(openPosition.liq?.let { fmt2(it) } ?: "—")
                             append("  PnL ").append(fmt2(openPosition.pnl))
+                            append("  ").append(fmt2(openPosition.pnlPct)).append("%")
                         },
                         style = MaterialTheme.typography.labelSmall,
                         color = if (openPosition.pnl >= 0.0) CANDLE_UP else CANDLE_DOWN,
@@ -376,10 +430,16 @@ fun CandleChartCard(
                     overlay = openPosition?.let { p ->
                         ChartOverlay(
                             side = p.side,
+                            qty = p.qty,
+                            pnlPct = p.pnlPct,
                             entry = p.entry,
                             stop = p.stop,
                             liq = p.liq,
                             tps = p.tps.map { it.label to it.price },
+                            otherOrders = board.orders
+                                .filter { it.symbol.equals(p.symbol, ignoreCase = true) }
+                                .filter { it.kind.uppercase(Locale.ROOT) !in setOf("TP", "SL") }
+                                .map { it.kind to it.price },
                         )
                     },
                 )
@@ -392,7 +452,7 @@ fun CandleChartCard(
                 )
             } else {
                 Text(
-                    "Loading $sym $interval candles…",
+                    "Loading $activeSymbol $interval candles…",
                     Modifier.padding(vertical = 20.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = scheme.onSurfaceVariant,
