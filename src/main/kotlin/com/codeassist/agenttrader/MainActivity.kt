@@ -305,6 +305,13 @@ fun AgentApp(
         config.autoRankBy = engine.autoRankBy
     }
 
+    /** Adds one bubble and keeps the saved thread in sync with it. */
+    fun addMsg(msg: ChatMsg) {
+        messages.add(msg)
+        if (messages.size > ChatThread.MAX_THREAD) messages.removeAt(0)
+        config.chatThread = ChatThread.toJson(messages)
+    }
+
     fun say(text: String) {
         post(object : Runnable {
             override fun run() {
@@ -791,13 +798,6 @@ fun AgentApp(
 
     DisposableEffect(engine) {
         onDispose { engine.stopLiveFeed() }
-    }
-
-    /** Adds one bubble and keeps the saved thread in sync with it. */
-    fun addMsg(msg: ChatMsg) {
-        messages.add(msg)
-        if (messages.size > ChatThread.MAX_THREAD) messages.removeAt(0)
-        config.chatThread = ChatThread.toJson(messages)
     }
 
     /**
