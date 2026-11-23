@@ -64,12 +64,27 @@ object SignalAggregator {
         }
 
     /**
+     * A side's confidence: the sum of its strong votes (≥ the per-timeframe
+     * gate) divided by [need] — the number of agreeing timeframes the trade
+     * requires.
+     *
+     * At the minimum (`strong.size == need`) this is the plain average of the
+     * strong votes; every extra agreeing voter above the minimum lifts the
+     * value, and the whole scale is capped at 100. The 0–100 range is
+     * therefore reachable: a modest consensus shows the average (60–80), a
+     * decisive one shows 80–100.
+     */
+    internal fun sideConfidence(strong: List<Double>, need: Int): Double =
+        if (strong.isEmpty() || need <= 0) 0.0 else (strong.sum() / need).coerceIn(0.0, 100.0)
+
+    /**
      * Aggregates already-cast votes into one timeframe decision.
      *
      * The gate counts DISTINCT ORIGINS, not strategies: a hammer and a
      * "hammer oversold bounce" are one market view, so together they must not
      * satisfy MIN_AGREEING on their own. Abstentions (dir 0) belong to no side
-     * and never count. The confidence stays the average over the side's votes.
+     * and never count. The confidence is the side's confidence over the strong
+     * votes (see [sideConfidence]).
      */
     fun evaluateVotes(timeframe: String, all: List<StrategyVote>): TfEvaluation {
         var best = TfEvaluation(timeframe, 0, 0.0, 0, all)
@@ -77,7 +92,9 @@ object SignalAggregator {
             val mine = all.filter { it.dir == dir }
             val origins = mine.map { it.origin }.distinct()
             if (origins.size < MIN_AGREEING) continue
-            val conf = mine.map { it.confidence.toDouble() }.average()
+            val strong = mine.filter { it.confidence >= TIMEFRAME_CONFIDENCE }
+            if (strong.isEmpty()) continue
+            val conf = sideConfidence(strong.map { it.confidence.toDouble() }, MIN_AGREEING)
             if (conf > best.confidence) best = TfEvaluation(timeframe, dir, conf, origins.size, all)
         }
         return best
@@ -146,12 +163,12 @@ object SignalAggregator {
                                 strong.size < need ->
                                     "${weak.joinToString { it.timeframe }} below the ${gates.minTfConfidence.toInt()}% timeframe gate"
                                 else -> {
-                                    val avg = strong.map { it.confidence }.average()
-                                    if (avg < gates.minConfidence) {
-                                        "combined confidence ${fmt0(avg)}% is below ${gates.minConfidence.toInt()}%"
+                                    val conf = sideConfidence(strong.map { it.confidence.toDouble() }, need)
+                                    if (conf < gates.minConfidence) {
+                                        "combined confidence ${fmt0(conf)}% is below ${gates.minConfidence.toInt()}%"
                                     } else {
                                         dir = side
-                                        confidence = avg
+                                        confidence = conf
                                         null
                                     }
                                 }
@@ -197,7 +214,7 @@ object SignalAggregator {
         val dir = if (qualifying.size == 1) qualifying[0].key else return null
         val strong = sigs.withIndex().filter { (_, s) -> s.dir == dir && s.confidence >= gates.minTfConfidence }
         if (strong.size < need) return null
-        val conf = strong.map { it.value.confidence }.average()
+        val conf = sideConfidence(strong.map { it.value.confidence.toDouble() }, need)
         if (conf < gates.minConfidence) return null
         return Signal(dir, conf, strong.map { gates.timeframes[it.index] })
     }

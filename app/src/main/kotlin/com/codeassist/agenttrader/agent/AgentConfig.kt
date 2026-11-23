@@ -23,6 +23,11 @@ class AgentConfig(context: Context) {
         get() = prefs.getString("last_plan", "") ?: ""
         set(value) = prefs.edit().putString("last_plan", value.trim()).apply()
 
+    /** Saved chat thread as flat JSON (see ChatThread); restored on launch. */
+    var chatThread: String
+        get() = prefs.getString("chat_thread", "") ?: ""
+        set(value) = prefs.edit().putString("chat_thread", value).apply()
+
     var soul: String
         get() = prefs.getString("soul", DEFAULT_SOUL) ?: DEFAULT_SOUL
         set(value) = prefs.edit().putString("soul", value).apply()

@@ -135,7 +135,14 @@ class ModelClient(private val baseUrl: String, private val apiKey: String) {
         val msg = choices.getJSONObject(0).optJSONObject("message") ?: JSONObject()
         // Content only. A blank answer stays blank so the caller can report an
         // empty response instead of leaking the private reasoning trace.
-        return msg.optString("content", "").trim()
+        // A JSON-null content (reasoning-only replies) is read as "" —
+        // Android's optString returns the literal string "null" for it, and the
+        // user then sees "null" as the whole answer.
+        return when (val content = msg.opt("content")) {
+            null, JSONObject.NULL -> ""
+            is String -> content.trim()
+            else -> content.toString().trim()
+        }
     }
 
     /** Appends /v1 when the URL has no version segment (v1, v1beta, v2, openai...). */

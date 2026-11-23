@@ -132,8 +132,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private data class ChatMsg(val text: String, val isUser: Boolean, val time: String)
-
 /** What the app can do — injected into the brain so it can guide the user accurately. */
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
@@ -211,7 +209,15 @@ fun AgentApp(
     onEngineRecreate: () -> Unit,
 ) {
     val appContext = LocalContext.current
-    val messages = remember { mutableStateListOf(ChatMsg("Agent Trader ready. Tap a quick action or type /help.", false, now())) }
+    val messages = remember {
+        mutableStateListOf<ChatMsg>().apply {
+            // Android kills the process of an app left in the background after
+            // a while; the thread in prefs is what comes back when the app is
+            // opened again, so nothing "starts over" while it is still there.
+            addAll(ChatThread.fromJson(config.chatThread))
+            if (isEmpty()) add(ChatMsg("Agent Trader ready. Tap a quick action or type /help.", false, now()))
+        }
+    }
     var input by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var screen by remember { mutableStateOf(AppScreen.CHAT) }
@@ -303,7 +309,7 @@ fun AgentApp(
         post(object : Runnable {
             override fun run() {
                 runCatching { persistEngine() }
-                messages.add(ChatMsg(text, false, now()))
+                addMsg(ChatMsg(text, false, now()))
                 // Every bot line — engine event OR command response (manual open,
                 // close, etc.) — gets one chance to notify; notifiable() filters
                 // the chatter. Previously manual entries never notified because
@@ -787,10 +793,32 @@ fun AgentApp(
         onDispose { engine.stopLiveFeed() }
     }
 
+    /** Adds one bubble and keeps the saved thread in sync with it. */
+    fun addMsg(msg: ChatMsg) {
+        messages.add(msg)
+        if (messages.size > ChatThread.MAX_THREAD) messages.removeAt(0)
+        config.chatThread = ChatThread.toJson(messages)
+    }
+
+    /**
+     * The thread as (role, text) pairs the model can resume from, for
+     * [AgentSession.appendHistory]. The last message is the line the user just
+     * typed; [AgentSession.turn] adds it to the memory itself.
+     */
+    fun threadPairs(): List<Pair<String, String>> {
+        val out = mutableListOf<Pair<String, String>>()
+        messages.forEachIndexed { i, m ->
+            if (i == messages.lastIndex) return@forEachIndexed
+            if (m.isUser) out += "user" to m.text
+            else if (out.isNotEmpty()) out += "assistant" to m.text
+        }
+        return out.takeLast(AgentSession.HISTORY_WINDOW - 1)
+    }
+
     fun handle(line: String) {
         post(object : Runnable {
             override fun run() {
-                messages.add(ChatMsg(line, true, now()))
+                addMsg(ChatMsg(line, true, now()))
             }
         })
         keyboard?.hide()
@@ -804,7 +832,8 @@ fun AgentApp(
                     post(object : Runnable {
                         override fun run() {
                             messages.clear()
-                            messages.add(ChatMsg("Chat cleared. Memory reset.", false, now()))
+                            config.chatThread = ""
+                            addMsg(ChatMsg("Chat cleared. Memory reset.", false, now()))
                         }
                     })
                 }
@@ -1137,6 +1166,9 @@ fun AgentApp(
                         busy = false
                     }) {
                         session.beginSession(sessionKey())
+                        // Memory across restarts: replay the saved thread so the
+                        // model resumes it instead of starting from nothing.
+                        if (session.historySize() == 0) session.appendHistory(threadPairs())
                         val sys = AgentBrain.buildSystemPrompt(
                             soul = config.soul,
                             context = liveContext(moodSnapshot),

@@ -80,6 +80,11 @@ class AgentSession(
         }
     }
 
+    /** Appends restored [pairs] so a restarted process resumes the saved thread. */
+    fun appendHistory(pairs: List<Pair<String, String>>) {
+        history.addAll(pairs)
+    }
+
     fun clear() {
         history.clear()
     }
