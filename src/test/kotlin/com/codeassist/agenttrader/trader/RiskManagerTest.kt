@@ -318,4 +318,32 @@ class RiskManagerTest {
         assertTrue("breakeven" in text.lowercase(), text)
         assertTrue("60s" in text, text)
     }
+
+    // ---- SL trigger vs. mark (Bitunix error 30023) ----
+
+    @Test
+    fun long_sl_must_be_below_mark_and_short_sl_above() {
+        // The reported failure: BLESSUSDT LONG, mark 0.019512, a stop derived
+        // from the best price landed above mark and the exchange rejected it.
+        assertTrue(slTriggerValid(1, 0.0190, 0.019512))
+        assertTrue(!slTriggerValid(1, 0.0196, 0.019512)) // above mark → 30023
+        assertTrue(slTriggerValid(-1, 0.0200, 0.019512))
+        assertTrue(!slTriggerValid(-1, 0.0194, 0.019512)) // below mark → 30023
+    }
+
+    @Test
+    fun sl_trigger_keeps_a_small_gap_from_mark() {
+        // Equal to mark (or within the buffer) is rejected too — the mark moves
+        // between our snapshot and the exchange's check.
+        assertTrue(!slTriggerValid(1, 0.019512, 0.019512))
+        assertTrue(!slTriggerValid(1, 0.019500, 0.019512)) // within 0.1%
+        assertTrue(!slTriggerValid(-1, 0.019512, 0.019512))
+    }
+
+    @Test
+    fun sl_trigger_rejects_missing_or_invalid_prices() {
+        assertTrue(!slTriggerValid(1, 0.0, 0.019512))
+        assertTrue(!slTriggerValid(1, 0.0190, 0.0))
+        assertTrue(!slTriggerValid(1, Double.NaN, 0.019512))
+    }
 }

@@ -250,6 +250,26 @@ internal fun improvesStop(dir: Int, candidate: Double, current: Double): Boolean
     if (dir > 0) candidate > current else candidate < current
 
 /**
+ * Small gap so a mark that drifts between our snapshot and the exchange's check
+ * still accepts the trigger (Bitunix error 30023).
+ */
+private const val SL_TRIGGER_MARK_BUFFER = 0.001 // 0.1%
+
+/**
+ * Bitunix requires a LONG's SL trigger to sit strictly BELOW the mark price and
+ * a SHORT's strictly ABOVE it. Breakeven/trailing stops are derived from the
+ * BEST price reached, so after a pullback the candidate can end up on the wrong
+ * side of the current mark — sending that is always rejected (30023). Skipping
+ * it here keeps the existing stop in place and quietly retries next tick when
+ * price recovers, instead of spamming a failed move on every single tick.
+ */
+internal fun slTriggerValid(dir: Int, sl: Double, mark: Double): Boolean {
+    if (sl <= 0 || mark <= 0 || mark.isNaN() || sl.isNaN()) return false
+    return if (dir > 0) sl < mark * (1 - SL_TRIGGER_MARK_BUFFER)
+    else sl > mark * (1 + SL_TRIGGER_MARK_BUFFER)
+}
+
+/**
  * The breakeven stop for an open position, or null when the rule does not
  * apply yet / the stop in place is already tighter than entry.
  *
@@ -1795,7 +1815,7 @@ class TraderEngine(private val rest: BitunixRest) {
             val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
             val be = breakevenStopFor(dir, entry, best, lev, curStop, risk)
             if (be != null) {
-                if (applyLiveSl(sym, positionId, be, "Breakeven", bestRoi, events)) {
+                if (applyLiveSl(sym, positionId, be, dir, mark, "Breakeven", bestRoi, events)) {
                     liveBreakevenDone[sym] = true
                 }
                 continue
@@ -1811,7 +1831,7 @@ class TraderEngine(private val rest: BitunixRest) {
             // Trailing: fires on the BEST price reached (not the current price),
             // so a pullback does not stop the stop from following the position.
             trailingStopFor(dir, entry, best, lev, curStop, risk)?.let { trail ->
-                applyLiveSl(sym, positionId, trail, "Trailing", bestRoi, events)
+                applyLiveSl(sym, positionId, trail, dir, mark, "Trailing", bestRoi, events)
             }
         }
         // Forget state for positions that closed (collect first, then remove —
@@ -1835,9 +1855,13 @@ class TraderEngine(private val rest: BitunixRest) {
      * marks itself done on success, so a rejected move is retried next tick.
      */
     private fun applyLiveSl(
-        sym: String, positionId: String, sl: Double, reason: String, roi: Double,
-        events: MutableList<String>,
+        sym: String, positionId: String, sl: Double, dir: Int, mark: Double,
+        reason: String, roi: Double, events: MutableList<String>,
     ): Boolean {
+        // A stop derived from the best price can be above the current mark after
+        // a pullback. Bitunix rejects that (30023) on every retry — skip quietly,
+        // keep the existing stop and try again when price comes back.
+        if (!slTriggerValid(dir, sl, mark)) return false
         return try {
             rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
             // The endpoint returns success even when the exchange keeps the old SL
