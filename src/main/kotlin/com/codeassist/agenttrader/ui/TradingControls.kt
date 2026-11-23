@@ -618,6 +618,12 @@ fun TradeScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
     ) {
         item {
+            // K-line chart never fetched on the UI thread and follows the
+            // symbol typed in Quick trade below.
+            CandleChartCard(engine = engine, symbol = symbol)
+        }
+
+        item {
             Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
                 Column(Modifier.padding(14.dp)) {
                     Text("Quick trade", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)

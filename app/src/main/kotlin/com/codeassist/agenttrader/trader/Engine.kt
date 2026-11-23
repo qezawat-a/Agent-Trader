@@ -772,6 +772,10 @@ class TraderEngine(private val rest: BitunixRest) {
 
     private fun candles(symbol: String, tf: String): List<Candle> = rest.klines(symbol, tf, 200)
 
+    /** Closed klines for the Trade-screen chart. Callers must use a background thread. */
+    fun chartCandles(symbol: String, interval: String, limit: Int = 120): List<Candle> =
+        rest.klines(symbol, interval, limit.coerceIn(1, 200))
+
     /** Mark price for the board: WS first, then REST — never a made-up number. */
     private fun boardMark(symbol: String, fallback: Double = 0.0): Double =
         wsLivePrice(symbol)
