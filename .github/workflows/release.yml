@@ -124,7 +124,25 @@ jobs:
             echo "- The \"N strategies agree\" gate counts independent market views, not names: three copies of one signal can no longer open it, and the strategies that used to vote the wrong side now abstain instead of guessing"
             echo "- DNS/network outages are reported as connectivity issues, not model failures"
             echo "- Dark trading theme with chat bubbles and quick actions"
+            echo "- Trade screen now shows an open-position board: position, orders, TP/SL levels and liquidation, polled live from the exchange (simulated in PAPER mode)"
           } > release-notes.md
+          # A published release can be immutable (repo setting). Uploading to
+          # one returns HTTP 422 even with --clobber, so publish the same build
+          # under a fresh tag instead of failing the whole release job.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IMMUTABLE=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.immutable' 2>/dev/null || echo false)
+            if [ "$IMMUTABLE" = "true" ]; then
+              BASE="$TAG"
+              N=1
+              while gh release view "${BASE}.${N}" >/dev/null 2>&1 || git rev-parse -q --verify "refs/tags/${BASE}.${N}" >/dev/null; do
+                N=$((N + 1))
+              done
+              TAG="${BASE}.${N}"
+              VERSION="${VERSION}.${N}"
+              git tag "$TAG"
+              git push origin "refs/tags/$TAG"
+            fi
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
           else
