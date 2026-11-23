@@ -22,6 +22,18 @@ import java.util.concurrent.TimeUnit
 /** How long a WebSocket price stays usable before it counts as stale. */
 private const val WS_PRICE_STALE_MS = 15_000L
 
+/** Maps interval strings to Bitunix WebSocket kline channel suffixes. */
+internal fun klineChannel(interval: String, markPrice: Boolean = false): String {
+    val kind = if (markPrice) "mark_kline" else "market_kline"
+    val suffix = when (interval) {
+        "1m" -> "1min"; "3m" -> "3min"; "5m" -> "5min"; "15m" -> "15min"; "30m" -> "30min"
+        "1h" -> "60min"; "2h" -> "2h"; "4h" -> "4h"; "6h" -> "6h"; "8h" -> "8h"; "12h" -> "12h"
+        "1d" -> "1day"; "3d" -> "3day"; "1w" -> "1week"; "1M" -> "1month"
+        else -> interval
+    }
+    return "${kind}_$suffix"
+}
+
 /** How long the cached signal board stays fresh. */
 private const val SIGNAL_BOARD_MAX_AGE_MS = 60_000L
 
@@ -510,6 +522,9 @@ class TraderEngine(private val rest: BitunixRest) {
     private var marketFeed: BitunixWs? = null
     private val wsPrices = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, Double>>() // symbol -> (ts, last)
     private val wsMarket = java.util.concurrent.ConcurrentHashMap<String, org.json.JSONObject>() // symbol -> mp/ip/fr
+    /** Cache of the latest forming WS kline candle per symbol per interval. */
+    private val wsKlineCache = java.util.concurrent.ConcurrentHashMap<String, org.json.JSONObject>() // "$interval:$symbol"
+    private val wsKlineCacheLock = Any()
 
     /**
      * Opens the private WebSocket feed (balance, position, order, tpsl) and pushes
@@ -561,6 +576,41 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     fun marketFeedOn(): Boolean = marketFeed != null
+
+    /**
+     * Starts a public WebSocket kline feed for a symbol+interval. Each symbol/interval
+     * pair uses one channel (market_kline_1min etc.). The latest forming candle is
+     * cached in [wsKlineCache] so [chartCandles] can merge it into the REST history.
+     *
+     * Caller is responsible for ensuring only one subscription per channel per
+     * connection and respecting Bitunix's 5 msg/s / 300 subscription caps — use
+     * subscribePublicBatch where possible.
+     */
+    fun startMarketKlineFeed(symbol: String, interval: String): String {
+        val channel = klineChannel(interval)
+        stopMarketFeed() // close any prior public feed so we don't double-subscribe
+        lateinit var client: BitunixWs
+        client = BitunixWs("", "", object : BitunixWs.Listener {
+            override fun onOpen(privateChannel: Boolean) {
+                if (privateChannel) return
+                client.subscribePublic(channel, symbol)
+            }
+            override fun onChannel(ch: String, symbolFromMsg: String?, data: JSONObject) {
+                if (ch == channel || ch.contains("kline")) {
+                    val sym = (symbolFromMsg ?: symbol).uppercase()
+                    val key = "$interval:$sym"
+                    synchronized(wsKlineCacheLock) {
+                        wsKlineCache[key] = data
+                    }
+                }
+            }
+            override fun onError(message: String) { /* silent */ }
+            override fun onClosed(privateChannel: Boolean, reason: String) { }
+        })
+        marketFeed = client
+        client.connectPublic()
+        return "Kline feed subscribed: $channel for $symbol"
+    }
 
     /** Last price seen on the public WS feed, or null when stale (>15s). */
     fun wsLivePrice(symbol: String): Double? {
@@ -793,8 +843,41 @@ class TraderEngine(private val rest: BitunixRest) {
     private fun candles(symbol: String, tf: String): List<Candle> = rest.klines(symbol, tf, 200)
 
     /** Closed klines for the Trade-screen chart. Callers must use a background thread. */
-    fun chartCandles(symbol: String, interval: String, limit: Int = 120): List<Candle> =
-        rest.klines(symbol, interval, limit.coerceIn(1, 200))
+    fun chartCandles(symbol: String, interval: String, limit: Int = 120): List<Candle> {
+        // Start with REST closed candles
+        val restCandles = rest.klines(symbol, interval, limit.coerceIn(1, 200))
+        // Merge with any forming WS kline for this symbol/interval
+        return mergeFormingCandle(restCandles, symbol, interval)
+    }
+
+    /** Merge a forming WS kline (if any) into the closed candle list. The WS candle
+     * replaces the most recent closed candle if its timestamp is newer, avoiding
+     * duplicate bars at the right edge. */
+    internal fun mergeFormingCandle(restCandles: List<Candle>, symbol: String, interval: String): List<Candle> {
+        val cacheKey = "$interval:$symbol"
+        val forming = synchronized(wsKlineCacheLock) { wsKlineCache[cacheKey] }
+        if (forming == null) return restCandles
+        val formingTime = forming.optLong("t", 0L)
+        val formingOpen = forming.optDouble("o", 0.0)
+        val formingHigh = forming.optDouble("h", 0.0)
+        val formingLow = forming.optDouble("l", 0.0)
+        val formingClose = forming.optDouble("c", 0.0)
+        val formingVol = forming.optDouble("v", 0.0)
+        // Find the index of the last/rest candle in the REST list to potentially replace it
+        val lastRestIdx = restCandles.size - 1
+        if (lastRestIdx < 0) {
+            // No REST candles — just add the forming one
+            return listOf(Candle(formingTime, formingOpen, formingHigh, formingLow, formingClose, formingVol))
+        }
+        val lastRest = restCandles[lastRestIdx]
+        val restTime = lastRest.time
+        // If forming candle is newer, replace the last REST candle
+        if (formingTime > restTime) {
+            val updated = restCandles.take(lastRestIdx + 1) + listOf(Candle(formingTime, formingOpen, formingHigh, formingLow, formingClose, formingVol))
+            return updated
+        }
+        return restCandles
+    }
 
     /** Mark price for the board: WS first, then REST — never a made-up number. */
     private fun boardMark(symbol: String, fallback: Double = 0.0): Double =
