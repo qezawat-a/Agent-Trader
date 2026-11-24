@@ -1,8 +1,5 @@
 package com.codeassist.agenttrader.ui
 
-import androidx.compose.animation.core.Animatable
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -96,21 +94,35 @@ fun CandleChart(
     val drawn = remember(candles) { chartWindow(candles) }
     val (minPrice, maxPrice) = remember(candles) { chartBounds(candles) }
 
-    // Reveal animation. Animatable (not animateFloatAsState) because the value
-    // must be RESET to 0 for every new data set — a new symbol, a new interval
-    // or a refresh — so the chart draws itself in each time instead of snapping.
-    // Keyed on `drawn`, so a recomposition with the same candles does not replay.
-    val reveal = remember { Animatable(0f) }
+    // Reveal animation, driven by the frame clock instead of
+    // androidx.compose.animation.core. That module is NOT on the on-device
+    // CodeAssist build's dependency list (module.toml), so importing Animatable
+    // or tween from it compiles under Gradle — which pulls it in transitively —
+    // but fails to resolve in the on-device build. withFrameNanos lives in
+    // compose-runtime, which both builds already have.
+    //
+    // The value must RESET to 0 for every new data set (new symbol, new
+    // interval, refresh) so the chart draws itself in each time instead of
+    // snapping. Keyed on `drawn`, so a recomposition with the same candles does
+    // not replay it.
+    var reveal by remember { mutableStateOf(0f) }
     LaunchedEffect(drawn) {
-        reveal.snapTo(0f)
-        reveal.animateTo(1f, tween(durationMillis = 550, easing = FastOutSlowInEasing))
+        reveal = 0f
+        val start = withFrameNanos { it }
+        while (true) {
+            val now = withFrameNanos { it }
+            val t = ((now - start) / 550_000_000f).coerceIn(0f, 1f)
+            // Smoothstep ease-in-out: slow at both ends, quick in the middle.
+            reveal = t * t * (3f - 2f * t)
+            if (t >= 1f) break
+        }
     }
 
     Canvas(modifier.fillMaxWidth().height(260.dp)) {
         // Read INSIDE the draw scope on purpose: a State read here invalidates
         // only the draw phase, so the 550 ms reveal repaints the canvas without
         // recomposing the whole card on every frame.
-        val progress = reveal.value
+        val progress = reveal
         val w = size.width
         val h = size.height
         val axisW = 56.dp.toPx()
