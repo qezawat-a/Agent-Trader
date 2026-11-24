@@ -28,11 +28,8 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AssistChip
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -59,7 +56,6 @@ import com.codeassist.agenttrader.trader.SignalRow
 import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.util.fmt
 import com.codeassist.agenttrader.util.fmt0
-import com.codeassist.agenttrader.util.fmt2
 
 /** Where the app is right now — the top-level navigation. */
 enum class AppScreen { CHAT, TRADE, SIGNALS, CONTROL, SETTINGS }
@@ -596,7 +592,10 @@ fun SignalsScreen(
 }
 
 /**
- * Fast trading surface: pick a symbol, pick a side, pick a size, go.
+ * Trade surface: the K-line chart (with its symbol picker) and the live
+ * position / order / TP-SL board. The old Quick trade card — symbol field,
+ * price button, coin chips, size slider and the LONG/SHORT buttons — was
+ * removed; entries are driven from chat instead.
  */
 @Composable
 fun TradeScreen(
@@ -607,10 +606,6 @@ fun TradeScreen(
     modifier: Modifier = Modifier,
 ) {
     var symbol by remember { mutableStateOf("BTCUSDT") }
-    var sizePct by remember(engine.configRev) { mutableStateOf((engine.riskFraction * 100).toFloat()) }
-    var price by remember { mutableStateOf(0.0) }
-    val scheme = MaterialTheme.colorScheme
-    val symbols = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
 
     LazyColumn(
         modifier.fillMaxWidth(),
@@ -618,88 +613,9 @@ fun TradeScreen(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
     ) {
         item {
-            // K-line chart never fetched on the UI thread and follows the
-            // symbol typed in Quick trade below.
-            CandleChartCard(engine = engine, symbol = symbol)
-        }
-
-        item {
-            Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
-                Column(Modifier.padding(14.dp)) {
-                    Text("Quick trade", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    Spacer(Modifier.height(8.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            value = symbol,
-                            onValueChange = { symbol = it.uppercase() },
-                            label = { Text("Symbol") },
-                            singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        OutlinedButton(onClick = {
-                            // symbolPrice hits the network — it must never run on the UI thread
-                            // (NetworkOnMainThreadException crashed the app here).
-                            val sym = symbol.trim().uppercase()
-                            Thread {
-                                val p = engine.symbolPrice(sym)
-                                post(object : Runnable {
-                                    override fun run() { price = p }
-                                })
-                            }.start()
-                        }) {
-                            Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text(if (price > 0) fmt2(price) else "Price")
-                        }
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        symbols.take(4).forEach { s ->
-                            FilterChip(
-                                selected = symbol == s,
-                                onClick = { symbol = s },
-                                label = { Text(s.removeSuffix("USDT"), fontSize = 12.sp) },
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Text("Size — ${sizePct.toInt()}% of free balance", style = MaterialTheme.typography.bodyMedium)
-                    Slider(
-                        value = sizePct,
-                        onValueChange = { sizePct = it },
-                        valueRange = 1f..100f,
-                        colors = SliderDefaults.colors(thumbColor = scheme.primary, activeTrackColor = scheme.primary),
-                    )
-                    Spacer(Modifier.height(6.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Button(
-                            onClick = { onExecute(symbol, 1, sizePct / 100.0) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = scheme.primary),
-                        ) {
-                            Icon(Icons.Default.KeyboardArrowUp, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("LONG", fontWeight = FontWeight.Bold)
-                        }
-                        Button(
-                            onClick = { onExecute(symbol, -1, sizePct / 100.0) },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = scheme.error),
-                        ) {
-                            Icon(Icons.Default.KeyboardArrowDown, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("SHORT", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    Text(
-                        if (engine.live) "LIVE orders — real money. PAPER mode is simulated." else "PAPER mode — simulated fills.",
-                        Modifier.padding(top = 6.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (engine.live) scheme.error else scheme.onSurfaceVariant,
-                    )
-                }
-            }
+            // K-line chart never fetched on the UI thread. The symbol picker
+            // lives in the chart card now that the Quick trade card is gone.
+            CandleChartCard(engine = engine, symbol = symbol, onSymbolChange = { symbol = it })
         }
 
         item {

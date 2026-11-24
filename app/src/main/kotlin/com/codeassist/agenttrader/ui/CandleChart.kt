@@ -1,5 +1,8 @@
 package com.codeassist.agenttrader.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -93,7 +96,21 @@ fun CandleChart(
     val drawn = remember(candles) { chartWindow(candles) }
     val (minPrice, maxPrice) = remember(candles) { chartBounds(candles) }
 
+    // Reveal animation. Animatable (not animateFloatAsState) because the value
+    // must be RESET to 0 for every new data set — a new symbol, a new interval
+    // or a refresh — so the chart draws itself in each time instead of snapping.
+    // Keyed on `drawn`, so a recomposition with the same candles does not replay.
+    val reveal = remember { Animatable(0f) }
+    LaunchedEffect(drawn) {
+        reveal.snapTo(0f)
+        reveal.animateTo(1f, tween(durationMillis = 550, easing = FastOutSlowInEasing))
+    }
+
     Canvas(modifier.fillMaxWidth().height(260.dp)) {
+        // Read INSIDE the draw scope on purpose: a State read here invalidates
+        // only the draw phase, so the 550 ms reveal repaints the canvas without
+        // recomposing the whole card on every frame.
+        val progress = reveal.value
         val w = size.width
         val h = size.height
         val axisW = 56.dp.toPx()
@@ -137,20 +154,28 @@ fun CandleChart(
         val bodyW = (slot * 0.64f).coerceAtLeast(1f)
         val wickW = 1.2.dp.toPx()
 
+        // How many candles the reveal has uncovered so far. At least one, so the
+        // very first frame is not an empty plot.
+        val visible = (n * progress).toInt().coerceIn(1, n)
+
         if (lineMode) {
             val points = drawn.mapIndexed { i, c -> Offset(slot * (i + 0.5f), yOf(c.close)) }
-            val path = Path().apply {
-                moveTo(points.first().x, points.first().y)
-                for (i in 1 until points.size) {
-                    val prev = points[i - 1]
-                    val cur = points[i]
-                    quadraticTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
+            val shown = points.take(visible)
+            if (shown.size >= 2) {
+                val path = Path().apply {
+                    moveTo(shown.first().x, shown.first().y)
+                    for (i in 1 until shown.size) {
+                        val prev = shown[i - 1]
+                        val cur = shown[i]
+                        quadraticTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
+                    }
+                    lineTo(shown.last().x, shown.last().y)
                 }
-                lineTo(points.last().x, points.last().y)
+                drawPath(path, LINE_BLUE, style = Stroke(width = 2.dp.toPx()))
             }
-            drawPath(path, LINE_BLUE, style = Stroke(width = 2.dp.toPx()))
         } else {
             drawn.forEachIndexed { i, c ->
+                if (i >= visible) return@forEachIndexed
                 val cx = slot * (i + 0.5f)
                 val color = if (c.close >= c.open) CANDLE_UP else CANDLE_DOWN
                 drawLine(color, Offset(cx, yOf(c.high)), Offset(cx, yOf(c.low)), strokeWidth = wickW)
@@ -166,6 +191,7 @@ fun CandleChart(
 
         val maxVol = drawn.maxOf { it.volume }.takeIf { it > 0.0 } ?: 1.0
         drawn.forEachIndexed { i, c ->
+            if (i >= visible) return@forEachIndexed
             val cx = slot * (i + 0.5f)
             val barH = (c.volume / maxVol * volH).toFloat()
             val color = (if (c.close >= c.open) CANDLE_UP else CANDLE_DOWN).copy(alpha = 0.55f)
@@ -173,9 +199,18 @@ fun CandleChart(
         }
         drawLine(grid, Offset(0f, volTop + volH), Offset(plotW, volTop + volH), strokeWidth = 1.dp.toPx())
 
+        // The last-price marker fades in with the reveal, so it does not sit on
+        // an empty plot while the candles are still drawing.
         val lastY = yOf(drawn.last().close)
-        drawLine(scheme.primary.copy(alpha = 0.75f), Offset(0f, lastY), Offset(plotW, lastY), strokeWidth = 1.dp.toPx())
-        drawRect(scheme.primary, topLeft = Offset(plotW, lastY - 9.dp.toPx()), size = Size(axisW, 18.dp.toPx()))
+        val markerAlpha = progress.coerceIn(0f, 1f)
+        drawLine(
+            scheme.primary.copy(alpha = 0.75f * markerAlpha),
+            Offset(0f, lastY), Offset(plotW, lastY), strokeWidth = 1.dp.toPx(),
+        )
+        drawRect(
+            scheme.primary.copy(alpha = markerAlpha),
+            topLeft = Offset(plotW, lastY - 9.dp.toPx()), size = Size(axisW, 18.dp.toPx()),
+        )
         drawText(
             measurer, fmt2(drawn.last().close),
             topLeft = Offset(plotW + 4.dp.toPx(), lastY - 6.dp.toPx()),
@@ -195,15 +230,17 @@ fun CandleChart(
     }
 }
 
-/** Chart section in the Trade screen. Follows the symbol typed in Quick trade. */
+/** Chart section in the Trade screen. Owns the symbol picker the chart follows. */
 @Composable
 fun CandleChartCard(
     engine: TraderEngine,
     symbol: String,
+    onSymbolChange: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     val intervals = listOf("5m", "15m", "1h", "4h", "1d")
+    val symbols = listOf("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT")
     var interval by remember { mutableStateOf("15m") }
     var lineMode by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
@@ -257,6 +294,20 @@ fun CandleChartCard(
                 style = MaterialTheme.typography.labelSmall,
                 color = scheme.onSurfaceVariant,
             )
+
+            // Symbol picker. It used to live in the Quick trade card; that card
+            // is gone, so the chart carries the picker it depends on.
+            Spacer(Modifier.height(6.dp))
+            LazyRow {
+                items(symbols) { s ->
+                    FilterChip(
+                        selected = sym == s,
+                        onClick = { onSymbolChange(s) },
+                        label = { Text(s.removeSuffix("USDT"), fontSize = 11.sp) },
+                    )
+                    Spacer(Modifier.width(6.dp))
+                }
+            }
 
             Spacer(Modifier.height(6.dp))
             LazyRow {
