@@ -196,32 +196,32 @@ fun CandleChart(
         // open, the way the Bitunix client marks entry / SL / TP / liquidation.
         if (overlay != null) {
             val dashed = PathEffect.dashPathEffect(floatArrayOf(10.dp.toPx(), 6.dp.toPx()), 0f)
-            val levels = ArrayList<Triple<String, Pair<Double, Color>>>()
+            data class ChartLevel(val text: String, val price: Double, val color: Color)
+            val levels = ArrayList<ChartLevel>()
             val marker = if (overlay.side == "LONG") "B" else "S"
-            levels += Triple(
+            levels += ChartLevel(
                 "$marker ${fmt(overlay.qty)}  ${if (overlay.pnlPct >= 0) "+" else ""}${fmt2(overlay.pnlPct)}%",
-                overlay.entry to Color(0xFFFFC107),
+                overlay.entry, Color(0xFFFFC107),
             )
             overlay.stop?.let { price ->
-                if (price > 0.0) levels += Triple(
+                if (price > 0.0) levels += ChartLevel(
                     "SL +${fmt2(distancePct(overlay.entry, price))}%",
-                    price to CANDLE_DOWN,
+                    price, CANDLE_DOWN,
                 )
             }
             overlay.tps.forEach { (tag, price) ->
-                if (price > 0.0) levels += Triple(
+                if (price > 0.0) levels += ChartLevel(
                     "$tag +${fmt2(distancePct(overlay.entry, price))}%",
-                    price to CANDLE_UP,
+                    price, CANDLE_UP,
                 )
             }
             overlay.liq?.let { price ->
-                if (price > 0.0) levels += Triple("LQ ${fmt2(price)}", price to Color(0xFFFF7043))
+                if (price > 0.0) levels += ChartLevel("LQ ${fmt2(price)}", price, Color(0xFFFF7043))
             }
             overlay.otherOrders.forEach { (tag, price) ->
-                if (price > 0.0) levels += Triple("$tag ${fmt2(price)}", price to LINE_BLUE)
+                if (price > 0.0) levels += ChartLevel("$tag ${fmt2(price)}", price, LINE_BLUE)
             }
-            levels.forEach { (text, level) ->
-                val (price, color) = level
+            levels.forEach { (text, price, color) ->
                 if (price in minPrice..maxPrice) {
                     val y = yOf(price)
                     drawLine(
@@ -304,11 +304,10 @@ fun CandleChartCard(
     }
 
     // Live WebSocket kline feed — subscribes once per symbol+interval pair.
-    LaunchedEffect(sym, interval) {
-        if (sym.isBlank()) return@LaunchedEffect
-        // Subscribe once; further changes to sym/interval will trigger re-subscription
+    LaunchedEffect(activeSymbol, interval) {
+        if (activeSymbol.isBlank()) return@LaunchedEffect
         val result = withContext(Dispatchers.IO) {
-            runCatching { engine.startMarketKlineFeed(sym, interval) }
+            runCatching { engine.startMarketKlineFeed(activeSymbol, interval) }
         }
         result.onSuccess { _ -> }
         result.onFailure { _ -> }
