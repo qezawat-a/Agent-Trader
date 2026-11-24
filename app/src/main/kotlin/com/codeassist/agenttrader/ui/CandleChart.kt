@@ -32,7 +32,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.ExperimentalTextApi
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
@@ -41,6 +44,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.bitunix.Candle
+import com.codeassist.agenttrader.trader.BoardPosition
 import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.util.fmt2
 import kotlinx.coroutines.Dispatchers
@@ -61,11 +65,52 @@ private const val MAX_DRAWN_CANDLES = 80
 internal fun chartWindow(candles: List<Candle>, count: Int = MAX_DRAWN_CANDLES): List<Candle> =
     if (candles.size <= count) candles else candles.takeLast(count)
 
-/** Price window with a small margin so wicks never touch the edge. */
-internal fun chartBounds(candles: List<Candle>): Pair<Double, Double> {
+/** A price line that belongs to the open position shown on the chart. */
+internal enum class ChartLevelKind { MARK, ENTRY, STOP, LIQUIDATION, TAKE_PROFIT }
+
+internal data class ChartLevel(
+    val kind: ChartLevelKind,
+    val label: String,
+    val price: Double,
+)
+
+/**
+ * The engine position levels that must be visible on the selected symbol's
+ * chart. Values that the exchange has not supplied are omitted rather than
+ * invented.
+ */
+internal fun chartPositionLevels(position: BoardPosition?): List<ChartLevel> {
+    if (position == null) return emptyList()
+    val levels = ArrayList<ChartLevel>()
+    if (position.mark > 0.0) levels += ChartLevel(ChartLevelKind.MARK, "MARK", position.mark)
+    if (position.entry > 0.0) levels += ChartLevel(ChartLevelKind.ENTRY, "ENTRY", position.entry)
+    if (position.stop != null && position.stop > 0.0) {
+        levels += ChartLevel(ChartLevelKind.STOP, "SL", position.stop)
+    }
+    if (position.liq != null && position.liq > 0.0) {
+        levels += ChartLevel(ChartLevelKind.LIQUIDATION, "LIQ", position.liq)
+    }
+    position.tps.forEachIndexed { index, tp ->
+        if (tp.price > 0.0) {
+            levels += ChartLevel(ChartLevelKind.TAKE_PROFIT, "TP${index + 1}", tp.price)
+        }
+    }
+    return levels
+}
+
+/**
+ * Price window with a small margin so wicks and open-position levels never
+ * touch the edge. Position levels are included so an entry or liquidation
+ * price outside the candle range is still visible.
+ */
+internal fun chartBounds(
+    candles: List<Candle>,
+    extraPrices: List<Double> = emptyList(),
+): Pair<Double, Double> {
     if (candles.isEmpty()) return 0.0 to 1.0
-    val lo = candles.minOf { it.low }
-    val hi = candles.maxOf { it.high }
+    val validExtra = extraPrices.filter { it.isFinite() && it > 0.0 }
+    val lo = minOf(candles.minOf { it.low }, validExtra.minOrNull() ?: Double.MAX_VALUE)
+    val hi = maxOf(candles.maxOf { it.high }, validExtra.maxOrNull() ?: -Double.MAX_VALUE)
     val span = (hi - lo).takeIf { it > 0.0 } ?: hi.coerceAtLeast(1.0) * 0.01
     return (lo - span * 0.06) to (hi + span * 0.06)
 }
@@ -87,12 +132,16 @@ fun CandleChart(
     candles: List<Candle>,
     interval: String,
     lineMode: Boolean = false,
+    position: BoardPosition? = null,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     val measurer = rememberTextMeasurer()
     val drawn = remember(candles) { chartWindow(candles) }
-    val (minPrice, maxPrice) = remember(candles) { chartBounds(candles) }
+    val levels = remember(position) { chartPositionLevels(position) }
+    val (minPrice, maxPrice) = remember(candles, levels) {
+        chartBounds(candles, levels.map { it.price })
+    }
 
     // Reveal animation, driven by the frame clock instead of
     // androidx.compose.animation.core. That module is NOT on the on-device
@@ -118,7 +167,23 @@ fun CandleChart(
         }
     }
 
-    Canvas(modifier.fillMaxWidth().height(260.dp)) {
+    val chartDescription = remember(position, drawn) {
+        if (position == null) {
+            "Price chart, ${drawn.size} candles"
+        } else {
+            buildString {
+                append("${position.side} ${position.symbol} position chart. ")
+                append("Entry ${fmt2(position.entry)}, mark ${fmt2(position.mark)}. ")
+                append(levels.joinToString(", ") { "${it.label} ${fmt2(it.price)}" })
+            }
+        }
+    }
+    Canvas(
+        modifier
+            .fillMaxWidth()
+            .height(260.dp)
+            .semantics { contentDescription = chartDescription },
+    ) {
         // Read INSIDE the draw scope on purpose: a State read here invalidates
         // only the draw phase, so the 550 ms reveal repaints the canvas without
         // recomposing the whole card on every frame.
@@ -201,6 +266,37 @@ fun CandleChart(
             }
         }
 
+        // Position levels are drawn from the same engine snapshot as the
+        // position card. They must be visible even when the current price has
+        // moved outside the historical candle range.
+        levels.forEach { level ->
+            val color = when (level.kind) {
+                ChartLevelKind.MARK -> scheme.primary
+                ChartLevelKind.ENTRY -> Color(0xFFFFB300)
+                ChartLevelKind.STOP -> scheme.error
+                ChartLevelKind.LIQUIDATION -> Color(0xFFD84315)
+                ChartLevelKind.TAKE_PROFIT -> scheme.tertiary
+            }
+            val y = yOf(level.price)
+            drawLine(
+                color = color.copy(alpha = 0.85f),
+                start = Offset(0f, y),
+                end = Offset(plotW, y),
+                strokeWidth = 1.5.dp.toPx(),
+                pathEffect = if (level.kind == ChartLevelKind.LIQUIDATION) {
+                    PathEffect.dashPathEffect(floatArrayOf(7.dp.toPx(), 5.dp.toPx()))
+                } else {
+                    null
+                },
+            )
+            drawText(
+                measurer,
+                "${level.label} ${fmt2(level.price)}",
+                topLeft = Offset(4.dp.toPx(), (y - 12.dp.toPx()).coerceAtLeast(0f)),
+                style = TextStyle(color = color, fontSize = 8.sp, fontWeight = FontWeight.Bold),
+            )
+        }
+
         val maxVol = drawn.maxOf { it.volume }.takeIf { it > 0.0 } ?: 1.0
         drawn.forEachIndexed { i, c ->
             if (i >= visible) return@forEachIndexed
@@ -247,6 +343,7 @@ fun CandleChart(
 fun CandleChartCard(
     engine: TraderEngine,
     symbol: String,
+    position: BoardPosition? = null,
     onSymbolChange: (String) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -350,7 +447,12 @@ fun CandleChartCard(
                     style = MaterialTheme.typography.labelSmall,
                     color = if (change >= 0) CANDLE_UP else CANDLE_DOWN,
                 )
-                CandleChart(candles = candles, interval = interval, lineMode = lineMode)
+                CandleChart(
+                    candles = candles,
+                    interval = interval,
+                    lineMode = lineMode,
+                    position = position,
+                )
             } else if (!loading) {
                 Text(
                     error.ifBlank { "No chart data." },

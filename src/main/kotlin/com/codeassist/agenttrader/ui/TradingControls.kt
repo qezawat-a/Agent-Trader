@@ -40,6 +40,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -53,9 +54,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.trader.MarketMood
 import com.codeassist.agenttrader.trader.SignalRow
+import com.codeassist.agenttrader.trader.TradeBoard
 import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.util.fmt
 import com.codeassist.agenttrader.util.fmt0
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /** Where the app is right now — the top-level navigation. */
 enum class AppScreen { CHAT, TRADE, SIGNALS, CONTROL, SETTINGS }
@@ -606,6 +611,42 @@ fun TradeScreen(
     modifier: Modifier = Modifier,
 ) {
     var symbol by remember { mutableStateOf("BTCUSDT") }
+    var board by remember(engine) { mutableStateOf(TradeBoard(emptyList(), emptyList())) }
+    var boardFailed by remember(engine) { mutableStateOf("") }
+    var boardRefreshKey by remember(engine) { mutableStateOf(0) }
+
+    // One engine snapshot feeds the whole Trade screen. Previously the chart
+    // and the position card owned separate polling loops, so the chart could
+    // never see the engine's open position (and each loop fetched the same
+    // exchange state independently).
+    LaunchedEffect(engine, boardRefreshKey) {
+        while (true) {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { engine.tradeBoard() }
+            }
+            result.onSuccess {
+                board = it
+                boardFailed = ""
+            }.onFailure {
+                boardFailed = it.message ?: it.javaClass.simpleName
+            }
+            delay(3_000)
+        }
+    }
+
+    // On first entry, follow the symbol that actually has an engine position.
+    // Later symbol-picker choices are respected instead of being overridden by
+    // each snapshot.
+    var autoFollowedPosition by remember(engine) { mutableStateOf(false) }
+    LaunchedEffect(board.positions) {
+        if (!autoFollowedPosition) {
+            board.positions.firstOrNull()?.let {
+                symbol = it.symbol
+                autoFollowedPosition = true
+            }
+        }
+    }
+    val chartPosition = board.positions.firstOrNull { it.symbol == symbol }
 
     LazyColumn(
         modifier.fillMaxWidth(),
@@ -615,14 +656,29 @@ fun TradeScreen(
         item {
             // K-line chart never fetched on the UI thread. The symbol picker
             // lives in the chart card now that the Quick trade card is gone.
-            CandleChartCard(engine = engine, symbol = symbol, onSymbolChange = { symbol = it })
+            CandleChartCard(
+                engine = engine,
+                symbol = symbol,
+                position = chartPosition,
+                onSymbolChange = {
+                    symbol = it
+                    // An explicit picker choice wins over automatic position
+                    // following for the rest of this screen session.
+                    autoFollowedPosition = true
+                },
+            )
         }
 
         item {
             // Position / order / TP-SL / liquidation board. It renders itself
             // only while a position is open and reads the exchange off the UI
             // thread, so it replaces the old static "Open positions" card.
-            PositionBoardCard(engine = engine, onClose = onClose)
+            PositionBoardCard(
+                board = board,
+                failed = boardFailed,
+                onRefresh = { boardRefreshKey++ },
+                onClose = onClose,
+            )
         }
     }
 }

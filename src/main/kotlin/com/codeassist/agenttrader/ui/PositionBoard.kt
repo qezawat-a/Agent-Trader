@@ -16,11 +16,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -30,41 +25,24 @@ import androidx.compose.ui.unit.sp
 import com.codeassist.agenttrader.trader.BoardOrder
 import com.codeassist.agenttrader.trader.BoardPosition
 import com.codeassist.agenttrader.trader.TradeBoard
-import com.codeassist.agenttrader.trader.TraderEngine
 import com.codeassist.agenttrader.util.fmt
 import com.codeassist.agenttrader.util.fmt2
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 
 /**
  * Trade-screen panel shown only while a position is open: position numbers,
  * its TP/SL levels, liquidation price and the pending order list.
  *
- * The engine snapshot is blocking (REST), so it is always read on IO. The card
- * polls every 4s; LIVE gets exchange fields, PAPER gets the local simulation.
+ * The engine snapshot is blocking (REST), so it is always read on IO by the
+ * Trade screen. LIVE gets exchange fields; PAPER gets the local simulation.
  */
 @Composable
 fun PositionBoardCard(
-    engine: TraderEngine,
+    board: TradeBoard,
+    failed: String,
+    onRefresh: () -> Unit,
     onClose: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var board by remember { mutableStateOf(TradeBoard(emptyList(), emptyList())) }
-    var failed by remember { mutableStateOf("") }
-    var refreshKey by remember { mutableStateOf(0) }
-
-    LaunchedEffect(engine, refreshKey) {
-        while (true) {
-            val result = withContext(Dispatchers.IO) { runCatching { engine.tradeBoard() } }
-            result.onSuccess {
-                board = it
-                failed = ""
-            }.onFailure { failed = it.message ?: it.javaClass.simpleName }
-            delay(4_000)
-        }
-    }
-
     // Nothing to show when flat — that is the whole point of this panel.
     if (board.positions.isEmpty()) return
 
@@ -82,7 +60,7 @@ fun PositionBoardCard(
                     fontWeight = FontWeight.Bold,
                 )
                 AssistChip(
-                    onClick = { refreshKey++ },
+                    onClick = onRefresh,
                     label = { Text("Refresh", fontSize = 11.sp) },
                     leadingIcon = { Icon(Icons.Default.Refresh, null, Modifier.width(14.dp).height(14.dp)) },
                 )
