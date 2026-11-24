@@ -165,12 +165,18 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         }
         if (positions[symbol] == null) return events
         // Breakeven: the stop moves to entry once ROI reaches the configured level.
+        // Guarded by improvesStop exactly like the live path — without it a stop
+        // that is ALREADY tighter than entry (a tight `set sl`, or a trailing stop
+        // that ran first) would be WIDENED back to entry, giving risk away.
         if (!p.breakeven && risk.breakevenRoiPct > 0 &&
             TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.breakevenRoiPct / 100.0
         ) {
             p.breakeven = true
-            p.stop = p.entry
-            events.add("Breakeven $symbol: SL moved to entry ${fmt(p.entry)}")
+            val cur = p.stop
+            if (cur == null || improvesStop(p.dir, p.entry, cur)) {
+                p.stop = p.entry
+                events.add("PAPER breakeven $symbol: SL moved to entry ${fmt(p.entry)}")
+            }
         }
         // Trailing: fires at the configured trigger ROI (after breakeven) and only tightens.
         if (risk.trailingTriggerRoiPct > 0 &&
@@ -180,7 +186,7 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
             val improves = p.stop == null || if (p.dir > 0) trail > p.stop!! else trail < p.stop!!
             if (improves) {
                 p.stop = trail
-                events.add("Trailing $symbol: SL moved to ${fmt(trail)}")
+                events.add("PAPER trailing $symbol: SL moved to ${fmt(trail)}")
             }
         }
         val stop = p.stop
@@ -1562,8 +1568,28 @@ class TraderEngine(private val rest: BitunixRest) {
             if (status == "FILLED" || status == "PART_FILLED") {
                 liveOpenCount += 1
                 noteEntry()
+                // The entry order's slPrice is an ORDER-level stop. Breakeven and
+                // trailing move the POSITION-level TP/SL order, which does not
+                // exist yet — so arm it now, from the position the exchange just
+                // opened. Without this the first move has to create it, and until
+                // then the exchange holds a stop the risk manager cannot see.
+                val armed = runCatching {
+                    val pos = rest.pendingPositions(symbol)
+                    val pid = if (pos.length() > 0) pos.getJSONObject(0).optString("positionId") else ""
+                    if (pid.isBlank()) return@runCatching null
+                    rest.placePositionTpSl(
+                        symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
+                        slPrice = plan.stop?.let { formatPrice(symbol, it) },
+                    )
+                    pid
+                }.getOrNull()
+                val slNote = when {
+                    plan.stop == null -> ""
+                    armed != null -> " | SL armed on position"
+                    else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
+                }
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine"
+                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote"
             }
             // Accepted but never filled (min qty, insufficient margin, TP/SL
             // rejected — the exchange cancels right after placement). The old code
@@ -1794,21 +1820,27 @@ class TraderEngine(private val rest: BitunixRest) {
             val prevBest = liveBest[sym]
             val best = if (dir > 0) maxOf(mark, prevBest ?: mark) else minOf(mark, prevBest ?: mark)
             liveBest[sym] = best
-            // Current SL baseline: what this engine last set, else the exchange's
-            // pending SL.
+            // Current SL baseline: what this engine last CONFIRMED on the
+            // exchange, else the exchange's pending SL. A stop that only exists
+            // in local memory is not a baseline — reporting it as one is how the
+            // chat came to claim a stop the exchange never had.
             var curStop = liveLastStop[sym]
+            var curStopIsReal = curStop != null
             if (curStop == null) {
                 curStop = runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
                     ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
+                curStopIsReal = curStop != null
             }
             // No exchange SL visible (never attached, rejected, or the query
-            // failed): fall back to the engine's OWN initial stop for this
-            // position. Without a baseline the trailing rule could never fire
-            // — that is exactly the "trailing did nothing" report.
+            // failed): use the engine's OWN planned stop as a COMPARISON
+            // baseline only, so the trailing rule can still fire. It is NOT
+            // cached as the live stop — nothing is armed on the exchange, and
+            // the first real move must go through place_position_tp_sl_order.
             if (curStop == null) {
                 curStop = TpSlPlanner.plan(entry, dir, lev, slPctForSignal(1.0) / 100.0, mmr).stop
             }
-            if (curStop != null) liveLastStop[sym] = curStop else liveLastStop.remove(sym)
+            if (curStop != null && curStopIsReal) liveLastStop[sym] = curStop
+            else if (!curStopIsReal) liveLastStop.remove(sym)
             // Breakeven: SL to entry once ROI passes the level. The "done" flag
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
@@ -1817,16 +1849,20 @@ class TraderEngine(private val rest: BitunixRest) {
             if (be != null) {
                 if (applyLiveSl(sym, positionId, be, dir, mark, "Breakeven", bestRoi, events)) {
                     liveBreakevenDone[sym] = true
+                    // The stop just moved to entry; trailing is evaluated on the
+                    // NEXT tick against the confirmed new baseline. Continuing
+                    // here is safe because the move really happened.
+                    continue
                 }
-                continue
-            }
-            if (liveBreakevenDone[sym] != true && risk.breakevenRoiPct > 0 &&
+                // The move did NOT happen. Do not `continue`: trailing must still
+                // get its chance this tick, and the failed breakeven is retried
+                // next tick (the done flag was not set).
+            } else if (liveBreakevenDone[sym] != true && risk.breakevenRoiPct > 0 &&
                 bestRoi >= risk.breakevenRoiPct / 100.0
             ) {
                 // The stop in place is already tighter than entry: there is
                 // nothing to move, and the rule must not keep retrying.
                 liveBreakevenDone[sym] = true
-                continue
             }
             // Trailing: fires on the BEST price reached (not the current price),
             // so a pullback does not stop the stop from following the position.
@@ -1850,9 +1886,27 @@ class TraderEngine(private val rest: BitunixRest) {
         improvesStop(dir, candidate, current)
 
     /**
-     * Sends the new SL to the exchange and records it; failures surface as events.
-     * Returns true when the exchange accepted the move — the breakeven rule only
-     * marks itself done on success, so a rejected move is retried next tick.
+     * Moves the stop on the EXCHANGE, then reports it — in that order.
+     *
+     * The reported bug was "the chat says the SL moved but nothing moved on the
+     * exchange". Three separate causes, all fixed here:
+     *
+     *  1. Only `modify_position_tp_sl_order` was called. That endpoint MODIFIES
+     *     an existing position-level TP/SL order and fails when the position has
+     *     none — which is the normal case, because the entry attaches its stop
+     *     through `place_order`'s `slPrice`. So the move was rejected every
+     *     time. Now the armed order is read first: modify when one exists,
+     *     `place_position_tp_sl_order` (which CREATES it) when none does.
+     *  2. The read-back treated "no SL found" as success. A null read means NO
+     *     stop is armed at all — the worst possible state — yet it was reported
+     *     as moved. A null/zero read is now a failure.
+     *  3. Local state was written before the exchange answered. `liveLastStop`
+     *     and the "SL moved" event are now written ONLY after the exchange
+     *     confirms the new price, so the chat can never claim a move that did
+     *     not happen.
+     *
+     * Returns true only on a confirmed move; the breakeven rule marks itself
+     * done on that return value alone, so a rejected move is retried next tick.
      */
     private fun applyLiveSl(
         sym: String, positionId: String, sl: Double, dir: Int, mark: Double,
@@ -1862,24 +1916,44 @@ class TraderEngine(private val rest: BitunixRest) {
         // a pullback. Bitunix rejects that (30023) on every retry — skip quietly,
         // keep the existing stop and try again when price comes back.
         if (!slTriggerValid(dir, sl, mark)) return false
-        return try {
-            rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = formatPrice(sym, sl))
-            // The endpoint returns success even when the exchange keeps the old SL
-            // (the new price is not a real improvement, or the SL is rejected).
-            // Verify before marking the rule done, or the SL stays static and
-            // breakeven/trailing never fire again.
-            val applied = runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
-            if (applied != null && applied > 0 && kotlin.math.abs(applied - sl) > 0.005) {
-                events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
-                return false
+        val price = formatPrice(sym, sl)
+        val target = price.toDoubleOrNull() ?: sl
+        // 1. Decide the endpoint from what is ACTUALLY armed, not from an error
+        //    message: modify only works on an existing position-level order, and
+        //    place fails when one already exists ("Each position can only have
+        //    one Position TP/SL Order"). Asking first makes the choice exact.
+        val existing = runCatching { rest.positionTpSlOrder(sym, positionId) }.getOrNull()
+        try {
+            if (existing != null) {
+                rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
+            } else {
+                // The stop came from the entry order (place_order's slPrice), so
+                // no position-level order exists yet — CREATE it.
+                rest.placePositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
             }
-            liveLastStop[sym] = sl
-            events.add("SL moved to ${fmt(sl)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
-            true
         } catch (e: Exception) {
-            events.add("Risk manager: SL move on $sym failed — ${e.message ?: e.javaClass.simpleName}")
-            false
+            events.add("Risk manager: SL move on $sym FAILED — ${e.message ?: e.javaClass.simpleName}")
+            return false
         }
+        // 2. Verify on the exchange before claiming anything. Read the
+        //    POSITION-LEVEL order specifically: a partial TP/SL order carries its
+        //    own slPrice and would otherwise be mistaken for the position's stop.
+        val applied = runCatching { findPositionSlPrice(sym, positionId) }.getOrNull()
+        if (applied == null || applied <= 0) {
+            events.add("Risk manager: SL on $sym NOT confirmed on the exchange — retrying")
+            return false
+        }
+        // Relative tolerance: an absolute 0.005 is meaningless on a 0.00001-priced
+        // pair and far too tight on a 100000-priced one.
+        val tolerance = kotlin.math.max(1e-9, target * 1e-4)
+        if (kotlin.math.abs(applied - target) > tolerance) {
+            events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
+            return false
+        }
+        // Confirmed by the exchange — only now is local state allowed to change.
+        liveLastStop[sym] = applied
+        events.add("SL moved to ${fmt(applied)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
+        return true
     }
 
     /** The first usable slPrice in a TP/SL order list (null when there is none). */
@@ -1889,6 +1963,16 @@ class TraderEngine(private val rest: BitunixRest) {
             if (v != null && v > 0) return v
         }
         return null
+    }
+
+    /**
+     * The stop armed on the POSITION-LEVEL TP/SL order, or null when the position
+     * has none. This is the only order `modify_position_tp_sl_order` can change,
+     * so it is the only one that proves a move landed.
+     */
+    internal fun findPositionSlPrice(symbol: String, positionId: String): Double? {
+        val o = rest.positionTpSlOrder(symbol, positionId) ?: return null
+        return o.optString("slPrice").toDoubleOrNull()?.takeIf { it > 0 }
     }
 
     fun status(): String = buildString {

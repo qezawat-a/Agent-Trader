@@ -83,6 +83,8 @@ private val NOTIFIABLE_PREFIXES = listOf(
     "position closed",
     "sl moved",
     "breakeven",
+    "paper breakeven",   // paper-broker stop moves (prefixed so they are never
+    "paper trailing",    // mistaken for a confirmed exchange move)
     "periodic report",
     "ws order",
     "ws tpsl",

@@ -695,12 +695,40 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      * Modifies an existing position-level TP/SL. The stop moves on MARK_PRICE
      * (same reason as [placePositionTpSl]) so a trailing/breakeven stop can
      * never be slower than the exchange's liquidation check.
+     *
+     * Docs: "Each position can only have one Position TP/SL Order" — this
+     * endpoint MODIFIES that order and fails when the position has none. A
+     * position whose stop was attached on the entry order (place_order's
+     * `slPrice`) has no position-level order, so callers must fall back to
+     * [placePositionTpSl]; see [TraderEngine.applyLiveSl].
      */
     fun modifyPositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
         tpStopType: String = "LAST_PRICE", slStopType: String = "MARK_PRICE",
     ): JSONObject = positionTpSlBody(
         "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+
+    /**
+     * The position-level TP/SL order currently armed on a position, or null.
+     *
+     * `get_pending_orders` returns BOTH position-level orders and partial TP/SL
+     * orders. The documented difference is the quantity: a position-level order
+     * closes the WHOLE position and carries no `tpQty`/`slQty`, while a partial
+     * order always carries at least one of them ("At least one of tpQty or slQty
+     * is required"). Only the position-level order is what
+     * [modifyPositionTpSl] can change, so the two are told apart on that field
+     * alone — `id` is NOT a discriminator, both shapes carry it.
+     */
+    fun positionTpSlOrder(symbol: String, positionId: String): JSONObject? {
+        val orders = pendingTpSlOrders(symbol, positionId)
+        for (i in 0 until orders.length()) {
+            val o = orders.optJSONObject(i) ?: continue
+            if (o.optString("positionId") != positionId) continue
+            if (o.optString("tpQty").isNotBlank() || o.optString("slQty").isNotBlank()) continue
+            return o
+        }
+        return null
+    }
 
     private fun positionTpSlBody(
         path: String, symbol: String, positionId: String,

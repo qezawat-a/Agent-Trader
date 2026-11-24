@@ -214,13 +214,13 @@ class RiskManagerTest {
 
         // +0.5% price = +5% ROI at 10x → breakeven: SL to entry.
         var events = e.broker.manage("BTCUSDT", 100.5, e.risk)
-        assertTrue(events.any { it.startsWith("Breakeven BTCUSDT") }, events.toString())
+        assertTrue(events.any { it.startsWith("PAPER breakeven BTCUSDT") }, events.toString())
         assertEquals(100.0, pos.stop!!, 1e-9)
 
         // +0.81% price = +8.1% ROI (0.8 is not exact in floating point — stay above it)
         // → trailing fires 5% ROI (0.5% price) behind the best.
         events = e.broker.manage("BTCUSDT", 100.81, e.risk)
-        assertTrue(events.any { it.startsWith("Trailing BTCUSDT") }, events.toString())
+        assertTrue(events.any { it.startsWith("PAPER trailing BTCUSDT") }, events.toString())
         assertEquals(100.81 * 0.995, pos.stop!!, 1e-6)
 
         // A pullback never widens the stop.
@@ -234,7 +234,10 @@ class RiskManagerTest {
         e.risk = e.risk.copy(breakevenRoiPct = 0.0, trailingTriggerRoiPct = 0.0)
         val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, e.risk)!!
         val events = e.broker.manage("BTCUSDT", 120.0, e.risk) // +200% ROI — nothing fires
-        assertTrue(events.none { it.startsWith("Breakeven") || it.startsWith("Trailing") }, events.toString())
+        assertTrue(
+            events.none { it.startsWith("PAPER breakeven") || it.startsWith("PAPER trailing") },
+            events.toString(),
+        )
         assertNull(pos.stop)
     }
 
