@@ -162,22 +162,22 @@ class LiquidationStopTest {
 
     @Test
     fun sl_pct_is_an_exact_distance_from_the_entry() {
-        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.02)
+        val plan = TpSlPlanner.plan(100.0, 1, 0.02)
         assertEquals(98.0, plan.stop!!, 1e-9)
-        val short = TpSlPlanner.plan(100.0, -1, 10, 0.02)
+        val short = TpSlPlanner.plan(100.0, -1, 0.02)
         assertEquals(102.0, short.stop!!, 1e-9)
     }
 
     @Test
     fun sl_pct_zero_means_no_stop_and_no_ladder() {
-        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.0)
+        val plan = TpSlPlanner.plan(100.0, 1, 0.0)
         assertNull(plan.stop)
         assertTrue(plan.ladder.isEmpty())
     }
 
     @Test
     fun the_ladder_is_built_from_the_stop_distance() {
-        val plan = TpSlPlanner.plan(100.0, 1, 10, 0.02)
+        val plan = TpSlPlanner.plan(100.0, 1, 0.02)
         assertEquals(4, plan.ladder.size)
         assertEquals(102.0, plan.ladder[0].first, 1e-9) // entry + 1R
         assertEquals(106.0, plan.ladder[2].first, 1e-9) // entry + 3R
@@ -185,18 +185,12 @@ class LiquidationStopTest {
     }
 
     @Test
-    fun liquidation_distance_follows_the_official_formula() {
-        // Liq = Entry × (1 − 1/Leverage + MMR)  →  distance = Entry × (1/Lev − MMR)
-        // Bitunix's own example: entry 50 000, 20x, MMR 0.25% → liq 47 625.
-        assertEquals(47_625.0, TpSlPlanner.liqPrice(50_000.0, 1, 20, mmr = 0.0025), 1e-6)
-        // Short side mirrors it: entry 50 000, 20x, MMR 0.25% → liq 52 375.
-        assertEquals(52_375.0, TpSlPlanner.liqPrice(50_000.0, -1, 20, mmr = 0.0025), 1e-6)
-        // The MMR eats into the room: at 100x with MMR 0.5% there is only 0.5%.
-        assertEquals(0.5, TpSlPlanner.liqDistance(100.0, 100, mmr = 0.005) / 100.0 * 100.0, 1e-9)
-        // No MMR (old, optimistic model) → the full 1/leverage.
-        assertEquals(1.0, TpSlPlanner.liqDistance(100.0, 100, mmr = 0.0) / 100.0 * 100.0, 1e-9)
-        // 1/200 = 0.5% equals MMR 0.5% → no room at all.
-        assertEquals(0.0, TpSlPlanner.liqDistance(100.0, 200, mmr = 0.005), 1e-12)
+    fun liquidation_is_exchange_reported_not_computed_locally() {
+        // Live liquidation comes from pending-position liqPrice; local TP/SL plan
+        // only owns stop/ladder math.
+        val plan = TpSlPlanner.plan(100.0, 1, 0.02)
+        assertEquals(98.0, plan.stop!!, 1e-9)
+        assertEquals(4, plan.ladder.size)
     }
 
     @Test

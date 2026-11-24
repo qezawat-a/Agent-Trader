@@ -22,8 +22,8 @@ with what actually happened.
 
 The trading side is not a toy: 37 strategies across six groups (Classic, Risk, Reversal,
 Breakout, Trend, Additional) plus the exact-spec names from the strategy spec, a 15m + 1h
-consensus gate, a TP/SL plan built around the **official** liquidation formula
-(`Liq = Entry × (1 − 1/Leverage + MMR)`, MMR read from the tier table), signed REST calls
+consensus gate, a TP/SL plan around stop/TP levels, with liquidation price read live from the exchange
+(`liqPrice` from pending positions), signed REST calls
 verified against the live Bitunix API, and a private WebSocket feed that streams balance,
 position, order and TP/SL updates into the chat,
 and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
@@ -306,12 +306,10 @@ and `settings trade` always show the current configured values.
   (fail-closed — the exchange would reject such an order anyway). There is no clamp the app
   derives by itself and no volatility-based leverage derivation: the selected leverage stands
   unless the tiered risk limit says otherwise.
-- **The liquidation math is the exchange's own.** Bitunix liquidates at
-  `Liq = Entry × (1 − 1/Leverage + MMR)`, so the maintenance margin rate is read from
-  `get_position_tiers` and subtracted from the room — at 75x with MMR 0.65% the real room is
-  0.68%, not the 1.33% a naive `entry/leverage` suggests. The stop is triggered on
-  **MARK_PRICE** (the same series the exchange liquidates against), so a fast move cannot
-  jump past the stop to the liquidation price.
+- **Liquidation is exchange-reported.** For live positions, the app reads liquidation from
+  Bitunix pending-position `liqPrice` (never computes a local liq formula). The stop is
+  triggered on **MARK_PRICE** (the same series the exchange liquidates against), so a fast
+  move cannot jump past the stop to liquidation.
 
 ## Development
 

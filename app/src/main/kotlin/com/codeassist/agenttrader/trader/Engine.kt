@@ -65,7 +65,7 @@ data class Position(
 /**
  * Exit rules — every value is user-changeable (chat or Control screen).
  * No stop exists for manual entries unless the user sets one (`set sl <pct>`);
- * the app never invents a distance or a fraction of liquidation — signal
+ * the app never invents a liquidation distance — signal
  * entries get the automatic stop (`set auto tpsl` on by default).
  */
 data class RiskSettings(
@@ -152,9 +152,7 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         if (qty <= 0.0) return null
         // Simulated market: the same plan semantics as LIVE — the stop is
         // exactly the user's configured distance (none by default).
-        val plan = TpSlPlanner.plan(
-            price, dir, leverage, risk.slPct / 100.0, TpSlPlanner.PAPER_SIMULATED_MMR,
-        )
+        val plan = TpSlPlanner.plan(price, dir, risk.slPct / 100.0)
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
         positions[symbol] = pos
         history.add("OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol @ ${fmt(price)} qty ${fmt(qty)}")
@@ -909,7 +907,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     margin = margin,
                     pnl = pnl,
                     pnlPct = if (margin > 0.0) pnl / margin * 100.0 else 0.0,
-                    liq = p.plan.liquidation.takeIf { it > 0.0 },
+                    liq = null,
                     stop = p.stop,
                     tps = p.plan.ladder.mapIndexed { i, (price, frac) ->
                         BoardTp("${i + 1}R", price, "${fmt0(frac * 100)}%", i < p.nextRung)
@@ -920,7 +918,7 @@ class TraderEngine(private val rest: BitunixRest) {
             return TradeBoard(
                 positions = positions,
                 orders = emptyList(),
-                note = "PAPER — TP/SL and liquidation are simulated locally; no exchange orders.",
+                note = "PAPER — TP/SL are simulated locally; liquidation is exchange-reported for live positions.",
             )
         }
 
@@ -1044,21 +1042,6 @@ class TraderEngine(private val rest: BitunixRest) {
         return tiers
     }
 
-    /**
-     * The maintenance margin rate (MMR) for a symbol at a given notional — the
-     * official tier table is the source of every rate. When the notional is
-     * beyond the table, the highest MMR in it applies (the most conservative
-     * tiered rate the exchange publishes). When the table is entirely
-     * unavailable (API down), the simulator's MMR stands in as a placeholder;
-     * the exchange's own `liqPrice` is always preferred over this formula.
-     */
-    internal fun mmrFor(symbol: String, notional: Double): Double {
-        val tiers = riskTiers(symbol)
-        if (tiers.isEmpty()) return TpSlPlanner.PAPER_SIMULATED_MMR
-        tierFor(tiers, notional)?.let { return it.mmr.coerceIn(0.0, 0.5) }
-        return tiers.maxByOrNull { it.mmr }?.mmr?.coerceIn(0.0, 0.5)
-            ?: TpSlPlanner.PAPER_SIMULATED_MMR
-    }
 
     /** Formats qty to the symbol's base precision, floored. */
     fun formatQty(symbol: String, raw: Double): String? = formatQty(symbol, raw, pairInfo(symbol))
@@ -1604,11 +1587,6 @@ class TraderEngine(private val rest: BitunixRest) {
         val (lev, levNote) = entryLeverage(symbol)
         if (lev <= 0) return levNote ?: "SKIP $symbol"
         val levLine = levNote?.let { " · $it" } ?: ""
-        // The maintenance margin rate of the tier this entry lands in — the
-        // official liquidation price is Entry × (1 − 1/Leverage + MMR), so the
-        // MMR decides how much room the position really has. Every tier
-        // rate comes from the symbol's get_position_tiers table.
-        val mmr = mmrFor(symbol, available * marginFraction * lev)
         // Margin sizing: the configured share of the FREE balance. The
         // exchange's `available` already excludes the margin the open positions
         // hold, so the size is the size the user set.
@@ -1619,9 +1597,7 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()
         val triggerBasis = mark ?: price
-        val plan = TpSlPlanner.plan(
-            triggerBasis, dir, lev, slPctForSignal(confidence) / 100.0, mmr,
-        )
+        val plan = TpSlPlanner.plan(triggerBasis, dir, slPctForSignal(confidence) / 100.0)
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
@@ -2352,7 +2328,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     "${i + 1}R ${fmt(price)} (${fmt0(frac * 100)}%, $state)"
                 }.joinToString(", ")
                 "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} entry ${fmt(p.entry)} " +
-                    "stop ${p.stop?.let { fmt(it) } ?: "none"} liq ${fmt(p.plan.liquidation)}\n" +
+                    "stop ${p.stop?.let { fmt(it) } ?: "none"} liq — (exchange-reported live)\n" +
                     "  TP ladder: $ladder\n" +
                     "  breakeven ${if (p.breakeven) "done" else "pending"}, " +
                     "paper TP/SL is simulated locally"

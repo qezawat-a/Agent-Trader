@@ -243,10 +243,10 @@ class RiskManagerTest {
     @Test
     fun sl_distance_is_the_users_own_setting() {
         // slPct is a fraction of the price, exactly the user's choice.
-        assertEquals(98.0, TpSlPlanner.plan(100.0, 1, 10, 0.02).stop!!, 1e-9)
-        assertEquals(102.0, TpSlPlanner.plan(100.0, -1, 10, 0.02).stop!!, 1e-9)
+        assertEquals(98.0, TpSlPlanner.plan(100.0, 1, 0.02).stop!!, 1e-9)
+        assertEquals(102.0, TpSlPlanner.plan(100.0, -1, 0.02).stop!!, 1e-9)
         // 0 = no stop at all — not an invented default.
-        assertNull(TpSlPlanner.plan(100.0, 1, 10, 0.0).stop)
+        assertNull(TpSlPlanner.plan(100.0, 1, 0.0).stop)
     }
 
     // ---- chat commands & routing ----

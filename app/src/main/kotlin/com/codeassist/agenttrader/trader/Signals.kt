@@ -228,22 +228,20 @@ object SignalAggregator {
 }
 
 /**
- * TP/SL plan expressed as prices — nothing here is an invented rule.
- *  - Stop-loss is the user's OWN explicit choice (`slPct`, `set sl <pct>`):
- *    a fixed distance from the entry, applied only when the user sets it.
- *    slPct = 0 means NO stop (the way a plain market order works) — the app
- *    never manufactures a stop of its own.
- *  - Partial take-profit ladder: 1R, 2R, 3R, 4R, each closing 25%. R is the
- *    entry-to-stop distance, and exists only when the user set a stop.
+ * TP/SL plan. Stops are the user's explicit choice — the app never invents a
+ * distance. The stop is either:
+ *  - the % from entry the user set (`set sl 2`, `sl 0` = no stop), OR
+ *  - 0 (no stop), and the position carries no TP ladder and no SL.
+ *  - Partial take-profit ladder: 1R, 2R, 3R, 4R, each closing 25%. R exists
+ *    only when the user set a stop.
  *  - Breakeven and trailing are user-configured rules (chat/Control screen).
- *  - Liquidation price uses the documented Bitunix formula; the MMR is the
- *    actual tier rate (LIVE) — see [PAPER_SIMULATED_MMR] for the simulator.
+ * Liquidation is exchange-reported for live positions (`liqPrice` from pending
+ * positions); local plans do not compute a liquidation formula.
  */
 data class TpSlPlan(
     val entry: Double,
     /** The user's stop price, or null when no stop is configured. */
     val stop: Double?,
-    val liquidation: Double,
     val ladder: List<Pair<Double, Double>>, // (price, fraction of position)
 )
 
@@ -252,14 +250,6 @@ object TpSlPlanner {
     const val LADDER_FRACTION = 0.25
     const val BREAKEVEN_ROI = 0.10
     const val TRAIL_ROI = 0.15
-
-    /**
-     * MMR used ONLY by the PAPER simulator. It is NOT an exchange value and
-     * is never used in LIVE mode — the live path reads the actual rate from
-     * the symbol's tiered risk-limit table (`get_position_tiers`). 0.5%
-     * papers over a missing live table during simulation.
-     */
-    const val PAPER_SIMULATED_MMR = 0.005
 
     /**
      * The SL distance the app puts on signal entries when the user set no
@@ -278,43 +268,18 @@ object TpSlPlanner {
         (if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT) * strength.coerceIn(0.0, 1.0)
 
     /**
-     * The liquidation distance from the entry, in price units:
-     *   Entry × (1/leverage − MMR)
-     *
-     * Zero when the leverage is too low for the MMR to leave any room — such
-     * an entry is refused rather than opened.
-     */
-    fun liqDistance(entry: Double, leverage: Int, mmr: Double = PAPER_SIMULATED_MMR): Double {
-        if (entry <= 0.0 || leverage <= 0) return 0.0
-        return maxOf(0.0, entry * (1.0 / leverage - mmr.coerceIn(0.0, 0.5)))
-    }
-
-    /** The liquidation price — the official Bitunix formula. */
-    fun liqPrice(entry: Double, dir: Int, leverage: Int, mmr: Double = PAPER_SIMULATED_MMR): Double {
-        val d = liqDistance(entry, leverage, mmr)
-        return if (dir > 0) entry - d else entry + d
-    }
-
-    /**
      * Builds a TP/SL plan. The stop is exactly [slPct] of the price away from
-     * the entry — the user's own choice, never a fraction of the liquidation
-     * distance, never widened by the symbol's noise, and never clamped.
-     * [slPct] = 0 means no stop (and no TP ladder).
+     * the entry — the user's own choice, never widened by the symbol's noise,
+     * and never clamped. [slPct] = 0 means no stop (and no TP ladder).
      */
-    fun plan(
-        entry: Double, dir: Int, leverage: Int,
-        slPct: Double = 0.0,
-        mmr: Double = PAPER_SIMULATED_MMR,
-    ): TpSlPlan {
-        val liqDist = liqDistance(entry, leverage, mmr)
-        val liq = if (dir > 0) entry - liqDist else entry + liqDist
+    fun plan(entry: Double, dir: Int, slPct: Double = 0.0): TpSlPlan {
         val dist = entry * slPct.coerceIn(0.0, 0.95)
         val stop = if (slPct > 0.0) (if (dir > 0) entry - dist else entry + dist) else null
         val r = stop?.let { abs(entry - it) }
         val ladder = if (r != null && r > 0.0)
             LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
         else emptyList()
-        return TpSlPlan(entry, stop, liq, ladder)
+        return TpSlPlan(entry, stop, ladder)
     }
 
     /** ROI of a position at a price, including leverage. */
