@@ -329,6 +329,31 @@ fun ControlScreen(
                         OutlinedButton(onClick = { onAction("set timeframes $tfText") }) { Text("Apply timeframes") }
                         OutlinedButton(onClick = { tfText = engine.timeframes.joinToString(",") }) { Text("Reset") }
                     }
+                    // TF min = confidence every SINGLE timeframe must reach.
+                    // Min conf = confidence the COMBINED signal must reach.
+                    var minTfText by remember(engine.configRev) { mutableStateOf(engine.minTfConfidence.toInt().toString()) }
+                    var minConfText by remember(engine.configRev) { mutableStateOf(engine.minConfidence.toInt().toString()) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            minTfText, { minTfText = it.filter { ch -> ch.isDigit() }.take(3) },
+                            label = { Text("TF min %") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set min tf $minTfText") }) { Text("Apply") }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            minConfText, { minConfText = it.filter { ch -> ch.isDigit() }.take(3) },
+                            label = { Text("Min conf %") }, singleLine = true,
+                            modifier = Modifier.weight(1f),
+                        )
+                        OutlinedButton(onClick = { onAction("set min conf $minConfText") }) { Text("Apply") }
+                    }
+                    ToggleRow(
+                        "Auto TP/SL", Icons.Default.Build, engine.autoTpsl,
+                        { on -> onAction("set auto tpsl ${if (on) "on" else "off"}") },
+                        "signal entries get the strength-scaled stop + 1R..4R TP ladder",
+                    )
                     var topText by remember(engine.configRev) { mutableStateOf(engine.scanTop.toString()) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
@@ -417,6 +442,23 @@ fun ControlScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = scheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(8.dp))
+                    // These fire the rules NOW for the open position — they do not
+                    // change the ROI thresholds, they move the stop immediately.
+                    Text(
+                        "Fire now (moves the stop on the open position without waiting for the ROI trigger)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = scheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        ActionButton("Fire breakeven", Icons.Default.PlayArrow, Modifier.weight(1f)) {
+                            onAction("fire breakeven")
+                        }
+                        ActionButton("Fire trailing", Icons.Default.Refresh, Modifier.weight(1f), scheme.tertiary) {
+                            onAction("fire trailing")
+                        }
+                    }
                 }
             }
         }

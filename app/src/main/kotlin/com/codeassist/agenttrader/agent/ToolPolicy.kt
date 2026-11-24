@@ -107,6 +107,10 @@ object ToolPolicy {
         // "set tp" is prefix-matched with a following space, so "set tp 2.5"
         // lands here while "set tp r 3" still hits the longer spec first.
         ToolSpec("set tp", ToolCapability.RISK),
+        // Manual stop moves: they change the live stop without the ROI trigger,
+        // so they carry the same risk authority as the automatic rules.
+        ToolSpec("fire breakeven", ToolCapability.RISK),
+        ToolSpec("fire trailing", ToolCapability.RISK),
 
         // ---- MONEY ----
         ToolSpec("close position", ToolCapability.MONEY),

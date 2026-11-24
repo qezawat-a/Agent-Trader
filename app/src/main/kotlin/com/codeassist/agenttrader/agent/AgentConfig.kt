@@ -158,6 +158,14 @@ class AgentConfig(context: Context) {
         get() = prefs.getFloat("tp_r", 0f)
         set(value) = prefs.edit().putFloat("tp_r", value).apply()
 
+    /**
+     * Automatic TP/SL on signal entries. On by default: a signal entry gets a
+     * strength-scaled stop plus the 1R..4R TP ladder.
+     */
+    var autoTpsl: Boolean
+        get() = prefs.getBoolean("auto_tpsl", true)
+        set(value) = prefs.edit().putBoolean("auto_tpsl", value).apply()
+
     /** Auto-universe: pick the top symbols by 24h change/volume automatically.
      *  On by default since v.2.4.4 — the app picks the universe itself, so the
      *  user never has to type a symbol list. Setting a fixed universe turns it off. */
@@ -221,6 +229,7 @@ class AgentConfig(context: Context) {
         "trail_distance_set" to trailDistanceSet,
         "sl_pct" to slPct,
         "tp_r" to tpR,
+        "auto_tpsl" to autoTpsl,
         "auto_universe" to autoUniverse,
         "auto_min_volume_usd" to autoMinVolumeUsd,
         "auto_rank_by" to autoRankBy,
@@ -268,6 +277,7 @@ class AgentConfig(context: Context) {
         restoreChosen(int("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
         int("sl_pct")?.let { slPct = it }
         num("tp_r")?.let { tpR = it.toFloat() }
+        bool("auto_tpsl")?.let { autoTpsl = it }
         bool("auto_universe")?.let { autoUniverse = it }
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }
         str("auto_rank_by")?.let { autoRankBy = it }

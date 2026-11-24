@@ -51,6 +51,14 @@ data class Position(
 )
 
 /**
+ * The two stop moves the user can fire by hand from the Control screen.
+ *
+ * "Fire" bypasses ONLY the ROI trigger: the stop still has to be a valid
+ * trigger for the current mark, and it still never widens an existing stop.
+ */
+enum class ManualStopRule { BREAKEVEN, TRAILING }
+
+/**
  * Exit rules — every value is user-changeable (chat or Control screen).
  * No stop exists for manual entries unless the user sets one (`set sl <pct>`);
  * the app never invents a distance or a fraction of liquidation — signal
@@ -201,6 +209,54 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         val p = positions[symbol] ?: return null
         realize(p, price, 1.0)
         return "CLOSE $symbol @ ${fmt(price)}"
+    }
+
+    /**
+     * Fires a stop move NOW, without waiting for the ROI trigger.
+     *
+     * The two safety rules still apply:
+     *  - the stop is never widened (a stop already tighter than the candidate
+     *    is left alone);
+     *  - breakeven only ever moves the stop to the entry price.
+     *
+     * The trigger ROI is deliberately ignored here — that is the whole point
+     * of the button. The trailing DISTANCE is still the user's setting.
+     */
+    fun fire(symbol: String, price: Double, risk: RiskSettings, rule: ManualStopRule): String {
+        val p = positions[symbol] ?: return "No open paper position on $symbol."
+        if (price <= 0.0 || price.isNaN()) return "No price for $symbol."
+        if (p.dir > 0) p.best = maxOf(p.best, price) else p.best = minOf(p.best, price)
+        return when (rule) {
+            ManualStopRule.BREAKEVEN -> {
+                val cur = p.stop
+                if (cur != null && !improvesStop(p.dir, p.entry, cur)) {
+                    // Already tighter than entry: mark the rule done, but never
+                    // widen the existing stop back to the entry.
+                    p.breakeven = true
+                    "PAPER breakeven $symbol: SL already tighter than entry (${fmt(cur)}) — left unchanged."
+                } else {
+                    p.stop = p.entry
+                    p.breakeven = true
+                    "PAPER breakeven $symbol: SL moved to entry ${fmt(p.entry)}."
+                }
+            }
+            ManualStopRule.TRAILING -> {
+                if (risk.trailDistanceRoiPct <= 0.0) {
+                    "Trailing distance is off — set trail distance first (e.g. set trail distance 15)."
+                } else {
+                    val trail = TpSlPlanner.trailStop(
+                        p.best, p.dir, p.leverage, risk.trailDistanceRoiPct / 100.0,
+                    )
+                    val cur = p.stop
+                    if (cur != null && !improvesStop(p.dir, trail, cur)) {
+                        "PAPER trailing $symbol: SL already tighter than ${fmt(trail)} — left unchanged."
+                    } else {
+                        p.stop = trail
+                        "PAPER trailing $symbol: SL moved to ${fmt(trail)} (best ${fmt(p.best)})."
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -1729,6 +1785,101 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /**
+     * Fires a stop move NOW for an open position (the Control screen's
+     * "Fire breakeven" / "Fire trailing" buttons, and the matching chat
+     * commands).
+     *
+     * The ROI trigger is bypassed on purpose — the user asked for the move.
+     * Everything else still has to hold: the stop never widens, and the
+     * exchange still has to accept the trigger side of the current mark.
+     *
+     * PAPER: the simulated stop moves immediately.
+     * LIVE: the position-level TP/SL order is modified/created and the new
+     * stop is read back from the exchange before it is reported as done.
+     *
+     * BLOCKING (REST) — callers must run it off the UI thread.
+     */
+    fun fireStopRule(rule: ManualStopRule, symbolArg: String = ""): String {
+        val wanted = symbolArg.trim().uppercase()
+        if (!live) {
+            val open = broker.snapshot().map { it.key }
+            val sym = when {
+                wanted.isNotBlank() -> wanted
+                open.size == 1 -> open.first()
+                else -> return "Usage: fire ${rule.name.lowercase()} <SYMBOL> — open: " +
+                    open.joinToString(", ").ifEmpty { "(none)" }
+            }
+            val pos = broker.positions[sym] ?: return "No open paper position on $sym."
+            // The paper book already tracks the best price it has seen; a REST
+            // round-trip here would only add latency (and fail offline).
+            val px = wsLivePrice(sym) ?: pos.best
+            if (px <= 0.0) return "No price for $sym."
+            return broker.fire(sym, px, risk, rule)
+        }
+        if (rule == ManualStopRule.TRAILING && risk.trailDistanceRoiPct <= 0.0) {
+            return "Trailing distance is off — set trail distance first (e.g. set trail distance 15)."
+        }
+        val positions = try {
+            rest.pendingPositions()
+        } catch (e: Exception) {
+            return "Live positions failed: ${e.message ?: e.javaClass.simpleName}"
+        }
+        val openSymbols = (0 until positions.length())
+            .map { positions.getJSONObject(it).optString("symbol").uppercase() }
+            .filter { it.isNotBlank() }
+        val sym = when {
+            wanted.isNotBlank() -> wanted
+            openSymbols.size == 1 -> openSymbols.first()
+            else -> return "Usage: fire ${rule.name.lowercase()} <SYMBOL> — open: " +
+                openSymbols.joinToString(", ").ifEmpty { "(none)" }
+        }
+        val p = (0 until positions.length())
+            .map { positions.getJSONObject(it) }
+            .firstOrNull { it.optString("symbol").uppercase() == sym }
+            ?: return "No live position on $sym."
+        val positionId = p.optString("positionId")
+        if (positionId.isBlank()) return "No live position id for $sym."
+        val entry = posEntry(p).toDoubleOrNull() ?: return "No entry price for $sym."
+        val dir = when (p.optString("side").uppercase()) {
+            "LONG", "BUY" -> 1
+            "SHORT", "SELL" -> -1
+            else -> return "Unknown position side for $sym."
+        }
+        val lev = p.optString("leverage").toIntOrNull()?.takeIf { it > 0 } ?: effectiveLeverage(sym)
+        val mark = wsMarketData(sym)?.optDouble("mp")?.takeIf { it > 0 && !it.isNaN() }
+            ?: runCatching { rest.markPrice(sym).optString("markPrice").toDoubleOrNull() }
+                .getOrNull()?.takeIf { it > 0 }
+            ?: return "No mark price for $sym."
+        // The stop already on the exchange is the baseline: the candidate must
+        // improve it, never widen it.
+        val curStop = liveLastStop[sym]
+            ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
+            ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
+        val candidate = when (rule) {
+            ManualStopRule.BREAKEVEN -> entry
+            ManualStopRule.TRAILING -> {
+                val prevBest = liveBest[sym]
+                val best = if (dir > 0) maxOf(mark, prevBest ?: mark) else minOf(mark, prevBest ?: mark)
+                liveBest[sym] = best
+                TpSlPlanner.trailStop(best, dir, lev, risk.trailDistanceRoiPct / 100.0)
+            }
+        }
+        if (curStop != null && !improvesStop(dir, candidate, curStop)) {
+            return "LIVE ${rule.name.lowercase()} $sym: SL already tighter than ${fmt(candidate)} — left unchanged."
+        }
+        if (!slTriggerValid(dir, candidate, mark)) {
+            return "LIVE ${rule.name.lowercase()} $sym: ${fmt(candidate)} is on the wrong side of the current mark ${fmt(mark)} — not sent."
+        }
+        val roi = TpSlPlanner.roi(entry, mark, dir, lev)
+        val events = mutableListOf<String>()
+        val reason = if (rule == ManualStopRule.BREAKEVEN) "Manual breakeven" else "Manual trailing"
+        val ok = applyLiveSl(sym, positionId, candidate, dir, mark, reason, roi, events)
+        if (!ok) return "LIVE ${rule.name.lowercase()} $sym: SL move not confirmed — ${events.joinToString(" ")}"
+        if (rule == ManualStopRule.BREAKEVEN) liveBreakevenDone[sym] = true
+        return "LIVE ${rule.name.lowercase()} $sym: SL moved to ${fmt(candidate)}."
+    }
+
+    /**
      * Live mid-management: walks the exchange's open positions with the mark price
      * and moves the exchange SL when the risk manager's breakeven or trailing rules
      * fire (modify_position_tpsl). A stop is NEVER widened — trailing only fires
@@ -2412,6 +2563,12 @@ class TraderEngine(private val rest: BitunixRest) {
                     configRev++
                     "Margin per trade set to ${v.toInt()}% of balance."
                 }
+            }
+            t.startsWith("fire breakeven") || t.startsWith("fire trailing") -> {
+                val rule = if (t.startsWith("fire breakeven")) ManualStopRule.BREAKEVEN else ManualStopRule.TRAILING
+                val sym = argsOf(raw, if (rule == ManualStopRule.BREAKEVEN) "fire breakeven" else "fire trailing")
+                    .trim().uppercase()
+                fireStopRule(rule, sym)
             }
             t.startsWith("set breakeven") -> {
                 val v = extractNumber(t.removePrefix("set breakeven"))

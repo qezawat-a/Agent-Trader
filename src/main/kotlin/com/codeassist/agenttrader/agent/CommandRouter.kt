@@ -56,6 +56,7 @@ object CommandRouter {
         "tiers", "signals", "settings trade", "mid management",
         "scan on", "scan off", "scan once", "report on", "report off",
         "close all", "live mode", "paper mode", "refresh auto", "auto on", "auto off",
+        "fire breakeven", "fire trailing",
     )
 
     /**
@@ -72,6 +73,7 @@ object CommandRouter {
         "min volume", "auto universe", "auto rank", "auto gainers", "auto volume",
         "auto losers", "auto movers", "scan top",
         "close position", "manual entry", "report interval",
+        "fire breakeven", "fire trailing",
     )
 
     fun parse(input: String): Parsed {

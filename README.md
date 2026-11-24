@@ -112,9 +112,12 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 
 **Risk manager & exits**
 
-`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off)
+`set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off) ·
+`fire breakeven [SYMBOL]` · `fire trailing [SYMBOL]` (fire the stop move NOW — the ROI trigger is bypassed, but a stop is never widened)
 
 Stop-loss is the user's own setting: `set sl <pct>` attaches a stop that many percent from the entry; `0` attaches none (a plain market order) — the app never invents a stop, a fraction of liquidation, or a volatility floor. The take-profit ladder (1R..4R) is sized on this distance and only exists when a stop is set.
+
+The Control screen (the fourth window) holds every gate and exit control in one place: **Timeframes** (TF), **TF min %** (confidence per timeframe), **Min conf %** (combined confidence), **Auto TP/SL** (on/off — persisted), and the **Fire breakeven** / **Fire trailing** buttons. The Fire buttons act on the open position immediately: they bypass the ROI trigger only; the stop still never widens and the exchange still has to accept the trigger side of the current mark. The general **Settings** navigation stays in the bottom bar — it is not duplicated in Control.
 
 The leverage an entry may use is checked against the symbol's **live tiered risk-limit table** (`get_position_tiers`): the tier the selected leverage maps to is the highest tier whose maximum leverage covers the selection, and the position value must stay within that tier's nominal cap — otherwise the entry is refused (fail-closed). PAPER mode simulates at the configured leverage.
 
