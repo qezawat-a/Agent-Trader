@@ -1605,7 +1605,7 @@ class TraderEngine(private val rest: BitunixRest) {
             advisor(msgs + listOf(
                 "assistant" to (text ?: ""),
                 "user" to "Rejected: $bad. $side at ${fmt(price)} with ${lev}x: $limits. " +
-                    "If no stop inside that range makes sense for this setup, reply {\"sl\": 0, \"tp\": 0, \"reason\": \"...\"}. " +
+                    "The leverage stays; tighten the stop to a level inside that range. " +
                     "Reply with only the JSON object.",
             ))
         }.getOrNull()
