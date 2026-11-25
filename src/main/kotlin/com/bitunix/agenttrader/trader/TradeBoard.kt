@@ -110,6 +110,10 @@ internal fun parseBoardOrders(orders: JSONArray, tpsls: JSONArray): List<BoardOr
 }
 
 /** Live TP and SL levels for one symbol, derived from the TP/SL order list. */
+/** "partial · qty X" for a partial TP order, "position · all" for the position-level TP. */
+internal fun tpKind(tpQty: Double): String =
+    if (tpQty > 0.0) "partial · qty ${tpQty.toBigDecimal().stripTrailingZeros().toPlainString()}" else "position · all"
+
 internal fun tpslFor(tpsls: JSONArray, symbol: String): Pair<Double?, List<BoardTp>> {
     val prices = ArrayList<BoardTp>()
     var stop: Double? = null
@@ -118,8 +122,10 @@ internal fun tpslFor(tpsls: JSONArray, symbol: String): Pair<Double?, List<Board
         if (o.optString("symbol") != symbol) continue
         val tp = doubleOf(o, "tpPrice")
         if (tp > 0.0) {
-            val qty = doubleOf(o, "tpQty").takeIf { it > 0.0 } ?: doubleOf(o, "qty")
-            prices += BoardTp("TP", tp, if (qty > 0.0) "qty $qty" else "", false)
+            // Bitunix: a partial TP/SL order carries tpQty; a position-level
+            // TP/SL closes the whole position and carries none.
+            val partQty = doubleOf(o, "tpQty")
+            prices += BoardTp("TP", tp, tpKind(partQty), false)
         }
         val sl = doubleOf(o, "slPrice")
         if (sl > 0.0 && stop == null) stop = sl
