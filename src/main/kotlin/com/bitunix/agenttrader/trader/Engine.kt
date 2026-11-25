@@ -2531,7 +2531,7 @@ class TraderEngine(private val rest: BitunixRest) {
             } else "Paper mode: orders are simulated instantly."
             t.startsWith("tpsl_history") -> {
                 val base = risk.slPct
-                val stop = if (autoTpsl) "set by the agent per entry (signal + candles)"
+                val stop = if (autoTpsl) "auto — set by the agent per entry (signal + candles)"
                 else if (base > 0) "${fmt1(base)}% from entry (set sl 0 for none)"
                 else "none (set sl <pct>)"
                 "TP/SL: stop $stop, " +
