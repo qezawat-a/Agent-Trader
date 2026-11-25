@@ -18,13 +18,12 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -1213,8 +1212,9 @@ fun AgentApp(
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(WindowInsets.systemBars.asPaddingValues())
-                .imePadding(),
+                // safeDrawing = system bars ∪ keyboard ∪ cutout. Padding for the
+                // bars AND the keyboard separately counted the nav bar twice.
+                .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
             // ---- Top bar: always shows where you are and how to get back ----
             Row(
@@ -1524,7 +1524,6 @@ fun SettingsScreen(
     post: (Runnable) -> Unit,
     onDone: (String, Boolean) -> Unit,
 ) {
-    val insets = WindowInsets.systemBars.asPaddingValues()
     val scheme = MaterialTheme.colorScheme
     var baseUrl by remember { mutableStateOf(config.baseUrl) }
     var apiKey by remember { mutableStateOf(config.apiKey) }
@@ -1599,7 +1598,7 @@ fun SettingsScreen(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(insets)
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(12.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(8.dp),
