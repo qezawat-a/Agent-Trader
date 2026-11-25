@@ -108,28 +108,34 @@ class AgentSession(
         history.add("user" to userText)
         val window = listOf("system" to systemPrompt) + history.takeLast(historyWindow)
 
-        var reply = ask(model, window)
-        val wanted = AgentBrain.extractToolCalls(reply).take(maxToolCalls)
+        var convo = window
+        var reply = ask(model, convo)
         val receipts = mutableListOf<Receipt>()
+        val ran = mutableSetOf<String>()
 
-        if (wanted.isNotEmpty()) {
-            for (command in wanted) {
-                val receipt = resolve(command, userText)
-                receipts += receipt
-                onReceipt(receipt)
+        // Up to MAX_ROUNDS rounds: look → act → verify. Each round runs at most
+        // [maxToolCalls] calls; a call already made this turn is not repeated.
+        for (round in 1..MAX_ROUNDS) {
+            val wanted = AgentBrain.extractToolCalls(reply)
+                .filter { ran.add(it.lowercase()) }
+                .take(maxToolCalls)
+            if (wanted.isEmpty()) break
+            val thisRound = wanted.map { command ->
+                resolve(command, userText).also { receipts += it; onReceipt(it) }
             }
-            // A second pass is only useful when something actually ran; otherwise
+            // A further pass is only useful when something actually ran; otherwise
             // the model would be asked to comment on actions it never performed.
-            if (receipts.any { it.status != ReceiptStatus.BLOCKED }) {
-                val withTools = window + listOf(
-                    "assistant" to reply,
-                    "user" to "Tool results:\n" +
-                        receipts.joinToString("\n") { it.renderForModel() } +
-                        "\nNow answer the user using these results. Never claim an action " +
-                        "marked blocked or failed was done.",
-                )
-                reply = ask(model, withTools)
-            }
+            if (thisRound.none { it.status != ReceiptStatus.BLOCKED }) break
+            val more = if (round < MAX_ROUNDS) "If the results show a cause you can fix with a tool, " +
+                "call it now; otherwise answer. " else ""
+            convo = convo + listOf(
+                "assistant" to reply,
+                "user" to "Tool results:\n" +
+                    thisRound.joinToString("\n") { it.renderForModel() } +
+                    "\n" + more + "Answer the user using these results. Never claim an action " +
+                    "marked blocked or failed was done.",
+            )
+            reply = ask(model, convo)
         }
 
         val answer = AgentBrain.stripToolCalls(reply).ifBlank {
@@ -181,10 +187,15 @@ class AgentSession(
         /** Hard cap enforced in code, not in the prompt. */
         const val MAX_TOOL_CALLS = 3
 
+        /** Tool rounds per turn (look, act, verify). */
+        const val MAX_ROUNDS = 3
+
         /** How many messages of memory the model sees. */
         const val HISTORY_WINDOW = 12
 
-        private const val MAX_TOKENS = 1024
+        // Reasoning models spend tokens thinking before the answer; 1024 left
+        // some of them with empty content.
+        private const val MAX_TOKENS = 4096
 
         /** Engine replies that mean the command was understood but did not take effect. */
         private val FAILURE_MARKERS = listOf(

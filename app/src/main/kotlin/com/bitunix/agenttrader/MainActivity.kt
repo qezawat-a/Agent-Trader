@@ -135,7 +135,7 @@ class MainActivity : ComponentActivity() {
 private val CAPABILITIES = """
 Screens: Chat (this one), Trade (one-tap entries), Control (switches + risk sliders), Settings (provider, model, soul, Bitunix keys).
 Chat commands: /help /models /set_model /connect_provider /check_ai /price /clear /soul /add_soul /think /memory /add_skill /skill /mcp /add_mcp /check_system /diagnose <what is wrong> /repair /autopsy /verify /code_review (/review) /bug_fix /simplify /team_spawn /ws on|off
-Self-diagnosis: /verify runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
+Self-diagnosis as tools (call them yourself, never send the user to them): diagnose, recent log, check ai, models; self-repair: repair, set model <id>. The user can also type /verify, which runs real probes; /diagnose <complaint> echoes your report and shows exactly which checks ran and which failed; a free-text bug report is routed to the same evidence collector instead of a generic chat answer.
 Trader commands: the exact list is in your tool set above — act with <tool>...</tool> calls. The user can also type them directly in chat.
 The universe is automatic: every scan refreshes it to the top symbols by 24h gainers or volume (min 24h volume filter). "set universe ..." switches to a fixed list.
 The Control screen turns engine/trading/scanner/report on and off and sets leverage, margin per trade and report interval. The Trade screen opens or closes a position in one tap.
@@ -246,6 +246,9 @@ fun AgentApp(
      */
     val engineBox = remember { AtomicReference(engine) }
     SideEffect { engineBox.set(engine) }
+    // App-level tools the model may call (diagnose, repair, models...). Set
+    // further down, once the functions they use exist. Null result = engine command.
+    val appToolBox = remember { AtomicReference<((String) -> String?)?>(null) }
 
     // A model-requested action waiting for the user's one-tap confirmation.
     var consentRequest by remember { mutableStateOf<Pair<String, String>?>(null) }
@@ -256,7 +259,7 @@ fun AgentApp(
             transport = ChatTransport { model, msgs, maxTokens ->
                 ChatReply(ModelClient(config.baseUrl, config.apiKey).chat(model, msgs, maxTokens))
             },
-            execute = { command -> engineBox.get().handle(command) },
+            execute = { command -> appToolBox.get()?.invoke(command) ?: engineBox.get().handle(command) },
             consent = ConsentGate { command, reason ->
                 // Blocks the worker thread (never the UI thread) until the user
                 // answers, denies on timeout so the chat can never hang forever.
@@ -668,6 +671,42 @@ fun AgentApp(
             }
         }.trim()
     }
+
+    /** The model's app-level tools; anything else goes to the engine. */
+    fun appTool(command: String): String? {
+        val c = command.trim()
+        val lc = c.lowercase()
+        return when {
+            lc == "diagnose" || lc.startsWith("diagnose ") -> diagnoseReport(c.drop(8).trim(), deep = true)
+            lc == "repair" || lc.startsWith("repair ") -> repairNow()
+            lc == "recent log" -> {
+                val lines = runCatching { messages.toList() }.getOrDefault(emptyList())
+                    .filter { !it.isUser }
+                    .takeLast(30)
+                lines.joinToString("\n") { "${it.time} ${it.text.replace('\n', ' ').take(240)}" }
+                    .ifBlank { "No recent lines." }
+            }
+            lc == "models" -> runCatching {
+                val ids = ModelClient(config.baseUrl, config.apiKey).listModels()
+                if (ids.isEmpty()) "No models returned for this key."
+                else "Current: ${config.model.ifBlank { "(none)" }}\n${ids.size} models: " + ids.take(60).joinToString(", ")
+            }.getOrElse { "Model list failed: ${it.message}" }
+            lc == "check ai" -> runCatching {
+                val reply = ModelClient(config.baseUrl, config.apiKey).chat(config.model, listOf("user" to "Say OK."), 64)
+                "Model '${config.model}' replied: ${reply.take(60).ifBlank { "(empty content)" }}"
+            }.getOrElse { "Model '${config.model}' failed: ${it.message}" }
+            lc.startsWith("set model ") -> {
+                val id = c.substring("set model ".length).trim()
+                runCatching {
+                    val reply = ModelClient(config.baseUrl, config.apiKey).chat(id, listOf("user" to "Say OK."), 64)
+                    config.model = id
+                    "Model set to $id (replied: ${reply.take(40).ifBlank { "(empty content)" }})."
+                }.getOrElse { "Model $id failed, kept ${config.model}: ${it.message}" }
+            }
+            else -> null
+        }
+    }
+    SideEffect { appToolBox.set(::appTool) }
 
     /** Runs a trader command (or the self-repair flow) from a button. */
     fun runAction(cmd: String) {

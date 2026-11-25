@@ -97,4 +97,14 @@ class ToolPolicyTest {
             }
         }
     }
+
+    @Test
+    fun self_diagnosis_reads_freely_and_repair_follows_a_complaint() {
+        assertEquals(ToolDecision.Allow, ToolPolicy.authorize("diagnose", "hi"))
+        assertEquals(ToolDecision.Allow, ToolPolicy.authorize("recent log", "hi"))
+        assertEquals(ToolDecision.Allow, ToolPolicy.authorize("repair", "ws gir mide, fix kon"))
+        assertEquals(ToolDecision.Allow, ToolPolicy.authorize("repair", "مشکل داره"))
+        assertTrue(ToolPolicy.authorize("repair", "hello") is ToolDecision.Confirm)
+        assertTrue(ToolPolicy.authorize("set auto tpsl off", "turn it off") is ToolDecision.Confirm)
+    }
 }

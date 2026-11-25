@@ -191,4 +191,31 @@ class AgentSessionTest {
 
         assertEquals(listOf("status", "close all"), seen.map { it.command })
     }
+
+    @Test
+    fun the_agent_can_look_then_fix_then_answer_in_one_turn() {
+        val t = FakeTransport()
+        t.replies += "<tool>diagnose</tool>"
+        t.replies += "Feed is down. <tool>repair</tool>"
+        t.replies += "Fixed: the feed reconnected."
+        val executed = mutableListOf<String>()
+        val s = session(t, { executed += it; "done" })
+        s.beginSession("test")
+        val out = s.turn("model", "sys", "ws moshkel dare, fix kon")
+        assertEquals(listOf("diagnose", "repair"), executed)
+        assertEquals(3, t.prompts.size)
+        assertTrue(out.answer.contains("Fixed"), out.answer)
+    }
+
+    @Test
+    fun the_same_call_is_not_repeated_within_a_turn() {
+        val t = FakeTransport()
+        t.replies += "<tool>status</tool>"
+        t.replies += "<tool>status</tool> still checking"
+        val executed = mutableListOf<String>()
+        val s = session(t, { executed += it; "ok" })
+        s.beginSession("test")
+        s.turn("model", "sys", "status?")
+        assertEquals(listOf("status"), executed)
+    }
 }
