@@ -7,9 +7,13 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 
+private fun dnsOf(f: (String) -> List<InetAddress>) = object : Dns {
+    override fun lookup(hostname: String): List<InetAddress> = f(hostname)
+}
+
 class ResilientDnsTest {
     private val ip = InetAddress.getByAddress("fapi.bitunix.com", byteArrayOf(1, 2, 3, 4))
-    private val failing = Dns { throw UnknownHostException("Unable to resolve host \"$it\"") }
+    private val failing = dnsOf { throw UnknownHostException("Unable to resolve host \"$it\"") }
 
     @Test
     fun parses_a_dns_json_answer() {
@@ -22,7 +26,7 @@ class ResilientDnsTest {
         var systemUp = true
         var dohUp = true
         val dns = ResilientDns(
-            system = Dns { if (systemUp) listOf(ip) else throw UnknownHostException(it) },
+            system = dnsOf { if (systemUp) listOf(ip) else throw UnknownHostException(it) },
             doh = { if (dohUp) listOf(ip) else emptyList() },
         )
         assertEquals(listOf(ip), dns.lookup("fapi.bitunix.com"))
