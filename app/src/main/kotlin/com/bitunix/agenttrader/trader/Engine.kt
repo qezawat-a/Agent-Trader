@@ -1763,7 +1763,10 @@ class TraderEngine(private val rest: BitunixRest) {
                     }
                     pid
                 }.getOrNull()
-                val ladderNote = if (pid.isNotBlank()) armLadder(symbol, pid, qty, plan) else ""
+                // The partial TP ladder was removed (2026-11-26): on the
+                // exchange each rung closed the whole position. One position
+                // TP/SL (agent SL + TP) is the only exit order now.
+                val ladderNote = ""
                 val slNote = when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
@@ -1800,38 +1803,6 @@ class TraderEngine(private val rest: BitunixRest) {
             val line = "LIVE ERROR $symbol: ${e.message ?: e.javaClass.simpleName}"
             onEvent?.invoke(line)
             return line
-        }
-    }
-
-    /**
-     * Arms the partial take-profit rungs on the exchange — Bitunix's official
-     * "Partial TP/SL" method (POST /api/v1/futures/tpsl/place_order with tpQty).
-     * Every rung of [plan] except the last closes [TpSlPlanner.LADDER_FRACTION]
-     * of the entry qty; the last rung is the position TP/SL, which closes the
-     * rest. Before this, LIVE attached a single TP for the whole size while the
-     * settings text promised the 1R–4R ladder (which only paper had).
-     * A rung whose qty is below the pair's minimum is skipped, not invented.
-     */
-    private fun armLadder(symbol: String, positionId: String, qty: String, plan: TpSlPlan): String {
-        val rungs = plan.ladder.dropLast(1)
-        if (rungs.isEmpty()) return ""
-        val total = qty.toDoubleOrNull() ?: return ""
-        var ok = 0
-        var failed = 0
-        for ((price, frac) in rungs) {
-            val rungQty = formatQty(symbol, total * frac) ?: continue
-            runCatching {
-                rest.placeTpSlOrder(
-                    symbol, positionId,
-                    tpPrice = formatPrice(symbol, price), tpQty = rungQty,
-                    tpStopType = "LAST_PRICE", tpOrderType = "MARKET",
-                )
-            }.onSuccess { ok++ }.onFailure { failed++ }
-        }
-        return when {
-            ok == 0 && failed == 0 -> " | TP ladder skipped (rung qty below min)"
-            failed > 0 -> " | TP ladder: $ok/${rungs.size} rungs armed ($failed rejected)"
-            else -> " | TP ladder: $ok rungs armed"
         }
     }
 
@@ -2271,6 +2242,18 @@ class TraderEngine(private val rest: BitunixRest) {
             events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
             return false
         }
+        // One stop per position: cancel any other TP/SL order on it (an extra
+        // stop the old code added, or an old partial rung that closes 100%).
+        runCatching {
+            val keep = rest.positionTpSlOrder(sym, positionId)?.optString("id")
+                ?.ifBlank { null } ?: rest.positionTpSlOrder(sym, positionId)?.optString("orderId")
+            val all = rest.pendingTpSlOrders(sym, positionId)
+            for (j in 0 until all.length()) {
+                val o = all.optJSONObject(j) ?: continue
+                val id = o.optString("id").ifBlank { o.optString("orderId") }
+                if (id.isNotBlank() && id != keep) runCatching { rest.cancelTpSl(sym, id) }
+            }
+        }
         // Confirmed by the exchange — only now is local state allowed to change.
         liveLastStop[sym] = applied
         events.add("SL moved to ${fmt(applied)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
@@ -2602,7 +2585,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else if (base > 0) "${fmt1(base)}% from entry (set sl 0 for none)"
                 else "none (set sl <pct>)"
                 "TP/SL: stop $stop, " +
-                    "ladder: 25% per 1R up to the TP, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                    "live exits: one position TP/SL (no partial TP), breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
                     "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             }
             t.startsWith("tiers") -> {
