@@ -62,6 +62,24 @@ class AutoTpSlTest {
     }
 
     @Test
+    fun a_manual_entry_without_agent_levels_is_not_opened() {
+        val e = engine()
+        val out = e.manualEntry("BTCUSDT", 1, 0.1)
+        assertTrue(out.startsWith("SKIP"), out)
+        assertTrue(e.broker.positions.isEmpty())
+    }
+
+    @Test
+    fun an_empty_model_reply_is_reported_and_retried_once() {
+        val e = engine()
+        var calls = 0
+        e.tpslAdvisor = { calls++; "" }
+        val why = ask(e).second!!
+        assertEquals(2, calls)
+        assertTrue("empty reply" in why, why)
+    }
+
+    @Test
     fun manual_entries_keep_the_users_stop_only() {
         val e = engine()
         assertEquals(0.0, e.slPctForSignal(null))
