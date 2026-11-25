@@ -673,6 +673,9 @@ fun AgentApp(
         when {
             cmd.startsWith("diagnose") -> runAsync(post, ::say) { diagnoseReport() }
             cmd.startsWith("repair") -> runAsync(post, ::say) { repairNow() }
+            // Slash commands belong to the chat, not the engine: the Help chip
+            // used to reach engine.handle("/help") → "Not supported yet".
+            cmd == "/help" -> say(CommandRouter.helpText())
             else -> runAsync(post, ::say) { engine.handle(cmd) }
         }
     }
