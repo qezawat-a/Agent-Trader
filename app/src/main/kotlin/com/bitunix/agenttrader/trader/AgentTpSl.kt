@@ -45,6 +45,10 @@ object AgentTpSl {
         val data = buildString {
             appendLine("symbol ${a.symbol} · side $side · entry ~${fmt(a.price)} · leverage ${a.leverage}x")
             appendLine("liquidation price ${fmt(a.liquidation)}")
+            if (a.liquidation > 0.0 && a.price > 0.0) {
+                val room = kotlin.math.abs(a.price - a.liquidation) / a.price * 100.0
+                appendLine("room to liquidation ${"%.2f".format(java.util.Locale.US, room)}% of price — the stop must be closer to entry than this")
+            }
             appendLine("combined signal strength ${fmt0(a.confidence)}%")
             for ((tf, s) in a.perTimeframe) {
                 val d = when { s.dir > 0 -> "LONG"; s.dir < 0 -> "SHORT"; else -> "none" }
@@ -62,6 +66,8 @@ object AgentTpSl {
             "the signal strength on each timeframe. A stronger, better-agreeing signal " +
             "may justify a farther target; a weak one a closer target or a tighter stop. " +
             "The stop must sit between the entry and the liquidation price. " +
+            "The leverage is fixed: when the structure would put the stop past liquidation, " +
+            "tighten the stop to a level inside that room instead. " +
             "Answer with ONE JSON object and nothing else: " +
             "{\"sl\": <price>, \"tp\": <price>, \"reason\": \"<one short sentence>\"}"
         return listOf("system" to system, "user" to data)

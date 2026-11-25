@@ -1407,7 +1407,10 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             } else null
             if (live) {
-                out.add(placeLive(sym, sig.dir, price, riskFraction, sig.confidence, openPositions, advice))
+                out.add(placeLive(
+                    sym, sig.dir, price, riskFraction, sig.confidence, openPositions, advice,
+                    reAsk = { b, l, m -> agentTpSl(sym, sig.dir, b, l, sig.confidence, byTf, perTf, m) },
+                ))
             } else {
                 val (lev, levNote) = entryLeverage(sym)
                 val (riskAt, tpRAt) = adviceToPlan(advice, price) ?: (risk to tpR)
@@ -1467,18 +1470,24 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         val px = symbolPrice(sym)
         if (px <= 0) return "No price for $sym."
-        return placeLive(sym, dir, px, sizeFraction, null, advice = advice)
+        return placeLive(
+            sym, dir, px, sizeFraction, null, adviceIn = advice,
+            reAsk = if (autoTpsl) { b, l, m -> manualAdvice(sym, dir, b, l, m) } else null,
+        )
     }
 
     /** The agent's TP/SL for a manual entry: same data the scanner gives it. */
-    private fun manualAdvice(sym: String, dir: Int): Pair<TpSlAdvice?, String?> = runCatching {
+    private fun manualAdvice(
+        sym: String, dir: Int,
+        basis: Double? = null, levAt: Int? = null, mmrAt: Double? = null,
+    ): Pair<TpSlAdvice?, String?> = runCatching {
         val byTf = timeframes.associateWith { candles(sym, it) }
         val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
         val conf = SignalAggregator.combine(perTf, gates())?.takeIf { it.dir == dir }?.confidence ?: 0.0
-        val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close ?: symbolPrice(sym)
-        val lev = entryLeverage(sym).first
+        val price = basis ?: byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close ?: symbolPrice(sym)
+        val lev = levAt ?: entryLeverage(sym).first
         if (lev <= 0) return null to "no leverage for $sym"
-        val mmr = if (live) mmrFor(sym, 0.0) else TpSlPlanner.PAPER_SIMULATED_MMR
+        val mmr = mmrAt ?: if (live) mmrFor(sym, 0.0) else TpSlPlanner.PAPER_SIMULATED_MMR
         agentTpSl(sym, dir, price, lev, conf, byTf, perTf, mmr)
     }.getOrElse { null to "market data failed: ${it.message}" }
 
@@ -1585,8 +1594,28 @@ class TraderEngine(private val rest: BitunixRest) {
             val seen = text?.trim()?.replace('\n', ' ')?.take(80)
             return null to ("model gave no TP/SL" + if (seen.isNullOrEmpty()) " (empty reply)" else " (reply: \"$seen\")")
         }
-        AgentTpSl.invalidReason(advice, dir, price, liq)?.let { return null to "model TP/SL rejected: $it" }
-        return advice to null
+        val bad = AgentTpSl.invalidReason(advice, dir, price, liq) ?: return advice to null
+        // One retry that tells the model exactly why its levels cannot be
+        // placed (e.g. a stop past liquidation at high leverage). The model
+        // still picks the levels; the app only states the exchange limits.
+        val side = if (dir > 0) "LONG" else "SHORT"
+        val limits = if (dir > 0) "sl must be above ${fmt(liq)} (liquidation) and below ${fmt(price)} (entry); tp must be above ${fmt(price)}"
+        else "sl must be below ${fmt(liq)} (liquidation) and above ${fmt(price)} (entry); tp must be below ${fmt(price)}"
+        val again = runCatching {
+            advisor(msgs + listOf(
+                "assistant" to (text ?: ""),
+                "user" to "Rejected: $bad. $side at ${fmt(price)} with ${lev}x: $limits. " +
+                    "The leverage stays; tighten the stop to a level inside that range. " +
+                    "Reply with only the JSON object.",
+            ))
+        }.getOrNull()
+        val second = AgentTpSl.parse(again)
+            ?: return null to "model TP/SL rejected: $bad (retry gave no answer)"
+        AgentTpSl.invalidReason(second, dir, price, liq)?.let {
+            val why = second.reason.takeIf { r -> r.isNotBlank() }?.let { r -> " — model: $r" } ?: ""
+            return null to "model TP/SL rejected: $it (after retry)$why"
+        }
+        return second to null
     }
 
     /**
@@ -1617,8 +1646,10 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
         openPositions: JSONArray? = null,
-        advice: TpSlAdvice? = null,
+        adviceIn: TpSlAdvice? = null,
+        reAsk: ((basis: Double, lev: Int, mmr: Double) -> Pair<TpSlAdvice?, String?>)? = null,
     ): String {
+        var advice = adviceIn
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
         val available = rest.availableUsdt()
@@ -1660,8 +1691,13 @@ class TraderEngine(private val rest: BitunixRest) {
         // (the price may have moved since the model answered).
         if (advice != null) {
             val liqNow = TpSlPlanner.liqPrice(triggerBasis, dir, lev, mmr)
-            AgentTpSl.invalidReason(advice, dir, triggerBasis, liqNow)?.let {
-                return "SKIP $symbol: agent TP/SL no longer valid at ${fmt(triggerBasis)} — $it"
+            AgentTpSl.invalidReason(advice, dir, triggerBasis, liqNow)?.let { stale ->
+                // The price moved since the model answered: ask again at this
+                // price, leverage and tier instead of dropping the signal.
+                val (fresh, why) = reAsk?.invoke(triggerBasis, lev, mmr)
+                    ?: return "SKIP $symbol: agent TP/SL no longer valid at ${fmt(triggerBasis)} — $stale"
+                advice = fresh
+                    ?: return "SKIP $symbol: agent TP/SL no longer valid at ${fmt(triggerBasis)} — $stale; re-ask: $why"
             }
         }
         val (slPctUse, tpRUse) = adviceToPlan(advice, triggerBasis)
