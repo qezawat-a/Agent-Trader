@@ -1444,13 +1444,20 @@ class TraderEngine(private val rest: BitunixRest) {
     fun manualEntry(symbol: String, dir: Int, sizeFraction: Double): String {
         riskBlock()?.let { return it }
         val sym = symbol.trim().uppercase().ifEmpty { "BTCUSDT" }
+        // Auto TP/SL covers manual entries too: the agent sets the levels, and
+        // without a valid answer there is no entry (never a position with no stop).
+        val advice = if (autoTpsl) {
+            val (a, why) = manualAdvice(sym, dir)
+            a ?: return "SKIP $sym: $why — no entry without TP/SL (or set auto tpsl off and set sl <pct>)"
+        } else null
         if (!live) {
             val px = symbolPrice(sym)
             if (px <= 0) return "No price for $sym."
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
             val (lev, levNote) = entryLeverage(sym)
+            val (riskAt, tpRAt) = adviceToPlan(advice, px) ?: (risk to tpR)
             val pos = broker.openSized(
-                sym, dir, px, lev, sizeFraction, risk, tpR,
+                sym, dir, px, lev, sizeFraction, riskAt, tpRAt,
             ) ?: return "SKIP $sym: could not open."
             noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
@@ -1460,8 +1467,20 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         val px = symbolPrice(sym)
         if (px <= 0) return "No price for $sym."
-        return placeLive(sym, dir, px, sizeFraction, null)
+        return placeLive(sym, dir, px, sizeFraction, null, advice = advice)
     }
+
+    /** The agent's TP/SL for a manual entry: same data the scanner gives it. */
+    private fun manualAdvice(sym: String, dir: Int): Pair<TpSlAdvice?, String?> = runCatching {
+        val byTf = timeframes.associateWith { candles(sym, it) }
+        val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
+        val conf = SignalAggregator.combine(perTf, gates())?.takeIf { it.dir == dir }?.confidence ?: 0.0
+        val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close ?: symbolPrice(sym)
+        val lev = entryLeverage(sym).first
+        if (lev <= 0) return null to "no leverage for $sym"
+        val mmr = if (live) mmrFor(sym, 0.0) else TpSlPlanner.PAPER_SIMULATED_MMR
+        agentTpSl(sym, dir, price, lev, conf, byTf, perTf, mmr)
+    }.getOrElse { null to "market data failed: ${it.message}" }
 
     /** Closes every open position (paper: simulated, live: market close-all). */
     fun closeAll(): String {
@@ -1551,9 +1570,21 @@ class TraderEngine(private val rest: BitunixRest) {
         val advisor = tpslAdvisor ?: return null to "no model connected for automatic TP/SL"
         val liq = TpSlPlanner.liqPrice(price, dir, lev, mmr)
         val ask = TpSlAsk(sym, dir, price, lev, confidence, liq, candles, perTf)
-        val text = runCatching { advisor(AgentTpSl.prompt(ask)) }
+        val msgs = AgentTpSl.prompt(ask)
+        var text = runCatching { advisor(msgs) }
             .getOrElse { return null to "model error: ${it.message ?: it.javaClass.simpleName}" }
-        val advice = AgentTpSl.parse(text) ?: return null to "model gave no TP/SL"
+        var advice = AgentTpSl.parse(text)
+        if (advice == null) {
+            // One retry that asks for the bare JSON object only.
+            text = runCatching {
+                advisor(msgs + ("user" to "Reply with only the JSON object {\"sl\": <price>, \"tp\": <price>, \"reason\": \"...\"}."))
+            }.getOrNull()
+            advice = AgentTpSl.parse(text)
+        }
+        if (advice == null) {
+            val seen = text?.trim()?.replace('\n', ' ')?.take(80)
+            return null to ("model gave no TP/SL" + if (seen.isNullOrEmpty()) " (empty reply)" else " (reply: \"$seen\")")
+        }
         AgentTpSl.invalidReason(advice, dir, price, liq)?.let { return null to "model TP/SL rejected: $it" }
         return advice to null
     }

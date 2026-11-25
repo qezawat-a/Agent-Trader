@@ -193,7 +193,8 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             // Automatic TP/SL asks the chat's own model for each entry's levels.
             tpslAdvisor = { msgs ->
                 if (config.model.isBlank()) error("no chat model selected")
-                ModelClient(config.baseUrl, config.apiKey).chat(config.model, msgs, 400)
+                // Room for reasoning models, which spend tokens before the answer.
+                ModelClient(config.baseUrl, config.apiKey).chat(config.model, msgs, 4096)
             }
             trading = false // the trading loop never auto-resumes on launch (safety)
         }
