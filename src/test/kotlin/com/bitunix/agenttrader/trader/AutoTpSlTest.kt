@@ -5,66 +5,68 @@ import com.bitunix.agenttrader.bitunix.BitunixRest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
- * Automatic TP/SL on signal entries: the stop is the strength-scaled SL
- * (the user's `set sl` base, or the app's default base when unset) and the TP
- * ladder keeps its 1R–4R semantics. Manual entries keep the user's stop only.
+ * Automatic TP/SL on signal entries: the agent (the model) sets SL and TP per
+ * entry from the signal and the candles. No fixed %, and no fixed fallback:
+ * no valid answer means no entry. Manual entries keep the user's stop only.
  */
 class AutoTpSlTest {
 
     private fun engine(): TraderEngine = TraderEngine(BitunixRest("k", "s"))
 
-    // ---- the planner's strength scaling ----
+    private fun ask(e: TraderEngine, dir: Int = 1) = e.agentTpSl(
+        "BTCUSDT", dir, 100.0, 10, 80.0, emptyMap(), mapOf("15m" to TfSignal(dir, 80.0, 3)),
+        TpSlPlanner.PAPER_SIMULATED_MMR,
+    )
 
     @Test
-    fun sl_pct_at_scales_the_users_base_by_strength() {
-        assertEquals(2.0, TpSlPlanner.slPctAt(2.0, 1.0))
-        assertEquals(1.0, TpSlPlanner.slPctAt(2.0, 0.5))
-        assertEquals(0.0, TpSlPlanner.slPctAt(2.0, 0.0))
+    fun the_agent_answer_is_parsed_from_json() {
+        val a = AgentTpSl.parse("sure: {\"sl\": 97.5, \"tp\": 106, \"reason\": \"below the swing low\"}")!!
+        assertEquals(97.5, a.sl)
+        assertEquals(106.0, a.tp)
+        assertEquals("below the swing low", a.reason)
+        assertNull(AgentTpSl.parse("no idea"))
     }
 
     @Test
-    fun sl_pct_at_uses_the_auto_base_when_the_user_set_none() {
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, TpSlPlanner.slPctAt(0.0, 1.0))
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT * 0.5, TpSlPlanner.slPctAt(0.0, 0.5))
-        assertEquals(0.0, TpSlPlanner.slPctAt(0.0, 0.0))
-    }
-
-    // ---- the engine's resolution: user base, default, auto on/off ----
-
-    @Test
-    fun auto_on_scales_the_user_base_by_confidence() {
+    fun the_agent_levels_are_used_as_given() {
         val e = engine()
-        // sl unset → the app's default base applies, scaled by the strength.
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, e.slPctForSignal(1.0))
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT * 0.5, e.slPctForSignal(0.5))
-        assertEquals(0.0, e.slPctForSignal(0.0))
-        // a set base applies, scaled too.
-        e.risk = e.risk.copy(slPct = 4.0)
-        assertEquals(4.0, e.slPctForSignal(1.0))
-        assertEquals(2.0, e.slPctForSignal(0.5))
+        e.tpslAdvisor = { """{"sl": 97, "tp": 109, "reason": "r"}""" }
+        val (a, why) = ask(e)
+        assertNull(why)
+        assertEquals(97.0, a!!.sl)
+        val (riskAt, tpR) = e.adviceToPlan(a, 100.0)!!
+        assertEquals(3.0, riskAt.slPct, 1e-9) // 3% from entry
+        assertEquals(3.0, tpR, 1e-9) // 9 / 3 = 3R
+        val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, riskAt, tpR = tpR)!!
+        assertEquals(97.0, pos.stop!!, 1e-9)
+        assertEquals(109.0, pos.plan.ladder.last().first, 1e-9)
     }
 
     @Test
-    fun auto_off_keeps_the_users_stop_only() {
+    fun no_model_or_a_bad_answer_means_no_entry_never_a_fixed_stop() {
         val e = engine()
-        e.autoTpsl = false
-        assertEquals(0.0, e.slPctForSignal(1.0))
+        assertNull(ask(e).first) // no advisor
+        e.tpslAdvisor = { "nothing" }
+        assertNull(ask(e).first)
+        e.tpslAdvisor = { """{"sl": 101, "tp": 105}""" } // LONG stop above entry
+        assertNotNull(ask(e).second)
+        e.tpslAdvisor = { """{"sl": 80, "tp": 105}""" } // beyond liquidation at 10x
+        assertTrue(ask(e).second!!.contains("liquidation"))
+        e.tpslAdvisor = { error("offline") }
+        assertTrue(ask(e).second!!.contains("model error"))
+    }
+
+    @Test
+    fun manual_entries_keep_the_users_stop_only() {
+        val e = engine()
+        assertEquals(0.0, e.slPctForSignal(null))
         e.risk = e.risk.copy(slPct = 3.0)
-        assertEquals(3.0, e.slPctForSignal(1.0))
-        assertEquals(3.0, e.slPctForSignal(0.5))
-        assertEquals(3.0, e.slPctForSignal(null)) // manual entry
-    }
-
-    @Test
-    fun the_auto_stop_lands_on_signal_entries_the_way_the_planner_reads_it() {
-        val e = engine()
-        val riskAt = e.risk.copy(slPct = e.slPctForSignal(0.8))
-        val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, riskAt)!!
-        // default base 2.0 × strength 0.8 = 1.6% of the price → stop near 98.4
-        assertEquals(98.4, pos.stop!!, 0.001)
+        assertEquals(3.0, e.slPctForSignal(null))
     }
 
     // ---- chat commands ----
@@ -93,7 +95,7 @@ class AutoTpSlTest {
         val text = e.handle("tpsl_history")
         assertTrue("auto" in text, text)
         e.handle("set auto tpsl off")
-        assertFalse("scales with the signal's strength" in e.handle("tpsl_history"))
+        assertFalse("set by the agent" in e.handle("tpsl_history"))
     }
 
     @Test

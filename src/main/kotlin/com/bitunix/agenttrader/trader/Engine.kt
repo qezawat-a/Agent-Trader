@@ -487,9 +487,8 @@ class TraderEngine(private val rest: BitunixRest) {
     var tpR: Double = TpSlPlanner.DEFAULT_TP_R
 
     /**
-     * Signal-driven entries get an automatic TP/SL: a fixed stop (the user's
-     * `set sl` base, or [TpSlPlanner.AUTO_SL_BASE_PCT] when unset) plus the
-     * TP ladder up to [tpR]. Manual entries keep the user's own stop only.
+     * Signal-driven entries get an automatic TP/SL: the agent (the model) sets
+     * both prices per entry from the signal and the candles ([agentTpSl]). Manual entries keep the user's own stop only.
      */
     var autoTpsl: Boolean = true
         set(value) { field = value; configRev++ }
@@ -1355,7 +1354,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
-        appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the strength-scaled stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the TP ladder 1R…${fmt1(tpR)}R" else "off — entries carry the user's stop only"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); TP ladder 25% per 1R up to its TP" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -1395,19 +1394,29 @@ class TraderEngine(private val rest: BitunixRest) {
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
+            if (!live && broker.positions.containsKey(sym)) continue
+            // Auto TP/SL: the agent reads the signal and the candles and sets
+            // both levels itself. No answer → no entry (never a fixed stop).
+            val advice = if (autoTpsl) {
+                val lev0 = entryLeverage(sym).first
+                if (lev0 <= 0) null else {
+                    val mmr0 = if (live) mmrFor(sym, 0.0) else TpSlPlanner.PAPER_SIMULATED_MMR
+                    val (a, why) = agentTpSl(sym, sig.dir, price, lev0, sig.confidence, byTf, perTf, mmr0)
+                    if (a == null) { out.add("SKIP $sym: $why"); continue }
+                    a
+                }
+            } else null
             if (live) {
-                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions) ?: continue)
+                out.add(placeLive(sym, sig.dir, price, riskFraction, sig.confidence, openPositions, advice))
             } else {
-                if (broker.positions.containsKey(sym)) continue
                 val (lev, levNote) = entryLeverage(sym)
-                // Signal entries get the strength-scaled stop; the risk
-                // manager keeps its own values for management and manual entry.
-                val riskAt = risk.copy(slPct = slPctForSignal(sig.confidence / 100.0))
-                openPaper(sym, sig.dir, price, lev, riskAt)?.let { pos ->
+                val (riskAt, tpRAt) = adviceToPlan(advice, price) ?: (risk to tpR)
+                broker.open(sym, sig.dir, price, lev, riskAt, riskFraction, tpRAt)?.let { pos ->
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
                             " · margin ${fmt(pos.qty * pos.entry / pos.leverage)} USDT" +
+                            (advice?.let { " · agent SL ${fmt(it.sl)} TP ${fmt(it.tp)}: ${it.reason}" } ?: "") +
                             (levNote?.let { " · $it" } ?: ""),
                     )
                 }
@@ -1415,15 +1424,6 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         return out
     }
-
-    /** Places a real market order with TP/SL attached. Returns a status line, or null to skip. */
-    private fun openLive(
-        symbol: String,
-        dir: Int,
-        price: Double,
-        confidence: Double,
-        openPositions: JSONArray? = null,
-    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
 
     /**
      * A PAPER entry sized exactly like the LIVE one: the configured margin per
@@ -1535,13 +1535,48 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /**
-     * The SL distance, as a % of the price, for a signal entry of the given
-     * strength: auto mode scales the user's `set sl` base (or
-     * [TpSlPlanner.AUTO_SL_BASE_PCT]) by the strength. Null strength = manual
-     * entry — it keeps the user's own stop only.
+     * The user's own stop distance (`set sl`, % of the price). Signal entries in
+     * auto mode do NOT use it: the agent sets their TP/SL ([agentTpSl]).
      */
-    fun slPctForSignal(strength: Double?): Double =
-        if (autoTpsl && strength != null) TpSlPlanner.slPctAt(risk.slPct, strength) else risk.slPct
+    fun slPctForSignal(@Suppress("UNUSED_PARAMETER") strength: Double?): Double = risk.slPct
+
+    /**
+     * Asks the model for this entry's SL and TP. Returns the advice, or the
+     * reason there is none. Never falls back to a fixed stop.
+     */
+    internal fun agentTpSl(
+        sym: String, dir: Int, price: Double, lev: Int, confidence: Double,
+        candles: Map<String, List<Candle>>, perTf: Map<String, TfSignal>, mmr: Double,
+    ): Pair<TpSlAdvice?, String?> {
+        val advisor = tpslAdvisor ?: return null to "no model connected for automatic TP/SL"
+        val liq = TpSlPlanner.liqPrice(price, dir, lev, mmr)
+        val ask = TpSlAsk(sym, dir, price, lev, confidence, liq, candles, perTf)
+        val text = runCatching { advisor(AgentTpSl.prompt(ask)) }
+            .getOrElse { return null to "model error: ${it.message ?: it.javaClass.simpleName}" }
+        val advice = AgentTpSl.parse(text) ?: return null to "model gave no TP/SL"
+        AgentTpSl.invalidReason(advice, dir, price, liq)?.let { return null to "model TP/SL rejected: $it" }
+        return advice to null
+    }
+
+    /**
+     * The model the agent's TP/SL questions go to: (role, content) messages in,
+     * the model's text out. Set by the UI from the chat's own model settings.
+     */
+    @Volatile
+    var tpslAdvisor: ((List<Pair<String, String>>) -> String?)? = null
+
+    /**
+     * Turns the agent's prices into the planner's inputs at [basis]: the stop
+     * distance as `slPct` (in % of the price), and the TP as an R-multiple of
+     * it. Null when there is no advice or it does not fit.
+     */
+    internal fun adviceToPlan(advice: TpSlAdvice?, basis: Double): Pair<RiskSettings, Double>? {
+        if (advice == null || basis <= 0.0) return null
+        val slDist = kotlin.math.abs(basis - advice.sl)
+        val tpDist = kotlin.math.abs(advice.tp - basis)
+        if (slDist <= 0.0 || tpDist <= 0.0) return null
+        return risk.copy(slPct = slDist / basis * 100.0) to tpDist / slDist
+    }
 
     /** Shared live order path used by the scanner and the one-tap trade button. */
     private fun placeLive(
@@ -1551,6 +1586,7 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
         openPositions: JSONArray? = null,
+        advice: TpSlAdvice? = null,
     ): String {
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
@@ -1589,8 +1625,18 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()
         val triggerBasis = mark ?: price
+        // The agent's levels are prices; re-check them against this basis
+        // (the price may have moved since the model answered).
+        if (advice != null) {
+            val liqNow = TpSlPlanner.liqPrice(triggerBasis, dir, lev, mmr)
+            AgentTpSl.invalidReason(advice, dir, triggerBasis, liqNow)?.let {
+                return "SKIP $symbol: agent TP/SL no longer valid at ${fmt(triggerBasis)} — $it"
+            }
+        }
+        val (slPctUse, tpRUse) = adviceToPlan(advice, triggerBasis)
+            ?.let { (r, k) -> r.slPct to k } ?: (slPctForSignal(confidence) to tpR)
         val plan = TpSlPlanner.plan(
-            triggerBasis, dir, lev, slPctForSignal(confidence) / 100.0, mmr, tpR,
+            triggerBasis, dir, lev, slPctUse / 100.0, mmr, tpRUse,
         )
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
@@ -1657,7 +1703,8 @@ class TraderEngine(private val rest: BitunixRest) {
                     else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
                 }
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote$ladderNote"
+                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote$ladderNote" +
+                    (advice?.let { " | agent SL ${fmt(it.sl)} TP ${fmt(it.tp)}: ${it.reason}" } ?: "")
             }
             // Accepted but never filled (min qty, insufficient margin, TP/SL
             // rejected — the exchange cancels right after placement). The old code
@@ -2483,13 +2530,12 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             } else "Paper mode: orders are simulated instantly."
             t.startsWith("tpsl_history") -> {
-                val base = slPctForSignal(1.0)
-                val stop = if (base > 0) {
-                    "${fmt1(base)}% from entry" +
-                        (if (autoTpsl) " — auto: scales with the signal's strength (set auto tpsl off or set sl 0 to change)" else " (set sl 0 for none)")
-                } else "none (set sl <pct>)"
+                val base = risk.slPct
+                val stop = if (autoTpsl) "set by the agent per entry (signal + candles)"
+                else if (base > 0) "${fmt1(base)}% from entry (set sl 0 for none)"
+                else "none (set sl <pct>)"
                 "TP/SL: stop $stop, " +
-                    "ladder 1R..4R each 25% of the stop distance, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                    "ladder: 25% per 1R up to the TP, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
                     "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             }
             t.startsWith("tiers") -> {
@@ -2807,8 +2853,8 @@ class TraderEngine(private val rest: BitunixRest) {
                     autoTpsl = on
                     configRev++
                     if (autoTpsl)
-                        "Automatic TP/SL ON — signal entries get the strength-scaled stop " +
-                            "(the user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) plus the 1R–4R TP ladder."
+                        "Automatic TP/SL ON — the agent sets SL and TP for each signal entry " +
+                            "from the signal strength and the candles; no fixed %. No valid answer = no entry."
                     else
                         "Automatic TP/SL OFF — entries carry the user's stop only (set sl <pct>)."
                 }
