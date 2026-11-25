@@ -8,7 +8,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Automatic TP/SL on signal entries: the stop is the strength-scaled SL
+ * Automatic TP/SL on signal entries: the stop is the fixed auto SL
  * (the user's `set sl` base, or the app's default base when unset) and the TP
  * ladder keeps its 1R–4R semantics. Manual entries keep the user's stop only.
  */
@@ -16,35 +16,35 @@ class AutoTpSlTest {
 
     private fun engine(): TraderEngine = TraderEngine(BitunixRest("k", "s"))
 
-    // ---- the planner's strength scaling ----
+    // ---- the planner's stop: a fixed distance, not scaled by strength ----
 
     @Test
-    fun sl_pct_at_scales_the_users_base_by_strength() {
+    fun sl_pct_at_keeps_the_users_base_whatever_the_strength() {
         assertEquals(2.0, TpSlPlanner.slPctAt(2.0, 1.0))
-        assertEquals(1.0, TpSlPlanner.slPctAt(2.0, 0.5))
+        assertEquals(2.0, TpSlPlanner.slPctAt(2.0, 0.5))
         assertEquals(0.0, TpSlPlanner.slPctAt(2.0, 0.0))
     }
 
     @Test
     fun sl_pct_at_uses_the_auto_base_when_the_user_set_none() {
         assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, TpSlPlanner.slPctAt(0.0, 1.0))
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT * 0.5, TpSlPlanner.slPctAt(0.0, 0.5))
+        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, TpSlPlanner.slPctAt(0.0, 0.5))
         assertEquals(0.0, TpSlPlanner.slPctAt(0.0, 0.0))
     }
 
     // ---- the engine's resolution: user base, default, auto on/off ----
 
     @Test
-    fun auto_on_scales_the_user_base_by_confidence() {
+    fun auto_on_uses_the_user_base_or_the_default() {
         val e = engine()
-        // sl unset → the app's default base applies, scaled by the strength.
+        // sl unset → the app's default base applies, whatever the confidence.
         assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, e.slPctForSignal(1.0))
-        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT * 0.5, e.slPctForSignal(0.5))
+        assertEquals(TpSlPlanner.AUTO_SL_BASE_PCT, e.slPctForSignal(0.5))
         assertEquals(0.0, e.slPctForSignal(0.0))
-        // a set base applies, scaled too.
+        // a set base applies as-is.
         e.risk = e.risk.copy(slPct = 4.0)
         assertEquals(4.0, e.slPctForSignal(1.0))
-        assertEquals(2.0, e.slPctForSignal(0.5))
+        assertEquals(4.0, e.slPctForSignal(0.5))
     }
 
     @Test
@@ -63,8 +63,8 @@ class AutoTpSlTest {
         val e = engine()
         val riskAt = e.risk.copy(slPct = e.slPctForSignal(0.8))
         val pos = e.broker.open("BTCUSDT", 1, 100.0, 10, riskAt)!!
-        // default base 2.0 × strength 0.8 = 1.6% of the price → stop near 98.4
-        assertEquals(98.4, pos.stop!!, 0.001)
+        // default base 2.0% of the price → stop at 98.0 (no strength scaling)
+        assertEquals(98.0, pos.stop!!, 0.001)
     }
 
     // ---- chat commands ----

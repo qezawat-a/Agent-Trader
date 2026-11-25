@@ -352,7 +352,7 @@ fun ControlScreen(
                     ToggleRow(
                         "Auto TP/SL", Icons.Default.Build, engine.autoTpsl,
                         { on -> onAction("set auto tpsl ${if (on) "on" else "off"}") },
-                        "signal entries get the strength-scaled stop + 1R..4R TP ladder",
+                        "signal entries get the fixed auto stop + 1R..tpR TP ladder",
                     )
                     var topText by remember(engine.configRev) { mutableStateOf(engine.scanTop.toString()) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

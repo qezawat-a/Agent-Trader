@@ -250,8 +250,9 @@ data class TpSlPlan(
 object TpSlPlanner {
     val LADDER_R = listOf(1.0, 2.0, 3.0, 4.0)
     const val LADDER_FRACTION = 0.25
-    const val BREAKEVEN_ROI = 0.10
-    const val TRAIL_ROI = 0.15
+
+    /** Default take-profit R: the last ladder rung, so paper and LIVE share the 1R–4R ladder. */
+    const val DEFAULT_TP_R = 4.0
 
     /**
      * MMR used ONLY by the PAPER simulator. It is NOT an exchange value and
@@ -270,12 +271,17 @@ object TpSlPlanner {
 
     /**
      * The SL distance for a signal entry, in % of the price: the user's own
-     * [baseSlPct] when they set one, else [AUTO_SL_BASE_PCT]; scaled by the
-     * signal's strength ([strength] = confidence/100) so a strong signal gets
-     * a wider stop and a weak one a tighter one. Strength 0 → 0 (no stop).
+     * [baseSlPct] when they set one, else [AUTO_SL_BASE_PCT]. Strength 0 → 0
+     * (no stop).
+     *
+     * The old version multiplied the distance by the signal strength. That
+     * rule came from nowhere and hurt: every weaker signal got a TIGHTER stop,
+     * so noise stopped it out more often, and R (the TP ladder's unit) changed
+     * from trade to trade. One fixed distance keeps R stable and lets the
+     * risk manager rebuild it after a restart.
      */
     fun slPctAt(baseSlPct: Double, strength: Double): Double =
-        (if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT) * strength.coerceIn(0.0, 1.0)
+        if (strength <= 0.0) 0.0 else if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT
 
     /**
      * The liquidation distance from the entry, in price units:
@@ -305,15 +311,22 @@ object TpSlPlanner {
         entry: Double, dir: Int, leverage: Int,
         slPct: Double = 0.0,
         mmr: Double = PAPER_SIMULATED_MMR,
+        tpR: Double = DEFAULT_TP_R,
     ): TpSlPlan {
         val liqDist = liqDistance(entry, leverage, mmr)
         val liq = if (dir > 0) entry - liqDist else entry + liqDist
         val dist = entry * slPct.coerceIn(0.0, 0.95)
         val stop = if (slPct > 0.0) (if (dir > 0) entry - dist else entry + dist) else null
         val r = stop?.let { abs(entry - it) }
-        val ladder = if (r != null && r > 0.0)
-            LADDER_R.map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION }
-        else emptyList()
+        // Rungs below tpR close 25% each; the final rung at tpR closes whatever
+        // is left (fraction 1.0) — exactly what LIVE arms on the exchange:
+        // partial TP/SL orders for the rungs, the position TP/SL at tpR.
+        val ladder = if (r != null && r > 0.0) {
+            val finalR = tpR.takeIf { it > 0.0 } ?: DEFAULT_TP_R
+            LADDER_R.filter { it < finalR - 1e-9 }
+                .map { k -> (if (dir > 0) entry + k * r else entry - k * r) to LADDER_FRACTION } +
+                listOf((if (dir > 0) entry + finalR * r else entry - finalR * r) to 1.0)
+        } else emptyList()
         return TpSlPlan(entry, stop, liq, ladder)
     }
 
@@ -322,7 +335,7 @@ object TpSlPlanner {
         dir * (price - entry) / entry * leverage
 
     /** Trailing stop price for the best price seen so far, [trailRoi] distance behind it. */
-    fun trailStop(best: Double, dir: Int, leverage: Int, trailRoi: Double = TRAIL_ROI): Double {
+    fun trailStop(best: Double, dir: Int, leverage: Int, trailRoi: Double): Double {
         val dist = trailRoi / leverage
         return if (dir > 0) best * (1 - dist) else best * (1 + dist)
     }

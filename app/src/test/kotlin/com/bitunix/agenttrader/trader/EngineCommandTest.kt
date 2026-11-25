@@ -23,7 +23,7 @@ class EngineCommandTest {
     @Test
     fun tp_distance_out_of_range_is_rejected() {
         engine.handle("set tp r 99")
-        assertEquals(1.0, engine.tpR)
+        assertEquals(TpSlPlanner.DEFAULT_TP_R, engine.tpR)
     }
 
     @Test
