@@ -42,6 +42,13 @@ sealed class ToolDecision {
     data class Deny(val reason: String) : ToolDecision()
 }
 
+/** Words that make a self-repair the user's own ask (English, Persian, Finglish). */
+internal val FIX_WORDS = listOf(
+    "fix", "repair", "broken", "problem", "issue", "not working", "doesn't work", "error",
+    "درست", "مشکل", "حل", "خراب", "کار نمی", "کار نمی\u200c", "ارور", "خطا",
+    "dorost", "moshkel", "hal kon", "halesh", "kharab", "kar nemi", "error", "gir mide",
+)
+
 object ToolPolicy {
 
     private const val SETTINGS_REASON =
@@ -74,6 +81,12 @@ object ToolPolicy {
         ToolSpec("settings trade", ToolCapability.READ),
         ToolSpec("scan once", ToolCapability.READ),
         ToolSpec("mid management", ToolCapability.READ),
+        // App self-diagnosis (read-only): the agent checks itself instead of
+        // sending the user to a slash command.
+        ToolSpec("diagnose", ToolCapability.READ),
+        ToolSpec("recent log", ToolCapability.READ),
+        ToolSpec("models", ToolCapability.READ),
+        ToolSpec("check ai", ToolCapability.READ),
 
         // ---- SETTINGS: scanner, universe, reports ----
         ToolSpec("set universe", ToolCapability.SETTINGS, listOf("universe", "symbol", "symbols")),
@@ -95,6 +108,12 @@ object ToolPolicy {
         ToolSpec("report interval", ToolCapability.SETTINGS, listOf("report interval", "report")),
 
         // ---- RISK: sizing, stops, guards ----
+        // App self-repair: reconnect the feed, restart the loop, re-probe the
+        // provider. Allowed when the user's message is about a problem.
+        ToolSpec("repair", ToolCapability.SETTINGS, FIX_WORDS),
+        ToolSpec("set model", ToolCapability.SETTINGS, listOf("model", "مدل")),
+
+        ToolSpec("set auto tpsl", ToolCapability.RISK),
         ToolSpec("set leverage", ToolCapability.RISK),
         ToolSpec("set risk", ToolCapability.RISK),
         ToolSpec("set guard", ToolCapability.RISK),
