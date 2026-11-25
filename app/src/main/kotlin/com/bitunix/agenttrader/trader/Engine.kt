@@ -1669,7 +1669,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     }
                     pid
                 }.getOrNull()
-                val ladderNote = if (pid.isNotBlank()) armLadder(symbol, pid, qty, plan) else 
+                val ladderNote = if (pid.isNotBlank()) armLadder(symbol, pid, qty, plan) else ""
                 val slNote = when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
