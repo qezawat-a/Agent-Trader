@@ -179,11 +179,8 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         // Guarded by improvesStop exactly like the live path — without it a stop
         // that is ALREADY tighter than entry (a tight `set sl`, or a trailing stop
         // that ran first) would be WIDENED back to entry, giving risk away.
-        // Both rules wait for the first rung (1R) when the position has a stop —
-        // the same gate as LIVE, see [breakevenStopFor].
-        val r = p.plan.stop?.let { kotlin.math.abs(p.entry - it) }
         if (!p.breakeven) {
-            val be = breakevenStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk, r)
+            val be = breakevenStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk)
             if (be != null) {
                 p.breakeven = true
                 p.stop = be
@@ -191,7 +188,7 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
             }
         }
         // Trailing: fires at the configured trigger (after breakeven) and only tightens.
-        trailingStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk, r)?.let { trail ->
+        trailingStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk)?.let { trail ->
             p.stop = trail
             events.add("PAPER trailing $symbol: SL moved to ${fmt(trail)}")
         }
@@ -339,13 +336,11 @@ internal fun slTriggerValid(dir: Int, sl: Double, mark: Double): Boolean {
  */
 internal fun breakevenStopFor(
     dir: Int, entry: Double, best: Double, lev: Int, curStop: Double?, risk: RiskSettings,
-    rDist: Double? = null,
     feeOffset: Double = 0.0,
 ): Double? {
     if (risk.breakevenRoiPct <= 0) return null
     val roi = TpSlPlanner.roi(entry, best, dir, lev)
     if (roi < risk.breakevenRoiPct / 100.0) return null
-    if (!reachedOneR(dir, entry, best, rDist)) return null
     // "Breakeven" must not lose money: a stop at the bare entry pays the
     // opening AND the closing fee, so every breakeven exit was a small loss.
     // [feeOffset] is the round-trip fee per unit, read from the exchange.
@@ -353,18 +348,6 @@ internal fun breakevenStopFor(
     return if (curStop == null || improvesStop(dir, target, curStop)) target else null
 }
 
-/**
- * True once the best price has moved at least one R (the stop distance) in the
- * trade's favour; always true when no stop distance is known.
- *
- * Breakeven and trailing are configured in ROI, which scales with leverage,
- * while the stop is a price distance. At high leverage the ROI triggers fired
- * long before TP1: 25% ROI at 40x is a 0.625% move, so the stop jumped to
- * entry while the stop-loss side still risked the full R — winners were cut
- * to ~0, losers ran the whole way. Gating on 1R ties both rules to the plan.
- */
-internal fun reachedOneR(dir: Int, entry: Double, best: Double, rDist: Double?): Boolean =
-    rDist == null || rDist <= 0.0 || dir * (best - entry) >= rDist * (1 - 1e-9)
 
 /**
  * The trailing stop for an open position, or null when the rule does not
@@ -379,12 +362,10 @@ internal fun reachedOneR(dir: Int, entry: Double, best: Double, rDist: Double?):
  */
 internal fun trailingStopFor(
     dir: Int, entry: Double, best: Double, lev: Int, curStop: Double?, risk: RiskSettings,
-    rDist: Double? = null,
 ): Double? {
     if (risk.trailingTriggerRoiPct <= 0) return null
     val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
     if (bestRoi < risk.trailingTriggerRoiPct / 100.0) return null
-    if (!reachedOneR(dir, entry, best, rDist)) return null
     val trail = TpSlPlanner.trailStop(best, dir, lev, risk.trailDistanceRoiPct / 100.0)
     return if (curStop == null || improvesStop(dir, trail, curStop)) trail else null
 }
@@ -1374,7 +1355,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
-        appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the fixed auto stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the TP ladder 1R…${fmt1(tpR)}R" else "off — entries carry the user's stop only"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the strength-scaled stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the TP ladder 1R…${fmt1(tpR)}R" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -1419,7 +1400,7 @@ class TraderEngine(private val rest: BitunixRest) {
             } else {
                 if (broker.positions.containsKey(sym)) continue
                 val (lev, levNote) = entryLeverage(sym)
-                // Signal entries get the fixed auto stop; the risk
+                // Signal entries get the strength-scaled stop; the risk
                 // manager keeps its own values for management and manual entry.
                 val riskAt = risk.copy(slPct = slPctForSignal(sig.confidence / 100.0))
                 openPaper(sym, sig.dir, price, lev, riskAt)?.let { pos ->
@@ -2059,9 +2040,6 @@ class TraderEngine(private val rest: BitunixRest) {
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
             val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
-            // R = the planned stop distance (fixed % of entry, so it can be
-            // rebuilt after a restart); null when no stop is configured.
-            val rDist = (slPctForSignal(1.0) / 100.0).takeIf { it > 0.0 }?.let { entry * it }
             // Round-trip fee per unit: the exchange's `fee` on the open
             // position is the opening fee; the closing fee is charged at the
             // same rate, so twice it per unit of qty covers both.
@@ -2070,7 +2048,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 val f = kotlin.math.abs(p.optString("fee").toDoubleOrNull() ?: 0.0)
                 2.0 * f / q
             }
-            val be = breakevenStopFor(dir, entry, best, lev, curStop, risk, rDist, feeOffset)
+            val be = breakevenStopFor(dir, entry, best, lev, curStop, risk, feeOffset = feeOffset)
             if (be != null) {
                 if (applyLiveSl(sym, positionId, be, dir, mark, "Breakeven", bestRoi, events)) {
                     liveBreakevenDone[sym] = true
@@ -2083,7 +2061,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 // get its chance this tick, and the failed breakeven is retried
                 // next tick (the done flag was not set).
             } else if (liveBreakevenDone[sym] != true && risk.breakevenRoiPct > 0 &&
-                bestRoi >= risk.breakevenRoiPct / 100.0 && reachedOneR(dir, entry, best, rDist)
+                bestRoi >= risk.breakevenRoiPct / 100.0
             ) {
                 // The stop in place is already tighter than entry: there is
                 // nothing to move, and the rule must not keep retrying.
@@ -2091,7 +2069,7 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             // Trailing: fires on the BEST price reached (not the current price),
             // so a pullback does not stop the stop from following the position.
-            trailingStopFor(dir, entry, best, lev, curStop, risk, rDist)?.let { trail ->
+            trailingStopFor(dir, entry, best, lev, curStop, risk)?.let { trail ->
                 applyLiveSl(sym, positionId, trail, dir, mark, "Trailing", bestRoi, events)
             }
         }
@@ -2829,7 +2807,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     autoTpsl = on
                     configRev++
                     if (autoTpsl)
-                        "Automatic TP/SL ON — signal entries get the fixed auto stop " +
+                        "Automatic TP/SL ON — signal entries get the strength-scaled stop " +
                             "(the user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) plus the 1R–4R TP ladder."
                     else
                         "Automatic TP/SL OFF — entries carry the user's stop only (set sl <pct>)."

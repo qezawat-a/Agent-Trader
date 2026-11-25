@@ -271,17 +271,12 @@ object TpSlPlanner {
 
     /**
      * The SL distance for a signal entry, in % of the price: the user's own
-     * [baseSlPct] when they set one, else [AUTO_SL_BASE_PCT]. Strength 0 → 0
-     * (no stop).
-     *
-     * The old version multiplied the distance by the signal strength. That
-     * rule came from nowhere and hurt: every weaker signal got a TIGHTER stop,
-     * so noise stopped it out more often, and R (the TP ladder's unit) changed
-     * from trade to trade. One fixed distance keeps R stable and lets the
-     * risk manager rebuild it after a restart.
+     * [baseSlPct] when they set one, else [AUTO_SL_BASE_PCT]; scaled by the
+     * signal's strength ([strength] = confidence/100) so a strong signal gets
+     * a wider stop and a weak one a tighter one. Strength 0 → 0 (no stop).
      */
     fun slPctAt(baseSlPct: Double, strength: Double): Double =
-        if (strength <= 0.0) 0.0 else if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT
+        (if (baseSlPct > 0.0) baseSlPct else AUTO_SL_BASE_PCT) * strength.coerceIn(0.0, 1.0)
 
     /**
      * The liquidation distance from the entry, in price units:
