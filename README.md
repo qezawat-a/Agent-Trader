@@ -28,12 +28,12 @@ verified against the live Bitunix API, and a private WebSocket feed that streams
 position, order and TP/SL updates into the chat,
 and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
 
-## The four screens
+## The screens
 
 | Screen | What it does |
 |---|---|
 | **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
-| **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
+| **Trade** | The K-line chart (symbol picker, 5m/15m/1h/4h/1d, candles or line) with the open position's entry, SL, mark and liquidation lines drawn on it, and the live board of positions, orders and TP/SL with a per-position **Close** and **Refresh**. There are no entry buttons here: entries come from chat or the scanner. |
 | **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many independent signals agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, **notifications**, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
@@ -115,7 +115,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off) ·
 `fire breakeven [SYMBOL]` · `fire trailing [SYMBOL]` (fire the stop move NOW — the ROI trigger is bypassed, but a stop is never widened)
 
-Stop-loss is the user's own setting: `set sl <pct>` attaches a stop that many percent from the entry; `0` attaches none (a plain market order) — the app never invents a stop, a fraction of liquidation, or a volatility floor. The take-profit ladder (1R..4R) is sized on this distance and only exists when a stop is set.
+With **Auto TP/SL** on, the agent (your chat model) sets the stop-loss and take-profit of every signal entry itself: it reads the recent candles of each timeframe, each timeframe's signal, the combined strength, the leverage and the liquidation price, and returns both prices with a one-line reason. There is no fixed percentage or formula behind it. The app checks only the exchange's own rules (each level on the right side of the entry, the stop before liquidation, re-checked at the mark price before a live order); a missing or invalid answer skips the entry instead of opening it with a made-up stop. With Auto TP/SL off, and for manual entries, the stop is your own `set sl <pct>` (`0` = none). The take-profit ladder closes 25% at each 1R below the target and the rest at the target.
 
 The Control screen (the fourth window) holds every gate and exit control in one place: **Timeframes** (TF), **TF min %** (confidence per timeframe), **Min conf %** (combined confidence), **Auto TP/SL** (on/off — persisted), and the **Fire breakeven** / **Fire trailing** buttons. The Fire buttons act on the open position immediately: they bypass the ROI trigger only; the stop still never widens and the exchange still has to accept the trigger side of the current mark. The general **Settings** navigation stays in the bottom bar — it is not duplicated in Control.
 
@@ -256,9 +256,9 @@ endpoint clamps `limit` to the documented maximum.
   Anything less is reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
-- TP/SL plan: partial TP ladder 1R–4R at 25% each (sized on the configured SL distance, and
-  only built when one is set), plus a user-configured risk manager: SL (`set sl <pct>`, none by
-  default), breakeven (SL moves to entry) and a trailing stop behind the best price.
+- TP/SL plan: in Auto TP/SL the agent sets SL and TP per entry; the TP ladder closes 25% per
+  1R below the agent's target (real partial TP orders on LIVE). Breakeven (SL moves to entry,
+  plus the round-trip fee on LIVE) and the trailing stop trigger on your ROI settings.
 
 ### Risk manager
 
@@ -270,7 +270,7 @@ or by asking the agent:
 | `set breakeven <pct>` | 25% | Once ROI reaches it, the stop moves to entry (0 = off) |
 | `set trail trigger <pct>` | 40% | Trailing starts once ROI reaches it (0 = off) |
 | `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
-| `set sl <pct>` | **0 (none)** | Stop distance from the entry, % of price. 0 = no stop (a plain market order) |
+| `set sl <pct>` | **0 (none)** | Your stop distance, % of price, for manual entries and when Auto TP/SL is off. 0 = no stop |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
@@ -340,11 +340,11 @@ runs the unit tests and publishes a GitHub release with checksums.
 ## Project layout
 
 ```
-app/src/main/kotlin/com/codeassist/agenttrader/
+app/src/main/kotlin/com/bitunix/agenttrader/
 ├── agent/      AgentBrain (prompt, mood, tools) · SelfRepair · ModelClient · CommandRouter
 ├── bitunix/    BitunixRest (signed REST) · BitunixWs (public + private feed)
-├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood
-├── ui/         Control + Trade surfaces
+├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood · AgentTpSl
+├── ui/         Control + Trade surfaces (chart, position board)
 ├── util/       Format (locale-independent number formatting)
 └── MainActivity.kt
 ```
@@ -380,7 +380,6 @@ restored is the trading loop — after a restart you tap *Trading* to start trad
 
 ## Roadmap
 
-- Place the 1R–4R ladder as real partial TP/SL orders after a live fill.
 - Public market channels on the WebSocket feed (kline, ticker, depth) to cut REST polling.
 - Strategy backtesting harness over the paged kline history.
 - Optional on-device code editing: the brain proposes a patch, the app applies it and runs
