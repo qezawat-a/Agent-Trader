@@ -51,6 +51,9 @@ class BitunixWs(
 
     private val client = OkHttpClient.Builder()
         .retryOnConnectionFailure(true)
+        // System DNS, then DNS-over-HTTPS, then the last good address: the VPN's
+        // resolver dropping a lookup no longer kills the feed.
+        .dns(ResilientDns())
         .build()
 
     private val pump = Executors.newSingleThreadScheduledExecutor { r ->
@@ -515,7 +518,7 @@ internal fun wsErrorText(raw: String?): String {
     return when {
         m.contains("Unable to resolve host", ignoreCase = true) ||
             m.contains("No address associated with hostname", ignoreCase = true) ->
-            "WS unreachable (DNS) — check this device's internet connection"
+            "WS unreachable (DNS, backup DNS too) — reconnecting"
         m.contains("timeout", ignoreCase = true) || m.contains("timed out", ignoreCase = true) ->
             "WS timeout — reconnecting"
         // Server/network closed the TCP stream mid-session (EOFException, reset,
