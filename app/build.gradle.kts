@@ -92,7 +92,6 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core:1.7.8")
     testImplementation(kotlin("test"))
     testImplementation("org.json:json:20240303")
-    implementation("com.google.firebase:firebase-analytics:")
     implementation("androidx.databinding:viewbinding:8.7.3")
     implementation("org.jetbrains.kotlin:kotlin-parcelize-runtime:2.4.0")
 }
