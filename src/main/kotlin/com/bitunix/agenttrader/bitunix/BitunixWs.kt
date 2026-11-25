@@ -518,7 +518,7 @@ internal fun wsErrorText(raw: String?): String {
     return when {
         m.contains("Unable to resolve host", ignoreCase = true) ||
             m.contains("No address associated with hostname", ignoreCase = true) ->
-            "WS unreachable (DNS, backup DNS too) — reconnecting"
+            "WS unreachable (DNS, backup DNS too) — check the internet/VPN connection; reconnecting"
         m.contains("timeout", ignoreCase = true) || m.contains("timed out", ignoreCase = true) ->
             "WS timeout — reconnecting"
         // Server/network closed the TCP stream mid-session (EOFException, reset,
