@@ -718,14 +718,19 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      * alone — `id` is NOT a discriminator, both shapes carry it.
      */
     fun positionTpSlOrder(symbol: String, positionId: String): JSONObject? {
+        // The old filter skipped every order with a tpQty/slQty field. The
+        // exchange fills those fields on the position order too, so the
+        // position order was never found: every breakeven move then CREATED a
+        // second stop instead of modifying the first, and the automatic move
+        // could never be confirmed. Prefer an order without a quantity, else
+        // the first one on this position that carries a stop.
         val orders = pendingTpSlOrders(symbol, positionId)
-        for (i in 0 until orders.length()) {
-            val o = orders.optJSONObject(i) ?: continue
-            if (o.optString("positionId") != positionId) continue
-            if (o.optString("tpQty").isNotBlank() || o.optString("slQty").isNotBlank()) continue
-            return o
-        }
-        return null
+        val mine = (0 until orders.length()).mapNotNull { orders.optJSONObject(it) }
+            .filter { it.optString("positionId").let { p -> p.isBlank() || p == positionId } }
+        fun noQty(o: JSONObject, k: String) = o.optString(k).let { it.isBlank() || (it.toDoubleOrNull() ?: 0.0) == 0.0 }
+        return mine.firstOrNull { noQty(it, "tpQty") && noQty(it, "slQty") }
+            ?: mine.firstOrNull { (it.optString("slPrice").toDoubleOrNull() ?: 0.0) > 0 }
+            ?: mine.firstOrNull()
     }
 
     private fun positionTpSlBody(
