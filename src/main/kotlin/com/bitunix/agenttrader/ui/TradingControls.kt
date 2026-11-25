@@ -352,7 +352,7 @@ fun ControlScreen(
                     ToggleRow(
                         "Auto TP/SL", Icons.Default.Build, engine.autoTpsl,
                         { on -> onAction("set auto tpsl ${if (on) "on" else "off"}") },
-                        "the agent sets SL and TP per signal entry + 1R ladder up to its TP",
+                        "on: the agent picks SL and TP for every entry. On Bitunix: SL + final TP as the position TP/SL (closes all); before it, partial TP orders closing 25% at every 1R (1R = the stop distance). See them on the Trade tab or with tpsl.",
                     )
                     var topText by remember(engine.configRev) { mutableStateOf(engine.scanTop.toString()) }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {

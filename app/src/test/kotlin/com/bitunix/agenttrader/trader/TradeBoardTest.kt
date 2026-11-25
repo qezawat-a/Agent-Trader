@@ -74,4 +74,10 @@ class TradeBoardTest {
         assertEquals("TP", tps[0].label)
         assertEquals(62_000.0, tps[0].price, 1e-9)
     }
+
+    @Test
+    fun tp_rows_say_partial_or_position() {
+        assertEquals("partial · qty 0.5", tpKind(0.5))
+        assertEquals("position · all", tpKind(0.0))
+    }
 }

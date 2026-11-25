@@ -1354,7 +1354,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
-        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); TP ladder 25% per 1R up to its TP" else "off — entries carry the user's stop only"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); TP/SL method: SL + final TP as the position TP/SL (closes all), plus partial TP orders of 25% at every 1R before it" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -2595,8 +2595,9 @@ class TraderEngine(private val rest: BitunixRest) {
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val o = arr.getJSONObject(i)
-                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
-                            "qty ${o.optString("qty")} ${o.optString("status")}"
+                        val part = o.optString("tpQty").toDoubleOrNull() ?: 0.0
+                        "${o.optString("symbol")} ${if (part > 0.0) "PARTIAL qty ${o.optString("tpQty")}" else "POSITION (all)"} " +
+                            "tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} ${o.optString("status")}"
                     }
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
