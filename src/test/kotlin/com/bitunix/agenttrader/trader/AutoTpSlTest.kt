@@ -122,4 +122,19 @@ class AutoTpSlTest {
         val text = e.settingsTradeText()
         assertTrue("auto tpsl: on" in text, text)
     }
+
+    @Test
+    fun a_stop_past_liquidation_is_sent_back_once_with_the_limits() {
+        val e = engine()
+        val seen = ArrayList<List<Pair<String, String>>>()
+        e.tpslAdvisor = { msgs ->
+            seen += msgs
+            if (seen.size == 1) """{"sl": 80, "tp": 105}""" else """{"sl": 96, "tp": 106, "reason": "tighter"}"""
+        }
+        val (a, why) = ask(e)
+        assertNull(why, why)
+        assertEquals(96.0, a!!.sl)
+        assertEquals(2, seen.size)
+        assertTrue("liquidation" in seen[1].last().second, seen[1].last().second)
+    }
 }
