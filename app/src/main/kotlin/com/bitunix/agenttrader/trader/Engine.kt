@@ -116,7 +116,8 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         symbol: String, dir: Int, price: Double, leverage: Int,
         risk: RiskSettings = RiskSettings(),
         marginFraction: Double = MARGIN_FRACTION,
-    ): Position? = openSized(symbol, dir, price, leverage, marginFraction, risk)
+        tpR: Double = TpSlPlanner.DEFAULT_TP_R,
+    ): Position? = openSized(symbol, dir, price, leverage, marginFraction, risk, tpR)
 
     /**
      * The margin the open positions hold — the paper twin of the exchange's
@@ -137,6 +138,7 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
     fun openSized(
         symbol: String, dir: Int, price: Double, leverage: Int,
         marginFraction: Double, risk: RiskSettings = RiskSettings(),
+        tpR: Double = TpSlPlanner.DEFAULT_TP_R,
     ): Position? {
         if (positions.containsKey(symbol)) return null
         // Same sizing as the live path: the configured share of the free
@@ -150,7 +152,7 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         // Simulated market: the same plan semantics as LIVE — the stop is
         // exactly the user's configured distance (none by default).
         val plan = TpSlPlanner.plan(
-            price, dir, leverage, risk.slPct / 100.0, TpSlPlanner.PAPER_SIMULATED_MMR,
+            price, dir, leverage, risk.slPct / 100.0, TpSlPlanner.PAPER_SIMULATED_MMR, tpR,
         )
         val pos = Position(symbol, dir, price, qty, qty, leverage, plan, plan.stop, price)
         positions[symbol] = pos
@@ -177,26 +179,18 @@ class PaperBroker(@Volatile var balance: Double = 1000.0) {
         // Guarded by improvesStop exactly like the live path — without it a stop
         // that is ALREADY tighter than entry (a tight `set sl`, or a trailing stop
         // that ran first) would be WIDENED back to entry, giving risk away.
-        if (!p.breakeven && risk.breakevenRoiPct > 0 &&
-            TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.breakevenRoiPct / 100.0
-        ) {
-            p.breakeven = true
-            val cur = p.stop
-            if (cur == null || improvesStop(p.dir, p.entry, cur)) {
-                p.stop = p.entry
+        if (!p.breakeven) {
+            val be = breakevenStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk)
+            if (be != null) {
+                p.breakeven = true
+                p.stop = be
                 events.add("PAPER breakeven $symbol: SL moved to entry ${fmt(p.entry)}")
             }
         }
-        // Trailing: fires at the configured trigger ROI (after breakeven) and only tightens.
-        if (risk.trailingTriggerRoiPct > 0 &&
-            TpSlPlanner.roi(p.entry, p.best, p.dir, p.leverage) >= risk.trailingTriggerRoiPct / 100.0
-        ) {
-            val trail = TpSlPlanner.trailStop(p.best, p.dir, p.leverage, risk.trailDistanceRoiPct / 100.0)
-            val improves = p.stop == null || if (p.dir > 0) trail > p.stop!! else trail < p.stop!!
-            if (improves) {
-                p.stop = trail
-                events.add("PAPER trailing $symbol: SL moved to ${fmt(trail)}")
-            }
+        // Trailing: fires at the configured trigger (after breakeven) and only tightens.
+        trailingStopFor(p.dir, p.entry, p.best, p.leverage, p.stop, risk)?.let { trail ->
+            p.stop = trail
+            events.add("PAPER trailing $symbol: SL moved to ${fmt(trail)}")
         }
         val stop = p.stop
         if (stop != null) {
@@ -342,12 +336,18 @@ internal fun slTriggerValid(dir: Int, sl: Double, mark: Double): Boolean {
  */
 internal fun breakevenStopFor(
     dir: Int, entry: Double, best: Double, lev: Int, curStop: Double?, risk: RiskSettings,
+    feeOffset: Double = 0.0,
 ): Double? {
     if (risk.breakevenRoiPct <= 0) return null
     val roi = TpSlPlanner.roi(entry, best, dir, lev)
     if (roi < risk.breakevenRoiPct / 100.0) return null
-    return if (curStop == null || improvesStop(dir, entry, curStop)) entry else null
+    // "Breakeven" must not lose money: a stop at the bare entry pays the
+    // opening AND the closing fee, so every breakeven exit was a small loss.
+    // [feeOffset] is the round-trip fee per unit, read from the exchange.
+    val target = entry + dir * feeOffset.coerceAtLeast(0.0)
+    return if (curStop == null || improvesStop(dir, target, curStop)) target else null
 }
+
 
 /**
  * The trailing stop for an open position, or null when the rule does not
@@ -478,14 +478,17 @@ class TraderEngine(private val rest: BitunixRest) {
     @Volatile
     var guardIntervalSec = 300L
 
-    /** Take-profit distance as an R-multiple of the stop distance (live orders attach
-     *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
-    var tpR: Double = 1.0
+    /**
+     * Final take-profit as an R-multiple of the stop distance. Paper and LIVE
+     * share one ladder: every 1R rung below tpR closes 25% (LIVE: a partial
+     * TP/SL order with tpQty), and the position TP/SL at tpR closes the rest.
+     * Default 4R = the full 1R–4R ladder.
+     */
+    var tpR: Double = TpSlPlanner.DEFAULT_TP_R
 
     /**
-     * Signal-driven entries get an automatic TP/SL: a stop scaled by the signal
-     * strength (user's `set sl` base, or [TpSlPlanner.AUTO_SL_BASE_PCT] when unset)
-     * plus the 1R–4R TP ladder. Manual entries keep the user's own stop only.
+     * Signal-driven entries get an automatic TP/SL: the agent (the model) sets
+     * both prices per entry from the signal and the candles ([agentTpSl]). Manual entries keep the user's own stop only.
      */
     var autoTpsl: Boolean = true
         set(value) { field = value; configRev++ }
@@ -892,7 +895,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     liq = p.plan.liquidation.takeIf { it > 0.0 },
                     stop = p.stop,
                     tps = p.plan.ladder.mapIndexed { i, (price, frac) ->
-                        BoardTp("${i + 1}R", price, "${fmt0(frac * 100)}%", i < p.nextRung)
+                        BoardTp("${i + 1}R", price, if (frac >= 1.0) "rest" else "${fmt0(frac * 100)}%", i < p.nextRung)
                     },
                     paper = true,
                 )
@@ -1351,7 +1354,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
-        appendLine("  auto tpsl: ${if (autoTpsl) "on — signal entries get the strength-scaled stop (user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) + the 1R–4R TP ladder" else "off — entries carry the user's stop only"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); TP ladder 25% per 1R up to its TP" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -1391,19 +1394,29 @@ class TraderEngine(private val rest: BitunixRest) {
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
+            if (!live && broker.positions.containsKey(sym)) continue
+            // Auto TP/SL: the agent reads the signal and the candles and sets
+            // both levels itself. No answer → no entry (never a fixed stop).
+            val advice = if (autoTpsl) {
+                val lev0 = entryLeverage(sym).first
+                if (lev0 <= 0) null else {
+                    val mmr0 = if (live) mmrFor(sym, 0.0) else TpSlPlanner.PAPER_SIMULATED_MMR
+                    val (a, why) = agentTpSl(sym, sig.dir, price, lev0, sig.confidence, byTf, perTf, mmr0)
+                    if (a == null) { out.add("SKIP $sym: $why"); continue }
+                    a
+                }
+            } else null
             if (live) {
-                out.add(openLive(sym, sig.dir, price, sig.confidence, openPositions) ?: continue)
+                out.add(placeLive(sym, sig.dir, price, riskFraction, sig.confidence, openPositions, advice))
             } else {
-                if (broker.positions.containsKey(sym)) continue
                 val (lev, levNote) = entryLeverage(sym)
-                // Signal entries get the strength-scaled auto stop; the risk
-                // manager keeps its own values for management and manual entry.
-                val riskAt = risk.copy(slPct = slPctForSignal(sig.confidence / 100.0))
-                openPaper(sym, sig.dir, price, lev, riskAt)?.let { pos ->
+                val (riskAt, tpRAt) = adviceToPlan(advice, price) ?: (risk to tpR)
+                broker.open(sym, sig.dir, price, lev, riskAt, riskFraction, tpRAt)?.let { pos ->
                     noteEntry()
                     out.add(
                         "OPEN ${if (sig.dir > 0) "LONG" else "SHORT"} $sym @ ${fmt(price)} conf ${fmt0(sig.confidence)}" +
                             " · margin ${fmt(pos.qty * pos.entry / pos.leverage)} USDT" +
+                            (advice?.let { " · agent SL ${fmt(it.sl)} TP ${fmt(it.tp)}: ${it.reason}" } ?: "") +
                             (levNote?.let { " · $it" } ?: ""),
                     )
                 }
@@ -1411,15 +1424,6 @@ class TraderEngine(private val rest: BitunixRest) {
         }
         return out
     }
-
-    /** Places a real market order with TP/SL attached. Returns a status line, or null to skip. */
-    private fun openLive(
-        symbol: String,
-        dir: Int,
-        price: Double,
-        confidence: Double,
-        openPositions: JSONArray? = null,
-    ): String? = placeLive(symbol, dir, price, riskFraction, confidence, openPositions)
 
     /**
      * A PAPER entry sized exactly like the LIVE one: the configured margin per
@@ -1431,7 +1435,7 @@ class TraderEngine(private val rest: BitunixRest) {
      */
     internal fun openPaper(
         symbol: String, dir: Int, price: Double, leverage: Int, riskAt: RiskSettings,
-    ): Position? = broker.open(symbol, dir, price, leverage, riskAt, riskFraction)
+    ): Position? = broker.open(symbol, dir, price, leverage, riskAt, riskFraction, tpR)
 
     /**
      * One-tap manual entry (paper or live).
@@ -1446,7 +1450,7 @@ class TraderEngine(private val rest: BitunixRest) {
             if (broker.positions.containsKey(sym)) return "SKIP $sym: already an open paper position."
             val (lev, levNote) = entryLeverage(sym)
             val pos = broker.openSized(
-                sym, dir, px, lev, sizeFraction, risk,
+                sym, dir, px, lev, sizeFraction, risk, tpR,
             ) ?: return "SKIP $sym: could not open."
             noteEntry()
             return "PAPER OPEN ${if (dir > 0) "LONG" else "SHORT"} $sym qty ${fmt(pos.qty)} @ ${fmt(px)} " +
@@ -1531,13 +1535,48 @@ class TraderEngine(private val rest: BitunixRest) {
     }
 
     /**
-     * The SL distance, as a % of the price, for a signal entry of the given
-     * strength: auto mode scales the user's `set sl` base (or
-     * [TpSlPlanner.AUTO_SL_BASE_PCT]) by the strength. Null strength = manual
-     * entry — it keeps the user's own stop only.
+     * The user's own stop distance (`set sl`, % of the price). Signal entries in
+     * auto mode do NOT use it: the agent sets their TP/SL ([agentTpSl]).
      */
-    fun slPctForSignal(strength: Double?): Double =
-        if (autoTpsl && strength != null) TpSlPlanner.slPctAt(risk.slPct, strength) else risk.slPct
+    fun slPctForSignal(@Suppress("UNUSED_PARAMETER") strength: Double?): Double = risk.slPct
+
+    /**
+     * Asks the model for this entry's SL and TP. Returns the advice, or the
+     * reason there is none. Never falls back to a fixed stop.
+     */
+    internal fun agentTpSl(
+        sym: String, dir: Int, price: Double, lev: Int, confidence: Double,
+        candles: Map<String, List<Candle>>, perTf: Map<String, TfSignal>, mmr: Double,
+    ): Pair<TpSlAdvice?, String?> {
+        val advisor = tpslAdvisor ?: return null to "no model connected for automatic TP/SL"
+        val liq = TpSlPlanner.liqPrice(price, dir, lev, mmr)
+        val ask = TpSlAsk(sym, dir, price, lev, confidence, liq, candles, perTf)
+        val text = runCatching { advisor(AgentTpSl.prompt(ask)) }
+            .getOrElse { return null to "model error: ${it.message ?: it.javaClass.simpleName}" }
+        val advice = AgentTpSl.parse(text) ?: return null to "model gave no TP/SL"
+        AgentTpSl.invalidReason(advice, dir, price, liq)?.let { return null to "model TP/SL rejected: $it" }
+        return advice to null
+    }
+
+    /**
+     * The model the agent's TP/SL questions go to: (role, content) messages in,
+     * the model's text out. Set by the UI from the chat's own model settings.
+     */
+    @Volatile
+    var tpslAdvisor: ((List<Pair<String, String>>) -> String?)? = null
+
+    /**
+     * Turns the agent's prices into the planner's inputs at [basis]: the stop
+     * distance as `slPct` (in % of the price), and the TP as an R-multiple of
+     * it. Null when there is no advice or it does not fit.
+     */
+    internal fun adviceToPlan(advice: TpSlAdvice?, basis: Double): Pair<RiskSettings, Double>? {
+        if (advice == null || basis <= 0.0) return null
+        val slDist = kotlin.math.abs(basis - advice.sl)
+        val tpDist = kotlin.math.abs(advice.tp - basis)
+        if (slDist <= 0.0 || tpDist <= 0.0) return null
+        return risk.copy(slPct = slDist / basis * 100.0) to tpDist / slDist
+    }
 
     /** Shared live order path used by the scanner and the one-tap trade button. */
     private fun placeLive(
@@ -1547,6 +1586,7 @@ class TraderEngine(private val rest: BitunixRest) {
         marginFraction: Double,
         confidence: Double?,
         openPositions: JSONArray? = null,
+        advice: TpSlAdvice? = null,
     ): String {
         // Refresh the exchange balance FIRST: order sizing must use one
         // authoritative number, never the paper account.
@@ -1585,8 +1625,18 @@ class TraderEngine(private val rest: BitunixRest) {
             rest.markPrice(symbol).optString("markPrice").toDoubleOrNull()
         }.getOrNull()
         val triggerBasis = mark ?: price
+        // The agent's levels are prices; re-check them against this basis
+        // (the price may have moved since the model answered).
+        if (advice != null) {
+            val liqNow = TpSlPlanner.liqPrice(triggerBasis, dir, lev, mmr)
+            AgentTpSl.invalidReason(advice, dir, triggerBasis, liqNow)?.let {
+                return "SKIP $symbol: agent TP/SL no longer valid at ${fmt(triggerBasis)} — $it"
+            }
+        }
+        val (slPctUse, tpRUse) = adviceToPlan(advice, triggerBasis)
+            ?.let { (r, k) -> r.slPct to k } ?: (slPctForSignal(confidence) to tpR)
         val plan = TpSlPlanner.plan(
-            triggerBasis, dir, lev, slPctForSignal(confidence) / 100.0, mmr,
+            triggerBasis, dir, lev, slPctUse / 100.0, mmr, tpRUse,
         )
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
@@ -1609,10 +1659,10 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         try {
-            // TP sits tpR × the stop distance away from entry (set tp r <n>) —
-            // exists only when the user configured a stop (set sl <pct>).
-            val rDist = plan.stop?.let { kotlin.math.abs(triggerBasis - it) }?.coerceAtLeast(1e-12)
-            val tp = rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
+            // The final TP sits tpR × the stop distance away (set tp r <n>) and
+            // closes what is left; the rungs below it are armed after the fill
+            // as partial TP/SL orders. Exists only when there is a stop.
+            val tp = plan.ladder.lastOrNull()?.first
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
                 tpPrice = tp?.let { formatPrice(symbol, it) },
@@ -1630,23 +1680,31 @@ class TraderEngine(private val rest: BitunixRest) {
                 // exist yet — so arm it now, from the position the exchange just
                 // opened. Without this the first move has to create it, and until
                 // then the exchange holds a stop the risk manager cannot see.
+                // place_order's tpPrice/slPrice normally creates that order already;
+                // "Each position can only have one Position TP/SL Order", so
+                // placing a second one was rejected on every entry. Place only
+                // when none is armed.
+                val pos = runCatching { rest.pendingPositions(symbol) }.getOrNull()
+                val pid: String = (if (pos != null && pos.length() > 0) pos.getJSONObject(0).optString("positionId") else "").toString()
                 val armed = runCatching {
-                    val pos = rest.pendingPositions(symbol)
-                    val pid: String = (if (pos.length() > 0) pos.getJSONObject(0).optString("positionId") else "").toString()
                     if (pid.isBlank()) return@runCatching null
-                    rest.placePositionTpSl(
-                        symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
-                        slPrice = plan.stop?.let { formatPrice(symbol, it) },
-                    )
+                    if (rest.positionTpSlOrder(symbol, pid) == null && (tp != null || plan.stop != null)) {
+                        rest.placePositionTpSl(
+                            symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
+                            slPrice = plan.stop?.let { formatPrice(symbol, it) },
+                        )
+                    }
                     pid
                 }.getOrNull()
+                val ladderNote = if (pid.isNotBlank()) armLadder(symbol, pid, qty, plan) else ""
                 val slNote = when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
                     else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
                 }
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
-                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote"
+                    "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote$ladderNote" +
+                    (advice?.let { " | agent SL ${fmt(it.sl)} TP ${fmt(it.tp)}: ${it.reason}" } ?: "")
             }
             // Accepted but never filled (min qty, insufficient margin, TP/SL
             // rejected — the exchange cancels right after placement). The old code
@@ -1675,6 +1733,38 @@ class TraderEngine(private val rest: BitunixRest) {
             val line = "LIVE ERROR $symbol: ${e.message ?: e.javaClass.simpleName}"
             onEvent?.invoke(line)
             return line
+        }
+    }
+
+    /**
+     * Arms the partial take-profit rungs on the exchange — Bitunix's official
+     * "Partial TP/SL" method (POST /api/v1/futures/tpsl/place_order with tpQty).
+     * Every rung of [plan] except the last closes [TpSlPlanner.LADDER_FRACTION]
+     * of the entry qty; the last rung is the position TP/SL, which closes the
+     * rest. Before this, LIVE attached a single TP for the whole size while the
+     * settings text promised the 1R–4R ladder (which only paper had).
+     * A rung whose qty is below the pair's minimum is skipped, not invented.
+     */
+    private fun armLadder(symbol: String, positionId: String, qty: String, plan: TpSlPlan): String {
+        val rungs = plan.ladder.dropLast(1)
+        if (rungs.isEmpty()) return ""
+        val total = qty.toDoubleOrNull() ?: return ""
+        var ok = 0
+        var failed = 0
+        for ((price, frac) in rungs) {
+            val rungQty = formatQty(symbol, total * frac) ?: continue
+            runCatching {
+                rest.placeTpSlOrder(
+                    symbol, positionId,
+                    tpPrice = formatPrice(symbol, price), tpQty = rungQty,
+                    tpStopType = "LAST_PRICE", tpOrderType = "MARKET",
+                )
+            }.onSuccess { ok++ }.onFailure { failed++ }
+        }
+        return when {
+            ok == 0 && failed == 0 -> " | TP ladder skipped (rung qty below min)"
+            failed > 0 -> " | TP ladder: $ok/${rungs.size} rungs armed ($failed rejected)"
+            else -> " | TP ladder: $ok rungs armed"
         }
     }
 
@@ -1997,7 +2087,15 @@ class TraderEngine(private val rest: BitunixRest) {
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
             val bestRoi = TpSlPlanner.roi(entry, best, dir, lev)
-            val be = breakevenStopFor(dir, entry, best, lev, curStop, risk)
+            // Round-trip fee per unit: the exchange's `fee` on the open
+            // position is the opening fee; the closing fee is charged at the
+            // same rate, so twice it per unit of qty covers both.
+            val feeOffset = run {
+                val q = posQty(p).toDoubleOrNull()?.takeIf { it > 0 } ?: return@run 0.0
+                val f = kotlin.math.abs(p.optString("fee").toDoubleOrNull() ?: 0.0)
+                2.0 * f / q
+            }
+            val be = breakevenStopFor(dir, entry, best, lev, curStop, risk, feeOffset = feeOffset)
             if (be != null) {
                 if (applyLiveSl(sym, positionId, be, dir, mark, "Breakeven", bestRoi, events)) {
                     liveBreakevenDone[sym] = true
@@ -2077,7 +2175,11 @@ class TraderEngine(private val rest: BitunixRest) {
         val existing = runCatching { rest.positionTpSlOrder(sym, positionId) }.getOrNull()
         try {
             if (existing != null) {
-                rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
+                // Carry the armed TP along. Modifying with the SL alone risks
+                // the exchange dropping the take-profit — then a winner can only
+                // leave through the (breakeven/trailing) stop.
+                val keepTp = existing.optString("tpPrice").takeIf { it.isNotBlank() && it != "0" }
+                rest.modifyPositionTpSl(sym, positionId, tpPrice = keepTp, slPrice = price)
             } else {
                 // The stop came from the entry order (place_order's slPrice), so
                 // no position-level order exists yet — CREATE it.
@@ -2428,13 +2530,12 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
             } else "Paper mode: orders are simulated instantly."
             t.startsWith("tpsl_history") -> {
-                val base = slPctForSignal(1.0)
-                val stop = if (base > 0) {
-                    "${fmt1(base)}% from entry" +
-                        (if (autoTpsl) " — auto: scales with the signal's strength (set auto tpsl off or set sl 0 to change)" else " (set sl 0 for none)")
-                } else "none (set sl <pct>)"
+                val base = risk.slPct
+                val stop = if (autoTpsl) "auto — set by the agent per entry (signal + candles)"
+                else if (base > 0) "${fmt1(base)}% from entry (set sl 0 for none)"
+                else "none (set sl <pct>)"
                 "TP/SL: stop $stop, " +
-                    "ladder 1R..4R each 25% of the stop distance, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                    "ladder: 25% per 1R up to the TP, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
                     "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             }
             t.startsWith("tiers") -> {
@@ -2474,7 +2575,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 val p = e.value
                 val ladder = p.plan.ladder.mapIndexed { i, (price, frac) ->
                     val state = if (i < p.nextRung) "hit" else "open"
-                    "${i + 1}R ${fmt(price)} (${fmt0(frac * 100)}%, $state)"
+                    "${i + 1}R ${fmt(price)} (${if (frac >= 1.0) "rest" else "${fmt0(frac * 100)}%"}, $state)"
                 }.joinToString(", ")
                 "${p.symbol} ${if (p.dir > 0) "LONG" else "SHORT"} entry ${fmt(p.entry)} " +
                     "stop ${p.stop?.let { fmt(it) } ?: "none"} liq ${fmt(p.plan.liquidation)}\n" +
@@ -2752,8 +2853,8 @@ class TraderEngine(private val rest: BitunixRest) {
                     autoTpsl = on
                     configRev++
                     if (autoTpsl)
-                        "Automatic TP/SL ON — signal entries get the strength-scaled stop " +
-                            "(the user's set sl base, or ${TpSlPlanner.AUTO_SL_BASE_PCT.toInt()}% when none set) plus the 1R–4R TP ladder."
+                        "Automatic TP/SL ON — the agent sets SL and TP for each signal entry " +
+                            "from the signal strength and the candles; no fixed %. No valid answer = no entry."
                     else
                         "Automatic TP/SL OFF — entries carry the user's stop only (set sl <pct>)."
                 }
