@@ -100,6 +100,7 @@ object ToolPolicy {
         ToolSpec("set guard", ToolCapability.RISK),
         ToolSpec("set max positions", ToolCapability.RISK),
         ToolSpec("set breakeven", ToolCapability.RISK),
+        ToolSpec("set ladder", ToolCapability.RISK),
         ToolSpec("set trail trigger", ToolCapability.RISK),
         ToolSpec("set trail distance", ToolCapability.RISK),
         ToolSpec("set sl", ToolCapability.RISK),
