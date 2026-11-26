@@ -1870,6 +1870,10 @@ class TraderEngine(private val rest: BitunixRest) {
                         " | partial TP not placed ($why) — one TP ${fmt(tp)} on the Position TP/SL"
                     }
                 }
+                // Keep the levels the model chose for this entry, so the TP/SL
+                // guard can re-arm with them without a new model call.
+                advice?.let { entryAdvice[symbol] = it }
+                if (!armed && armError != null) entryArmError[symbol] = armError
                 val activePlan = fillPlan ?: plan
                 val slNote = when {
                     activePlan.stop == null -> ""
@@ -2206,7 +2210,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val closedSymbols = seenLive.keys.filter { it !in nowSeen }
         for (sym in closedSymbols) {
             seenLive.remove(sym)
-            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym); armAttemptAt.remove(sym)
+            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym); armAttemptAt.remove(sym); entryAdvice.remove(sym); entryArmError.remove(sym)
             // Pull the net result from history so the user immediately sees the PnL.
             val net = runCatching {
                 val h = rest.historyPositions(sym, limit = 1)
@@ -2427,6 +2431,10 @@ class TraderEngine(private val rest: BitunixRest) {
      * remainder. Returns (rungs placed, skip reasons).
      */
     private val armAttemptAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    /** The model's SL/TP for each live entry, reused by the TP/SL guard. */
+    private val entryAdvice = java.util.concurrent.ConcurrentHashMap<String, TpSlAdvice>()
+    /** Why the Position TP/SL failed right after the fill, shown by the guard. */
+    private val entryArmError = java.util.concurrent.ConcurrentHashMap<String, String>()
 
     /**
      * Arms a Position TP/SL (stop) plus the partial TP rungs on a live position
@@ -2441,12 +2449,20 @@ class TraderEngine(private val rest: BitunixRest) {
         val last = armAttemptAt[sym]
         if (last != null && now - last < 60_000L) return false
         armAttemptAt[sym] = now
-        val (advice, why) = manualAdvice(sym, dir, basis = entry, levAt = lev, mmrAt = mmr)
-        if (advice == null) {
-            events.add("WARNING: $sym has NO TP/SL on the exchange — model gave no levels ($why). Retrying in 1 min.")
-            return false
+        val atFill = entryArmError[sym]?.let { " (after the fill: $it)" } ?: ""
+        // First the levels the model already gave for this entry; ask the model
+        // again only when there are none or they no longer fit the price.
+        var plan = entryAdvice[sym]?.let { planForFilledEntry(dir, entry, lev, mmr, it, slPctForSignal(1.0), tpR) }
+            ?.takeIf { it.stop != null && slTriggerValid(dir, it.stop, mark) }
+        if (plan == null) {
+            val (advice, why) = manualAdvice(sym, dir, basis = entry, levAt = lev, mmrAt = mmr)
+            if (advice == null) {
+                events.add("WARNING: $sym has NO TP/SL on the exchange$atFill — model gave no levels ($why). Retrying in 1 min.")
+                return false
+            }
+            entryAdvice[sym] = advice
+            plan = planForFilledEntry(dir, entry, lev, mmr, advice, slPctForSignal(1.0), tpR)
         }
-        val plan = planForFilledEntry(dir, entry, lev, mmr, advice, slPctForSignal(1.0), tpR)
         val stop = plan?.stop
         if (plan == null || stop == null) {
             events.add("WARNING: $sym has NO TP/SL — model levels invalid at entry ${fmt(entry)}. Retrying in 1 min.")
@@ -2477,10 +2493,11 @@ class TraderEngine(private val rest: BitunixRest) {
                     ", partial not placed ($skip) — TP ${fmt(fin)} on the Position TP/SL"
                 }
             }
+            entryArmError.remove(sym)
             events.add("TP/SL GUARD: $sym had no TP/SL — armed SL ${fmt(stop)}" + (tp?.let { ", TP ${fmt(it)}" } ?: "") + note)
             true
         } catch (e: Exception) {
-            events.add("WARNING: $sym has NO TP/SL — arm failed: ${e.message ?: e.javaClass.simpleName}. Retrying in 1 min.")
+            events.add("WARNING: $sym has NO TP/SL$atFill — arm failed: ${e.message ?: e.javaClass.simpleName}. Retrying in 1 min.")
             false
         }
     }
