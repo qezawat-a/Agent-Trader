@@ -173,7 +173,7 @@ object SignalAggregator {
                         qualifying.isEmpty() -> {
                             val biggest = counts.maxByOrNull { it.value }?.value ?: 0
                             "only $biggest of $need timeframes share a side" +
-                                if (need >= rows.size) " (all must agree — try: set tf agree 2)" else ""
+                                if (need >= rows.size) " (all must agree — try: set tf agree ${need - 1})" else ""
                         }
                         else -> {
                             val side = qualifying[0].key
@@ -370,10 +370,11 @@ internal fun formatSignalBoard(
 }.trim()
 
 /**
- * Kline intervals supported by GET /api/v1/futures/market/kline per the
- * official docs. Case matters: "1m" is one MINUTE, "1M" is one MONTH.
+ * Kline intervals for GET /api/v1/futures/market/kline: the official docs list
+ * plus "3m", which is NOT in the docs but the endpoint accepts it (verified live,
+ * 2026-11, code:0) and the user asked to keep it. Case matters: "1m" is one MINUTE, "1M" is one MONTH.
  */
-val KLINE_INTERVALS = listOf("1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
+val KLINE_INTERVALS = listOf("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d", "3d", "1w", "1M")
 
 /** Parses "BTCUSDT, ethusdt ;SOLUSDT" into clean uppercase symbols; null when none are valid. */
 internal fun parseSymbolsCsv(raw: String): List<String>? {

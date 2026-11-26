@@ -57,10 +57,8 @@ class BitunixDocParamsTest {
     }
 
     @Test
-    fun kline_rejects_intervals_not_in_the_documented_rest_enum() {
-        assertFailsWith<IllegalArgumentException> {
-            BitunixRest.klineQuery("BTCUSDT", "3m")
-        }
+    fun kline_accepts_live_verified_3m() {
+        BitunixRest.klineQuery("BTCUSDT", "3m")
     }
 
     // ---- Get Depth (market) ----
