@@ -125,7 +125,9 @@ class LiveExitsSimTest {
         // No order that would close everything at a TP.
         assertTrue(fake.orders.none { (it.optString("tpPrice").toDoubleOrNull() ?: 0.0) > 0 && it.optString("tpQty").isBlank() }, fake.orders.toString())
         assertEquals(1, fake.stops().size, "exactly one stop: ${fake.orders}")
-        val r = 2.622 * 0.01
+        // R = the stop distance the engine really used (read from the exchange).
+        val r = 2.622 - fake.stops().single().getString("slPrice").toDouble()
+        assertTrue(r > 0, "stop below entry")
         fake.move(2.622 + 1.05 * r)
         assertEquals(start * 0.75, fake.qty, 0.011, "1R closes 25%")
         fake.move(2.622 + 2.05 * r)
