@@ -7,11 +7,11 @@ plugins {
 fun env(key: String): String? = System.getenv(key)?.takeIf { it.isNotBlank() }
 
 android {
-    namespace = "com.bitunix.agenttrader"
+    namespace = "com.codeassist.agenttrader"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.bitunix.agenttrader"
+        applicationId = "com.codeassist.agenttrader"
         minSdk = 23
         targetSdk = 36
         // CI injects VERSION_CODE / VERSION_NAME per release tag (workflow "Compute version");
@@ -57,8 +57,8 @@ android {
             if (debugKeystore.exists()) signingConfig = signingConfigs.getByName("debugStable")
         }
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             env("KEYSTORE_BASE64")?.let { _ -> signingConfig = signingConfigs.getByName("release") }
         }
@@ -92,5 +92,4 @@ dependencies {
     implementation("androidx.compose.material:material-icons-core:1.7.8")
     testImplementation(kotlin("test"))
     testImplementation("org.json:json:20240303")
-    implementation("androidx.databinding:viewbinding:8.7.3")
 }
