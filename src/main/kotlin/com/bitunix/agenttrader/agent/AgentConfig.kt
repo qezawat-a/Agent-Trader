@@ -166,6 +166,19 @@ class AgentConfig(context: Context) {
         get() = prefs.getBoolean("auto_tpsl", true)
         set(value) = prefs.edit().putBoolean("auto_tpsl", value).apply()
 
+    /** Bitunix TP/SL method 2 (partial tpQty rungs). */
+    var partialTpOn: Boolean
+        get() = prefs.getBoolean("partial_tp_on", true)
+        set(value) = prefs.edit().putBoolean("partial_tp_on", value).apply()
+
+    /** Bitunix TP/SL method 4 (account TP/SL), USDT; 0 = off. */
+    var accountTpUsdt: Float
+        get() = prefs.getFloat("account_tp_usdt", 0f)
+        set(value) = prefs.edit().putFloat("account_tp_usdt", value).apply()
+    var accountSlUsdt: Float
+        get() = prefs.getFloat("account_sl_usdt", 0f)
+        set(value) = prefs.edit().putFloat("account_sl_usdt", value).apply()
+
     /** Auto-universe: pick the top symbols by 24h change/volume automatically.
      *  On by default since v.2.4.4 — the app picks the universe itself, so the
      *  user never has to type a symbol list. Setting a fixed universe turns it off. */

@@ -190,6 +190,9 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
             // Automatic TP/SL on signal entries — persisted so the Control
             // screen's switch survives a restart.
             autoTpsl = config.autoTpsl
+            partialTpOn = config.partialTpOn
+            accountTpUsdt = config.accountTpUsdt.toDouble()
+            accountSlUsdt = config.accountSlUsdt.toDouble()
             // Automatic TP/SL asks the chat's own model for each entry's levels.
             tpslAdvisor = { msgs ->
                 if (config.model.isBlank()) error("no chat model selected")
@@ -312,6 +315,9 @@ fun AgentApp(
         config.slPct = engine.risk.slPct.toInt()
         config.tpR = engine.tpR.toFloat()
         config.autoTpsl = engine.autoTpsl
+        config.partialTpOn = engine.partialTpOn
+        config.accountTpUsdt = engine.accountTpUsdt.toFloat()
+        config.accountSlUsdt = engine.accountSlUsdt.toFloat()
         config.autoUniverse = engine.autoUniverse
         config.autoMinVolumeUsd = engine.autoMinVolumeUsd
         config.autoRankBy = engine.autoRankBy

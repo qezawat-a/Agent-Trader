@@ -375,6 +375,40 @@ fun ControlScreen(
         item {
             Card(colors = CardDefaults.cardColors(containerColor = scheme.surface)) {
                 Column(Modifier.padding(14.dp)) {
+                    Text("TP/SL methods (Bitunix: 4 methods)", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    ToggleRow(
+                        "1 · Position TP/SL", Icons.Default.Warning, true, {},
+                        "one order on the position, closes 100% — always holds the stop",
+                        enabled = false,
+                    )
+                    ToggleRow(
+                        "2 · Partial TP/SL", Icons.Default.KeyboardArrowUp, engine.partialTpOn,
+                        { onAction(if (it) "set partial on" else "set partial off") },
+                        "separate tpQty orders close 25% at 1R, 2R, 3R; rest at the final TP",
+                    )
+                    ToggleRow(
+                        "3 · Trailing TP/SL", Icons.Default.Refresh, engine.risk.trailingTriggerRoiPct > 0,
+                        { onAction(if (it) "set trail trigger 40" else "set trail trigger 0") },
+                        "stop follows the best price (trigger & distance below)",
+                    )
+                    var accTp by remember(engine.configRev) { mutableStateOf(num(engine.accountTpUsdt)) }
+                    var accSl by remember(engine.configRev) { mutableStateOf(num(engine.accountSlUsdt)) }
+                    Text("4 · Account TP/SL — closes ALL positions at total uPnL (USDT, 0 off)", style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = accTp, onValueChange = { accTp = it }, modifier = Modifier.weight(1f),
+                            label = { Text("Account TP") }, singleLine = true,
+                        )
+                        OutlinedButton(onClick = { onAction("set account tp $accTp") }) { Text("Apply") }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                        OutlinedTextField(
+                            value = accSl, onValueChange = { accSl = it }, modifier = Modifier.weight(1f),
+                            label = { Text("Account SL") }, singleLine = true,
+                        )
+                        OutlinedButton(onClick = { onAction("set account sl $accSl") }) { Text("Apply") }
+                    }
+                    Spacer(Modifier.height(12.dp))
                     Text("Risk manager & exits", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     Text(
                         "Breakeven ${num(engine.risk.breakevenRoiPct)}% · trail trigger ${num(engine.risk.trailingTriggerRoiPct)}% · " +
