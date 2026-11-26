@@ -678,10 +678,10 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(!qty.isNullOrBlank()) { "modify_order needs a qty" }
         require(!price.isNullOrBlank()) { "modify_order needs a price" }
         val body = JSONObject()
-        if (!orderId.isNullOrBlank()) body.put("orderId", orderId)
-        if (!clientId.isNullOrBlank()) body.put("clientId", clientId)
-        body.put("qty", qty)
-        body.put("price", price)
+        if (orderId != null) body.put("orderId", orderId)
+        if (clientId != null) body.put("clientId", clientId)
+        body.put("qty", qty) // required by the docs, so it is never null here
+        if (price != null) body.put("price", price)
         if (tpPrice != null) body.put("tpPrice", tpPrice)
         if (tpStopType != null) body.put("tpStopType", tpStopType)
         if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
