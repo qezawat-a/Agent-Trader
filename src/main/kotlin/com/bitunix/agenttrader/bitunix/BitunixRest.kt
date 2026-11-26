@@ -20,7 +20,7 @@ import java.util.UUID
  *  - kline fields: time/open/high/low/close/baseVol/quoteVol, newest first (we sort ascending)
  *  - tickers fields: symbol/lastPrice/markPrice/open/high/low/quoteVol/baseVol
  *  - trading_pairs fields: basePrecision, quotePrecision, minTradeVolume, maxLeverage
- *  - kline interval enum: 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
+ *  - kline interval enum: 1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
  *
  * Every path and parameter below is matched against the official docs
  * (https://www.bitunix.com/api-docs/futures/), endpoint by endpoint:
@@ -978,9 +978,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         /** Depth gears the endpoint accepts ("1", "5", "15", "50", "max"). */
         val DEPTH_LIMITS = listOf("1", "5", "15", "50", "max")
 
-        /** Kline intervals listed by the REST documentation. */
+        /** Kline intervals the docs list, plus 3m (live-verified, undocumented, kept by the user's decision). */
         val KLINE_INTERVALS = listOf(
-            "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
+            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
             "1d", "3d", "1w", "1M",
         )
         private val PENDING_ORDER_STATUSES = setOf("NEW", "PART_FILLED")
