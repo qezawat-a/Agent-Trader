@@ -645,7 +645,7 @@ class TraderEngine(private val rest: BitunixRest) {
             override fun onOpen(privateChannel: Boolean) {
                 lastWsError = null
                 if (privateChannel) {
-                    client.subscribePrivateAll(listOf("balance", "position", "order", "tpsl"))
+                    client.subscribePrivateAll(BitunixWs.PRIVATE_SUBSCRIPTION_CHANNELS)
                     // A reconnect replays future pushes, not what happened while
                     // the socket was down. Seed the cache from REST so a position
                     // closed during the outage cannot linger as "open".

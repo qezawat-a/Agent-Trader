@@ -56,6 +56,13 @@ class BitunixDocParamsTest {
         assertEquals("1", BitunixRest.klineQuery("BTCUSDT", "1m", limit = 0)["limit"])
     }
 
+    @Test
+    fun kline_rejects_intervals_not_in_the_documented_rest_enum() {
+        assertFailsWith<IllegalArgumentException> {
+            BitunixRest.klineQuery("BTCUSDT", "3m")
+        }
+    }
+
     // ---- Get Depth (market) ----
 
     @Test
@@ -90,7 +97,6 @@ class BitunixDocParamsTest {
                 "effect", "clientId", "reduceOnly",
                 "tpPrice", "tpStopType", "tpOrderType", "tpOrderPrice",
                 "slPrice", "slStopType", "slOrderType", "slOrderPrice",
-                "marginCoin",
             ),
             keysOf(body),
         )
@@ -103,7 +109,7 @@ class BitunixDocParamsTest {
         val body = BitunixRest.placeOrderBody(
             symbol = "BTCUSDT", qty = "0.5", side = "SELL", orderType = "MARKET",
         )
-        assertEquals(setOf("symbol", "qty", "side", "orderType", "marginCoin"), keysOf(body))
+        assertEquals(setOf("symbol", "qty", "side", "orderType"), keysOf(body))
     }
 
     @Test
@@ -368,7 +374,7 @@ class BitunixDocParamsTest {
         // Docs: effect is "Required if the orderType is limit"; the documented
         // default value is GTC.
         val limit = BitunixRest.placeOrderBody(
-            symbol = "BTCUSDT", qty = "0.5", side = "BUY", orderType = "LIMIT",
+            symbol = "BTCUSDT", qty = "0.5", side = "BUY", orderType = "LIMIT", price = "60000",
         )
         assertEquals("GTC", limit.getString("effect"))
 
@@ -377,7 +383,9 @@ class BitunixDocParamsTest {
         )
         assertFalse(market.has("effect"))
 
-        val item = BitunixRest.batchOrderItem(qty = "0.1", side = "BUY", orderType = "LIMIT")
+        val item = BitunixRest.batchOrderItem(
+            qty = "0.1", side = "BUY", orderType = "LIMIT", price = "60000",
+        )
         assertEquals("GTC", item.getString("effect"))
     }
 
@@ -385,7 +393,7 @@ class BitunixDocParamsTest {
     fun modify_order_needs_a_qty() {
         // Docs: qty is required ("Amount (base coin)").
         val rest = BitunixRest("k", "s")
-        assertFailsWith<IllegalArgumentException> { rest.modifyOrder(orderId = "1") }
+        assertFailsWith<IllegalArgumentException> { rest.modifyOrder(orderId = "1", qty = "0.1") }
         assertFailsWith<IllegalArgumentException> {
             rest.modifyOrder(orderId = "1", price = "60000")
         }
