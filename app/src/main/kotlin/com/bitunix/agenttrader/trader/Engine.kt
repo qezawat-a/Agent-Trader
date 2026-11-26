@@ -650,7 +650,7 @@ class TraderEngine(private val rest: BitunixRest) {
             override fun onOpen(privateChannel: Boolean) {
                 lastWsError = null
                 if (privateChannel) {
-                    client.subscribePrivateAll(listOf("balance", "position", "order", "tpsl"))
+                    client.subscribePrivateAll(BitunixWs.PRIVATE_SUBSCRIPTION_CHANNELS)
                     // A reconnect replays future pushes, not what happened while
                     // the socket was down. Seed the cache from REST so a position
                     // closed during the outage cannot linger as "open".
@@ -1086,6 +1086,54 @@ class TraderEngine(private val rest: BitunixRest) {
     fun effectiveLeverage(symbol: String): Int = effectiveLeverage(leverage, pairInfo(symbol)?.maxLeverage)
 
     internal fun effectiveLeverage(base: Int, max: Int?): Int = minOf(base, max ?: base)
+
+    /**
+     * Synchronize account-wide position mode and symbol leverage/margin mode
+     * before an entry. Bitunix can reject a mode change while positions or
+     * orders are open, so any failed or incomplete sync blocks the order.
+     */
+    private fun syncLiveAccountSettings(symbol: String, lev: Int, dir: Int): String? {
+        val wantedPositionMode = positionMode.uppercase()
+        if (wantedPositionMode != "ONE_WAY" && wantedPositionMode != "HEDGE") {
+            return "LIVE ERROR $symbol: invalid position mode $positionMode"
+        }
+        val wantedMarginMode = marginMode.uppercase()
+        if (wantedMarginMode != "ISOLATION" && wantedMarginMode != "CROSS") {
+            return "LIVE ERROR $symbol: invalid margin mode $marginMode"
+        }
+        return try {
+            val currentPositionMode = rest.positionMode().optString("positionMode").uppercase()
+            if (currentPositionMode.isBlank()) {
+                throw IllegalStateException("Bitunix did not return the account position mode")
+            }
+            if (currentPositionMode != wantedPositionMode) {
+                rest.changePositionMode(wantedPositionMode)
+            }
+
+            val settings = rest.tradingSettings(symbol)
+            if (settings.length() == 0) {
+                throw IllegalStateException("Bitunix returned no trading settings for $symbol")
+            }
+            val current = settings.getJSONObject(0)
+            val currentMarginMode = current.optString("marginMode").uppercase()
+            val currentLeverage = if (wantedPositionMode == "HEDGE") {
+                if (dir > 0) current.optInt("longLeverage", current.optInt("leverage", 0))
+                else current.optInt("shortLeverage", current.optInt("leverage", 0))
+            } else {
+                current.optInt("leverage", 0)
+            }
+            if (currentMarginMode.isNotBlank() && currentMarginMode != wantedMarginMode) {
+                rest.changeMarginMode(symbol, mode = wantedMarginMode)
+            }
+            if (currentLeverage > 0 && currentLeverage != lev) {
+                rest.changeLeverage(symbol, leverage = lev)
+            }
+            null
+        } catch (e: Exception) {
+            "LIVE ERROR $symbol: could not synchronize Bitunix position, margin or leverage settings — " +
+                (e.message ?: e.javaClass.simpleName)
+        }
+    }
 
     /** Ranks the scanner universe by quote volume and returns the top symbols. */
     fun rankUniverse(top: Int = 10, tickersJson: org.json.JSONArray? = null): List<String> {
@@ -1714,22 +1762,11 @@ class TraderEngine(private val rest: BitunixRest) {
         val qtyRaw = margin * lev / price
         val qty = formatQty(symbol, qtyRaw) ?: return "SKIP $symbol: qty below min volume."
         val side = if (dir > 0) "BUY" else "SELL"
-        val tradeSide = if (positionMode == "HEDGE") "OPEN" else null
-        // Sync account leverage/margin mode with this order's needs — only when they
-        // differ, using the account's ACTUAL settings (trading_settings endpoint).
-        runCatching {
-            val s = rest.tradingSettings(symbol)
-            if (s.length() > 0) {
-                val o = s.getJSONObject(0)
-                val curMode = o.optString("marginMode")
-                val curLev = if (positionMode == "HEDGE")
-                    o.optInt("longLeverage", o.optInt("leverage", 0))
-                else o.optInt("leverage", 0)
-                if (curMode.isNotBlank() && curMode != marginMode) {
-                    rest.changeMarginMode(symbol, mode = marginMode)
-                }
-                if (curLev > 0 && curLev != lev) rest.changeLeverage(symbol, leverage = lev)
-            }
+        val configuredPositionMode = positionMode.uppercase()
+        val tradeSide = if (configuredPositionMode == "HEDGE") "OPEN" else null
+        syncLiveAccountSettings(symbol, lev, dir)?.let { error ->
+            onEvent?.invoke(error)
+            return error
         }
         try {
             // Use ONE documented method: Position TP/SL. It belongs to the

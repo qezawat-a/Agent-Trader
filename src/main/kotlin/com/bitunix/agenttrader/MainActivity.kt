@@ -910,10 +910,13 @@ fun AgentApp(
                             val working = probes.filter { it.ok }.map { it.model }
                             if (working.isEmpty()) {
                                 "No working model among the ${probes.size} candidates tried:\n" +
-                                    probes.joinToString("\n") { (m, ok, d) -> "$m — ${if (ok) "ok" else d}" }
+                                    probes.joinToString("\n") { (m, ok, d) -> "$m — ${if (ok) "ok" else d}" } +
+                                    "\n\n${all.size} models listed (the list needs no key; chat does — a 401 means the API key is rejected):\n" +
+                                    all.joinToString("\n")
                             } else {
                                 config.model = working.first()
-                                "Model set to ${working.first()} (verified with a live call)."
+                                "Model set to ${working.first()} (verified with a live call).\n" +
+                                    "${all.size} models for this key (/set_model <id>):\n" + all.joinToString("\n")
                             }
                         }
                     }
@@ -1637,9 +1640,19 @@ fun SettingsScreen(
             if (models.isEmpty()) {
                 "No models returned. Check the URL and key, then retry."
             } else {
-                val chosen = ModelClient.pickModel(models)
-                config.model = chosen
-                "Model auto-picked: $chosen (from ${models.size} available)."
+                // Listing models needs no valid key on many providers, so a
+                // listed model is not a usable one. Pick only a model that
+                // answered a live call; otherwise say why and change nothing.
+                val ordered = listOf(ModelClient.pickModel(models)) + models
+                val probes = client.probeWorking(ordered)
+                val ok = probes.firstOrNull { it.ok }
+                if (ok != null) {
+                    config.model = ok.model
+                    "Model set: ${ok.model} (answered a live call; ${models.size} listed)."
+                } else {
+                    "No model answered (${probes.size} tried, model unchanged):\n" +
+                        probes.joinToString("\n") { "${it.model} — ${it.detail.take(120)}" }
+                }
             }
         }
     }
