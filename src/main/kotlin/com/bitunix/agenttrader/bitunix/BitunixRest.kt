@@ -658,6 +658,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }
         // Docs: qty is required ("Amount (base coin)").
         require(qty != null) { "modify_order needs a qty" }
+        // Live docs page trade/modify_order (checked 2026-11-26): price is required too.
+        require(price != null) { "modify_order needs a price" }
         val body = JSONObject()
         if (orderId != null) body.put("orderId", orderId)
         if (clientId != null) body.put("clientId", clientId)
