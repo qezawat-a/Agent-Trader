@@ -40,6 +40,13 @@ class SignalGateOriginTest {
     }
 
     @Test
+    fun user_gates_override_the_constants() {
+        val votes = listOf(vote("a", "a", conf = 70), vote("b", "b", conf = 70))
+        assertEquals(0, SignalAggregator.evaluateVotes("15m", votes).dir)
+        assertEquals(1, SignalAggregator.evaluateVotes("15m", votes, minAgreeing = 2, minTfConfidence = 60.0).dir)
+    }
+
+    @Test
     fun duplicate_views_do_not_inflate_confidence() {
         val votes = listOf(
             vote("a", "a", conf = 70),

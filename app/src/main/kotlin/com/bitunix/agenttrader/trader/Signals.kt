@@ -93,28 +93,37 @@ object SignalAggregator {
      * and never count. The confidence is the side's confidence over the strong
      * votes (see [sideConfidence]).
      */
-    fun evaluateVotes(timeframe: String, all: List<StrategyVote>): TfEvaluation {
+    fun evaluateVotes(
+        timeframe: String,
+        all: List<StrategyVote>,
+        minAgreeing: Int = MIN_AGREEING,
+        minTfConfidence: Double = TIMEFRAME_CONFIDENCE,
+    ): TfEvaluation {
         var best = TfEvaluation(timeframe, 0, 0.0, 0, all)
         for (dir in listOf(1, -1)) {
             val mine = all.filter { it.dir == dir }
             val origins = mine.map { it.origin }.distinct()
-            if (origins.size < MIN_AGREEING) continue
+            // The user's gates (set agree / set tf conf), not the constants:
+            // the constants silently overrode the settings, so lowering a
+            // gate never produced a single extra signal.
+            if (origins.size < minAgreeing) continue
             // One market view contributes one confidence value. If two strategies
             // share an origin, keep the strongest one; otherwise duplicate views
             // could inflate both the average and the agreement bonus.
             val byOrigin = mine.groupBy { it.origin }
                 .mapValues { (_, votes) -> votes.maxOf { it.confidence } }
-            val strong = byOrigin.values.filter { it >= TIMEFRAME_CONFIDENCE }
+            val strong = byOrigin.values.filter { it >= minTfConfidence }
             if (strong.isEmpty()) continue
-            val conf = sideConfidence(strong.map(Int::toDouble), MIN_AGREEING)
+            val conf = sideConfidence(strong.map(Int::toDouble), minAgreeing)
             if (conf > best.confidence) best = TfEvaluation(timeframe, dir, conf, origins.size, all)
         }
         return best
     }
 
     /** Evaluates one timeframe and keeps the per-strategy detail for the board. */
-    fun evaluateTimeframe(timeframe: String, candles: List<Candle>): TfEvaluation =
-        evaluateVotes(timeframe, votes(candles))
+    fun evaluateTimeframe(timeframe: String, candles: List<Candle>, gates: Gates? = null): TfEvaluation =
+        if (gates == null) evaluateVotes(timeframe, votes(candles))
+        else evaluateVotes(timeframe, votes(candles), gates.minAgreeing, gates.minTfConfidence)
 
     fun timeframe(candles: List<Candle>): TfSignal {
         val e = evaluateTimeframe("", candles)

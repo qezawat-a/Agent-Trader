@@ -739,7 +739,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         fun noQty(o: JSONObject, k: String) = o.optString(k).let { it.isBlank() || (it.toDoubleOrNull() ?: 0.0) == 0.0 }
         return mine.firstOrNull { noQty(it, "tpQty") && noQty(it, "slQty") }
             ?: mine.firstOrNull { (it.optString("slPrice").toDoubleOrNull() ?: 0.0) > 0 }
-            ?: mine.firstOrNull()
+        // No blind fallback: a TP-only partial rung (tpQty, no slPrice) is NOT
+        // the position order. Taking it made breakeven copy rung 1's TP onto
+        // the Position TP/SL, which then closed 100% at the first rung.
     }
 
     private fun positionTpSlBody(

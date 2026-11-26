@@ -1202,7 +1202,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val rows = symbols.mapNotNull { sym ->
             runCatching {
                 val byTf = timeframes.associateWith { candles(sym, it) }
-                val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs) }
+                val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs, gates()) }
                 val price = byTf[timeframes.first()]?.lastOrNull()?.close ?: 0.0
                 SignalAggregator.evaluate(sym, price, perTf, gates())
             }.getOrNull()
@@ -1390,7 +1390,7 @@ class TraderEngine(private val rest: BitunixRest) {
             // One kline fetch per timeframe; the price reuses the 15m series
             // instead of asking the exchange for the very same candles twice.
             val byTf = timeframes.associateWith { candles(sym, it) }
-            val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
+            val perTf = byTf.mapValues { (tf, series) -> SignalAggregator.evaluateTimeframe(tf, series, gates()).let { TfSignal(it.dir, it.confidence, it.agreeing) } }
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
@@ -1482,7 +1482,7 @@ class TraderEngine(private val rest: BitunixRest) {
         basis: Double? = null, levAt: Int? = null, mmrAt: Double? = null,
     ): Pair<TpSlAdvice?, String?> = runCatching {
         val byTf = timeframes.associateWith { candles(sym, it) }
-        val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
+        val perTf = byTf.mapValues { (tf, series) -> SignalAggregator.evaluateTimeframe(tf, series, gates()).let { TfSignal(it.dir, it.confidence, it.agreeing) } }
         val conf = SignalAggregator.combine(perTf, gates())?.takeIf { it.dir == dir }?.confidence ?: 0.0
         val price = basis ?: byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close ?: symbolPrice(sym)
         val lev = levAt ?: entryLeverage(sym).first
@@ -1766,7 +1766,15 @@ class TraderEngine(private val rest: BitunixRest) {
                             if (fillPlan == null) armError = "re-asked levels invalid at avgOpenPrice ${fmt(avgOpenPrice)}"
                         }
                     }
-                    val fillTp = fillPlan?.ladder?.lastOrNull()?.first
+                    // PARTIAL method (as in agentic-ai-trader, Bitunix guide
+                    // "Four TP/SL Methods"): with more than one rung the Position
+                    // TP/SL carries the STOP only; a whole-position TP there
+                    // would close 100% at the first touch. Each rung is its own
+                    // /tpsl/place_order with tpQty, placed after the fill.
+                    val ladderRungs = fillPlan?.ladder.orEmpty()
+                    val usePartial = ladderRungs.size > 1
+                    val finalTp = fillPlan?.ladder?.lastOrNull()?.first
+                    val fillTp = if (usePartial) null else finalTp
                     val fillSl = fillPlan?.stop
                     if (fillPlan != null && (fillTp != null || fillSl != null)) {
                         try {
@@ -1805,9 +1813,20 @@ class TraderEngine(private val rest: BitunixRest) {
                         }
                     }
                 }
-                // The partial TP ladder was removed (2026-11-26): one Position
-                // TP/SL (agent SL + TP) is the only exit order now.
-                val ladderNote = ""
+                var ladderNote = ""
+                val rungsToPlace = fillPlan?.ladder.orEmpty()
+                if (rungsToPlace.size > 1 && pid.isNotBlank()) {
+                    val posQty = filled?.let { posQty(it).toDoubleOrNull() } ?: qty.toDoubleOrNull() ?: 0.0
+                    val (placed, why) = placePartialRungs(symbol, pid, posQty, rungsToPlace)
+                    ladderNote = if (placed > 0) " | partial TP: $placed rung(s) on the exchange" + (if (why.isNotEmpty()) " (skipped: $why)" else "")
+                    else {
+                        // Nothing could be split: put the final TP on the
+                        // Position TP/SL so the trade still has a target.
+                        val tp = rungsToPlace.last().first
+                        runCatching { rest.modifyPositionTpSl(symbol, pid, tpPrice = formatPrice(symbol, tp), slPrice = fillPlan?.stop?.let { formatPrice(symbol, it) }) }
+                        " | partial TP not placed ($why) — one TP ${fmt(tp)} on the Position TP/SL"
+                    }
+                }
                 val activePlan = fillPlan ?: plan
                 val slNote = when {
                     activePlan.stop == null -> ""
@@ -2325,13 +2344,43 @@ class TraderEngine(private val rest: BitunixRest) {
             for (j in 0 until all.length()) {
                 val o = all.optJSONObject(j) ?: continue
                 val id = o.optString("id").ifBlank { o.optString("orderId") }
-                if (id.isNotBlank() && id != keep) runCatching { rest.cancelTpSl(sym, id) }
+                // Only duplicate STOPS go; TP-only partial rungs are the ladder.
+                val hasSl = o.optString("slPrice").let { it.isNotBlank() && it != "0" }
+                if (id.isNotBlank() && id != keep && hasSl) runCatching { rest.cancelTpSl(sym, id) }
             }
         }
         // Confirmed by the exchange — only now is local state allowed to change.
         liveLastStop[sym] = applied
         events.add("SL moved to ${fmt(applied)} — $reason $sym (ROI ${fmt1(roi * 100)}%)")
         return true
+    }
+
+    /**
+     * Park each ladder rung as a native partial TP order (tpQty). Rungs under the
+     * exchange minimum merge into the next one; the last rung takes the
+     * remainder. Returns (rungs placed, skip reasons).
+     */
+    internal fun placePartialRungs(
+        symbol: String, pid: String, posQty: Double, rungs: List<Pair<Double, Double>>,
+    ): Pair<Int, String> {
+        if (posQty <= 0.0) return 0 to "position qty unknown"
+        var placed = 0
+        val skipped = mutableListOf<String>()
+        var allocated = 0.0
+        var carry = 0.0
+        rungs.forEachIndexed { i, (price, frac) ->
+            val last = i == rungs.lastIndex
+            val want = if (last) posQty - allocated else posQty * frac + carry
+            val q = formatQty(symbol, want)
+            if (q == null) { carry = want; if (last) skipped.add("last rung below min volume"); return@forEachIndexed }
+            try {
+                rest.placeTpSlOrder(symbol, pid, tpPrice = formatPrice(symbol, price), tpQty = q)
+                placed++; allocated += q.toDouble(); carry = 0.0
+            } catch (e: Exception) {
+                skipped.add("rung ${i + 1}: ${e.message ?: e.javaClass.simpleName}")
+            }
+        }
+        return placed to skipped.joinToString("; ")
     }
 
     /** The first usable slPrice in a TP/SL order list (null when there is none). */
@@ -2659,7 +2708,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 else if (base > 0) "${fmt1(base)}% from entry (set sl 0 for none)"
                 else "none (set sl <pct>)"
                 "TP/SL: stop $stop, " +
-                    "live exits: one position TP/SL (no partial TP), breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
+                    "live exits: Position TP/SL = stop; partial TP rungs (tpQty) close 25% each, breakeven ${if (risk.breakevenRoiPct > 0) "at ${fmt0(risk.breakevenRoiPct)}% ROI" else "off"}, " +
                     "trail ${if (risk.trailingTriggerRoiPct > 0) "at ${fmt0(risk.trailingTriggerRoiPct)}% ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind" else "off"}."
             }
             t.startsWith("tiers") -> {
