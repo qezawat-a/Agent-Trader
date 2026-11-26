@@ -71,7 +71,7 @@ class SignalBoardTest {
         )
         assertEquals(0, row.dir)
         assertEquals("no trade", row.status)
-        assertEquals("only 1 of 2 timeframes share a side (all must agree — try: set tf agree 2)", row.reasons.first())
+        assertEquals("only 1 of 2 timeframes share a side (all must agree — try: set tf agree 1)", row.reasons.first())
     }
 
     @Test
