@@ -491,6 +491,11 @@ class TraderEngine(private val rest: BitunixRest) {
      * both prices per entry from the signal and the candles ([agentTpSl]). Manual entries keep the user's own stop only.
      */
     var autoTpsl: Boolean = true
+    /** Bitunix method 2 (Partial TP/SL, tpQty rungs). Off = the final TP rides on the Position TP/SL (method 1). */
+    var partialTpOn: Boolean = true
+    /** Bitunix method 4 (Account TP/SL): close ALL positions when total uPnL reaches +TP / −SL USDT. 0 = off. */
+    var accountTpUsdt: Double = 0.0
+    var accountSlUsdt: Double = 0.0
         set(value) { field = value; configRev++ }
 
     // Live-position mid-management state, keyed by symbol.
@@ -1401,6 +1406,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  timeframes: ${timeframes.joinToString(", ")}")
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
+        appendLine("  TP/SL methods (Bitunix): 1 Position TP/SL = stop${if (partialTpOn) "" else " + final TP"} · 2 Partial ${if (partialTpOn) "ON (tpQty rungs)" else "OFF"} · 3 Trailing ${if (risk.trailingTriggerRoiPct > 0) "ON" else "OFF"} · 4 Account TP ${if (accountTpUsdt > 0) fmt(accountTpUsdt) else "off"} / SL ${if (accountSlUsdt > 0) fmt(accountSlUsdt) else "off"} USDT")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
         appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); LIVE uses one Position TP/SL (closes all) after the fill; PAPER also simulates partial TP rungs" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
@@ -1409,7 +1415,7 @@ class TraderEngine(private val rest: BitunixRest) {
             "set min agree <n> · set min tf <pct> · set min conf <pct> · set tf agree <n> · set leverage <n> · set risk <pct> · " +
             "set breakeven <pct> · set trail trigger <pct> · set trail distance <pct> · set sl <pct> · " +
             "set tp r <n> (TP = n× the stop distance) · " +
-            "set auto tpsl on|off · " +
+            "set auto tpsl on|off · set partial on|off · set account tp <usdt> · set account sl <usdt> · " +
             "set max positions <n> · set guard <sec>")
     }.trim()
 
@@ -1809,7 +1815,7 @@ class TraderEngine(private val rest: BitunixRest) {
                     // would close 100% at the first touch. Each rung is its own
                     // /tpsl/place_order with tpQty, placed after the fill.
                     val ladderRungs = fillPlan?.ladder.orEmpty()
-                    val usePartial = ladderRungs.size > 1
+                    val usePartial = partialTpOn && ladderRungs.size > 1
                     val finalTp = fillPlan?.ladder?.lastOrNull()?.first
                     val fillTp = if (usePartial) null else finalTp
                     val fillSl = fillPlan?.stop
@@ -1852,7 +1858,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 }
                 var ladderNote = ""
                 val rungsToPlace = fillPlan?.ladder.orEmpty()
-                if (rungsToPlace.size > 1 && pid.isNotBlank()) {
+                if (partialTpOn && rungsToPlace.size > 1 && pid.isNotBlank()) {
                     val posQty = filled?.let { posQty(it).toDoubleOrNull() } ?: qty.toDoubleOrNull() ?: 0.0
                     val (placed, why) = placePartialRungs(symbol, pid, posQty, rungsToPlace)
                     ladderNote = if (placed > 0) " | partial TP: $placed rung(s) on the exchange" + (if (why.isNotEmpty()) " (skipped: $why)" else "")
@@ -2156,6 +2162,20 @@ class TraderEngine(private val rest: BitunixRest) {
         // longer reports (a close during a WS reconnect sends no removal push).
         reconcilePositions(positions)
         liveOpenCount = positions.length()
+        // Method 4, Account TP/SL (Bitunix guide "Four TP/SL Methods"): one
+        // trigger on the whole account's uPnL closes every position. The API
+        // has no account-level TP/SL field, so the engine enforces it.
+        if ((accountTpUsdt > 0 || accountSlUsdt > 0) && positions.length() > 0) {
+            val total = (0 until positions.length()).sumOf {
+                positions.getJSONObject(it).optString("unrealizedPNL").toDoubleOrNull() ?: 0.0
+            }
+            val hitTp = accountTpUsdt > 0 && total >= accountTpUsdt
+            val hitSl = accountSlUsdt > 0 && total <= -accountSlUsdt
+            if (hitTp || hitSl) {
+                val r = runCatching { rest.closeAllPositions(); "sent" }.getOrElse { "FAILED: ${it.message}" }
+                events.add("ACCOUNT ${if (hitTp) "TP" else "SL"} hit — total uPnL ${fmt(total)} USDT → close all positions $r")
+            }
+        }
         // Announce opens/closes by diffing the exchange snapshot against the last
         // tick. This is REST-authoritative: it works even when the WS pushes are
         // missing, which is what the user kept reporting ("asan elam nemikone").
@@ -2186,7 +2206,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val closedSymbols = seenLive.keys.filter { it !in nowSeen }
         for (sym in closedSymbols) {
             seenLive.remove(sym)
-            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym)
+            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym); armAttemptAt.remove(sym)
             // Pull the net result from history so the user immediately sees the PnL.
             val net = runCatching {
                 val h = rest.historyPositions(sym, limit = 1)
@@ -2250,6 +2270,15 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             if (curStop != null && curStopIsReal) liveLastStop[sym] = curStop
             else if (!curStopIsReal) liveLastStop.remove(sym)
+            // GUARD: a live position must never sit without a Position TP/SL
+            // (Bitunix guide "Four TP/SL Methods": Position TP/SL for the stop,
+            // Partial TP/SL with tpQty for the rungs). Covers entries whose arm
+            // step failed, positions opened in the Bitunix app, and restarts.
+            if (!curStopIsReal) {
+                if (armMissingTpSl(sym, positionId, dir, entry, mark, lev, mmr, p, events)) {
+                    curStop = liveLastStop[sym] ?: curStop
+                }
+            }
             // Breakeven: SL to entry once ROI passes the level. The "done" flag
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
@@ -2397,6 +2426,65 @@ class TraderEngine(private val rest: BitunixRest) {
      * exchange minimum merge into the next one; the last rung takes the
      * remainder. Returns (rungs placed, skip reasons).
      */
+    private val armAttemptAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Arms a Position TP/SL (stop) plus the partial TP rungs on a live position
+     * that has none. Levels come from the chat model, like every entry; no fixed
+     * fallback numbers. Throttled to one attempt per symbol per minute.
+     */
+    private fun armMissingTpSl(
+        sym: String, positionId: String, dir: Int, entry: Double, mark: Double,
+        lev: Int, mmr: Double, p: org.json.JSONObject, events: MutableList<String>,
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val last = armAttemptAt[sym]
+        if (last != null && now - last < 60_000L) return false
+        armAttemptAt[sym] = now
+        val (advice, why) = manualAdvice(sym, dir, basis = entry, levAt = lev, mmrAt = mmr)
+        if (advice == null) {
+            events.add("WARNING: $sym has NO TP/SL on the exchange — model gave no levels ($why). Retrying in 1 min.")
+            return false
+        }
+        val plan = planForFilledEntry(dir, entry, lev, mmr, advice, slPctForSignal(1.0), tpR)
+        val stop = plan?.stop
+        if (plan == null || stop == null) {
+            events.add("WARNING: $sym has NO TP/SL — model levels invalid at entry ${fmt(entry)}. Retrying in 1 min.")
+            return false
+        }
+        if (!slTriggerValid(dir, stop, mark)) {
+            events.add("WARNING: $sym has NO TP/SL — model stop ${fmt(stop)} is already past mark ${fmt(mark)}. Retrying in 1 min.")
+            return false
+        }
+        val rungs = plan.ladder
+        val usePartial = partialTpOn && rungs.size > 1
+        val tp = if (usePartial) null else rungs.lastOrNull()?.first
+        return try {
+            rest.placePositionTpSl(
+                sym, positionId,
+                tpPrice = tp?.let { formatPrice(sym, it) },
+                slPrice = formatPrice(sym, stop),
+            )
+            liveLastStop[sym] = formatPrice(sym, stop).toDoubleOrNull() ?: stop
+            var note = ""
+            if (usePartial) {
+                val q = posQty(p).toDoubleOrNull() ?: 0.0
+                val (placed, skip) = placePartialRungs(sym, positionId, q, rungs)
+                note = if (placed > 0) ", $placed partial TP rung(s)" + (if (skip.isNotEmpty()) " (skipped: $skip)" else "")
+                else {
+                    val fin = rungs.last().first
+                    runCatching { rest.modifyPositionTpSl(sym, positionId, tpPrice = formatPrice(sym, fin), slPrice = formatPrice(sym, stop)) }
+                    ", partial not placed ($skip) — TP ${fmt(fin)} on the Position TP/SL"
+                }
+            }
+            events.add("TP/SL GUARD: $sym had no TP/SL — armed SL ${fmt(stop)}" + (tp?.let { ", TP ${fmt(it)}" } ?: "") + note)
+            true
+        } catch (e: Exception) {
+            events.add("WARNING: $sym has NO TP/SL — arm failed: ${e.message ?: e.javaClass.simpleName}. Retrying in 1 min.")
+            false
+        }
+    }
+
     internal fun placePartialRungs(
         symbol: String, pid: String, posQty: Double, rungs: List<Pair<Double, Double>>,
     ): Pair<Int, String> {
@@ -2882,6 +2970,25 @@ class TraderEngine(private val rest: BitunixRest) {
                 val sym = argsOf(raw, if (rule == ManualStopRule.BREAKEVEN) "fire breakeven" else "fire trailing")
                     .trim().uppercase()
                 fireStopRule(rule, sym)
+            }
+            t.startsWith("set partial") -> {
+                val v = t.removePrefix("set partial").trim().lowercase()
+                when (v) {
+                    "on", "true", "1", "yes" -> { partialTpOn = true; configRev++; "Partial TP/SL ON — Position TP/SL holds the stop; separate tpQty TP orders close 25% at each rung (Bitunix method 2)." }
+                    "off", "false", "0", "no" -> { partialTpOn = false; configRev++; "Partial TP/SL OFF — one Position TP/SL holds the stop and the final TP and closes 100% (Bitunix method 1)." }
+                    else -> "Usage: set partial on|off"
+                }
+            }
+            t.startsWith("set account tp") || t.startsWith("set account sl") -> {
+                val isTp = t.startsWith("set account tp")
+                val v = extractNumber(t.removePrefix(if (isTp) "set account tp" else "set account sl"))
+                if (v == null || v < 0.0) "Usage: set account ${if (isTp) "tp" else "sl"} <USDT> (0 = off)"
+                else {
+                    if (isTp) accountTpUsdt = v else accountSlUsdt = v
+                    configRev++
+                    "Account ${if (isTp) "TP" else "SL"} " + (if (v == 0.0) "off" else "${fmt(v)} USDT") +
+                        " — when the total uPnL of all LIVE positions reaches it, every position is closed (Bitunix method 4)."
+                }
             }
             t.startsWith("set breakeven") -> {
                 val v = extractNumber(t.removePrefix("set breakeven"))

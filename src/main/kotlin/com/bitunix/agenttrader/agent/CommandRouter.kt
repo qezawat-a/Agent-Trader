@@ -66,7 +66,7 @@ object CommandRouter {
     private val argTraderCommands = listOf(
         "set universe", "set symbols", "set symbol", "set timeframes", "set scan top",
         "set min agree", "set min tf", "set min conf", "set tf agree",
-        "set auto universe", "set auto tpsl", "set auto rank", "set min volume",
+        "set auto universe", "set auto tpsl", "set partial", "set account tp", "set account sl", "set auto rank", "set min volume",
         "set breakeven", "set trail trigger", "set trail distance", "set sl",
         "set max positions", "set maxpos", "set guard",
         "set tp r", "set tp", "set leverage", "set risk", "set live",

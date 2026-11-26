@@ -114,6 +114,9 @@ object ToolPolicy {
         ToolSpec("set model", ToolCapability.SETTINGS, listOf("model", "مدل")),
 
         ToolSpec("set auto tpsl", ToolCapability.RISK),
+        ToolSpec("set partial", ToolCapability.RISK),
+        ToolSpec("set account tp", ToolCapability.RISK),
+        ToolSpec("set account sl", ToolCapability.RISK),
         ToolSpec("set leverage", ToolCapability.RISK),
         ToolSpec("set risk", ToolCapability.RISK),
         ToolSpec("set guard", ToolCapability.RISK),

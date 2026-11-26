@@ -397,6 +397,10 @@ class BitunixDocParamsTest {
         assertFailsWith<IllegalArgumentException> {
             rest.modifyOrder(orderId = "1", price = "60000")
         }
+        // Live docs: price is required as well.
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyOrder(orderId = "1", qty = "0.01")
+        }
     }
 
     @Test
