@@ -480,11 +480,6 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Take-profit distance as an R-multiple of the stop distance (live orders attach
      *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
     var tpR: Double = 1.0
-    /** LIVE TP ladder (off by default). When on, TP is split into [ladderRungs]
-     *  steps at 1R, 2R … nR, each closing 1/n of the position; the last step is
-     *  the entry order's own TP and closes the rest. */
-    var ladderOn: Boolean = false
-    var ladderRungs: Int = 4
 
     /**
      * Signal-driven entries get an automatic TP/SL: a stop scaled by the signal
@@ -1616,11 +1611,7 @@ class TraderEngine(private val rest: BitunixRest) {
             // TP sits tpR × the stop distance away from entry (set tp r <n>) —
             // exists only when the user configured a stop (set sl <pct>).
             val rDist = plan.stop?.let { kotlin.math.abs(triggerBasis - it) }?.coerceAtLeast(1e-12)
-            // With the ladder on, the entry carries NO TP: a TP on the entry
-            // order closes the whole position, so every rung (the last one too)
-            // is its own partial TP order with its own qty, placed after the fill.
-            val tp = if (ladderOn) null
-                else rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
+            val tp = rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
                 tpPrice = tp?.let { formatPrice(symbol, it) },
@@ -1642,22 +1633,13 @@ class TraderEngine(private val rest: BitunixRest) {
                     val pos = rest.pendingPositions(symbol)
                     val pid = if (pos.length() > 0) pos.getJSONObject(0).optString("positionId") else ""
                     if (pid.isBlank()) return@runCatching null
-                    // The entry order already carried tpPrice/slPrice, and Bitunix
-                    // turns that into a TP/SL order on the position. Placing a
-                    // Position TP/SL on top of it gave TWO TP/SL orders. Only arm
-                    // one when the exchange shows no stop for this position yet.
-                    if (stopOrderFor(symbol, pid) != null) return@runCatching pid
                     rest.placePositionTpSl(
                         symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
                         slPrice = plan.stop?.let { formatPrice(symbol, it) },
                     )
                     pid
                 }.getOrNull()
-                // Ladder rungs 1R..nR: one partial TP order each, 1/n of the qty;
-                // the last rung takes the remainder so the sum is exactly the qty.
-                val ladderNote = if (!ladderOn || rDist == null || armed == null) "" else
-                    placeLadder(symbol, armed, dir, triggerBasis, rDist, qty)
-                val slNote = ladderNote + when {
+                val slNote = when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
                     else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
@@ -2092,21 +2074,9 @@ class TraderEngine(private val rest: BitunixRest) {
         //    place fails when one already exists ("Each position can only have
         //    one Position TP/SL Order"). Asking first makes the choice exact.
         val existing = runCatching { rest.positionTpSlOrder(sym, positionId) }.getOrNull()
-        // The stop set with the entry order lives in its own TP/SL order (it
-        // carries a qty). Move THAT order instead of opening a second stop.
-        val entryStop = if (existing == null) runCatching { stopOrderFor(sym, positionId) }.getOrNull() else null
-        val entryStopId = entryStop?.let { o -> o.optString("id").ifBlank { o.optString("orderId") } }.orEmpty()
         try {
             if (existing != null) {
                 rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
-            } else if (entryStop != null && entryStopId.isNotBlank()) {
-                // Keep its TP exactly as it is; change only the stop price.
-                val tpP = entryStop.optString("tpPrice").takeIf { (it.toDoubleOrNull() ?: 0.0) > 0 }
-                val tpQ = entryStop.optString("tpQty").takeIf { it.isNotBlank() && tpP != null }
-                val slQ = entryStop.optString("slQty").ifBlank { entryStop.optString("tpQty") }.takeIf { it.isNotBlank() }
-                rest.modifyTpSlOrder(
-                    entryStopId, tpPrice = tpP, slPrice = price, tpQty = tpQ, slQty = slQ,
-                )
             } else {
                 // The stop came from the entry order (place_order's slPrice), so
                 // no position-level order exists yet — CREATE it.
@@ -2119,14 +2089,7 @@ class TraderEngine(private val rest: BitunixRest) {
         // 2. Verify on the exchange before claiming anything. Read the
         //    POSITION-LEVEL order specifically: a partial TP/SL order carries its
         //    own slPrice and would otherwise be mistaken for the position's stop.
-        val applied = runCatching {
-            if (existing == null && entryStopId.isNotBlank()) {
-                val orders = rest.pendingTpSlOrders(sym, positionId)
-                (0 until orders.length()).mapNotNull { orders.optJSONObject(it) }
-                    .firstOrNull { (it.optString("id").ifBlank { it.optString("orderId") }) == entryStopId }
-                    ?.optString("slPrice")?.toDoubleOrNull()?.takeIf { it > 0 }
-            } else findPositionSlPrice(sym, positionId)
-        }.getOrNull()
+        val applied = runCatching { findPositionSlPrice(sym, positionId) }.getOrNull()
         if (applied == null || applied <= 0) {
             events.add("Risk manager: SL on $sym NOT confirmed on the exchange — retrying")
             return false
@@ -2149,39 +2112,6 @@ class TraderEngine(private val rest: BitunixRest) {
         for (j in 0 until orders.length()) {
             val v = orders.getJSONObject(j).optString("slPrice").toDoubleOrNull()
             if (v != null && v > 0) return v
-        }
-        return null
-    }
-
-    /** Places the LIVE TP ladder; returns the note for the LIVE OPEN line. */
-    internal fun placeLadder(
-        symbol: String, positionId: String, dir: Int, basis: Double, rDist: Double, qty: String,
-    ): String {
-        val total = qty.toDoubleOrNull() ?: 0.0
-        val n = ladderRungs.coerceIn(2, 6)
-        val rungQty = formatQty(symbol, total / n)
-            ?: return " | ladder skipped: 1/$n of qty is below the min volume"
-        val each = rungQty.toDoubleOrNull() ?: 0.0
-        val errs = mutableListOf<String>()
-        var ok = 0
-        for (r in 1..n) {
-            val q = if (r < n) rungQty else formatQty(symbol, total - each * (n - 1)) ?: rungQty
-            val px = if (dir > 0) basis + r * rDist else basis - r * rDist
-            runCatching {
-                rest.placeTpSlOrder(symbol, positionId, tpPrice = formatPrice(symbol, px), tpQty = q)
-            }.onSuccess { ok++ }.onFailure { errs.add("${r}R: ${it.message ?: it.javaClass.simpleName}") }
-        }
-        return " | ladder $ok/$n rungs placed (qty $rungQty each)" +
-            if (errs.isNotEmpty()) " — FAILED ${errs.joinToString("; ")}" else ""
-    }
-
-    /** Any pending TP/SL order on this position that holds a stop (null when none). */
-    internal fun stopOrderFor(symbol: String, positionId: String): org.json.JSONObject? {
-        val orders = rest.pendingTpSlOrders(symbol, positionId)
-        for (j in 0 until orders.length()) {
-            val o = orders.optJSONObject(j) ?: continue
-            if (o.optString("positionId").let { it.isNotBlank() && it != positionId }) continue
-            if ((o.optString("slPrice").toDoubleOrNull() ?: 0.0) > 0) return o
         }
         return null
     }
@@ -2522,21 +2452,18 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             t.startsWith("tpsl") -> if (live) {
                 val fromWs = feedTpSl()
-                if (t.startsWith("tpsl ws") && liveFeedOn && fromWs.isNotEmpty()) {
+                if (liveFeedOn && fromWs.isNotEmpty()) {
                     "TP/SL (live WS, ${fromWs.size} events):\n" + fromWs.joinToString("\n") { o ->
                         "${o.optString("symbol")} ${o.optString("event")} ${o.optString("status")} " +
                             "tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} id ${o.optString("orderId")}"
                     }
                 } else try {
-                    val arr = rest.pendingTpSlOrders(limit = 50)
+                    val arr = rest.pendingTpSlOrders(limit = 10)
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val o = arr.getJSONObject(i)
-                        // tpQty/slQty as the exchange holds them: shows whether a
-                        // rung really closes part of the position or all of it.
-                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} tpQty ${o.optString("tpQty").ifBlank { "-" }} " +
-                            "sl ${o.optString("slPrice")} slQty ${o.optString("slQty").ifBlank { "-" }} " +
-                            "id ${o.optString("id").ifBlank { o.optString("orderId") }}"
+                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
+                            "qty ${o.optString("qty")} ${o.optString("status")}"
                     }
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
@@ -2668,19 +2595,6 @@ class TraderEngine(private val rest: BitunixRest) {
                     risk = risk.copy(trailDistanceRoiPct = v)
                     configRev++
                     "Trailing distance set to ${fmt0(v)}% ROI behind the best price."
-                }
-            }
-            t.startsWith("set ladder") -> {
-                val a = t.removePrefix("set ladder").trim()
-                when {
-                    a == "on" -> { ladderOn = true; configRev++; "LIVE TP ladder on: $ladderRungs rungs at 1R..${ladderRungs}R, 1/$ladderRungs of the position each. Applies to new entries." }
-                    a == "off" -> { ladderOn = false; configRev++; "LIVE TP ladder off: one TP at ${tpR}R closes the whole position." }
-                    a.startsWith("rungs") -> {
-                        val v = extractNumber(a.removePrefix("rungs"))?.toInt()
-                        if (v == null || v !in 2..6) "Usage: set ladder rungs <2-6>"
-                        else { ladderRungs = v; configRev++; "Ladder rungs set to $v (1R..${v}R)." }
-                    }
-                    else -> "Usage: set ladder on | set ladder off | set ladder rungs <2-6>"
                 }
             }
             t.startsWith("set tp r") || t.startsWith("set tp ") -> {

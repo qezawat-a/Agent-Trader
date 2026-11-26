@@ -69,7 +69,7 @@ object CommandRouter {
         "set auto universe", "set auto tpsl", "set auto rank", "set min volume",
         "set breakeven", "set trail trigger", "set trail distance", "set sl",
         "set max positions", "set maxpos", "set guard",
-        "set ladder", "set tp r", "set tp", "set leverage", "set risk", "set live",
+        "set tp r", "set tp", "set leverage", "set risk", "set live",
         "min volume", "auto universe", "auto rank", "auto gainers", "auto volume",
         "auto losers", "auto movers", "scan top",
         "close position", "manual entry", "report interval",

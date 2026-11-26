@@ -398,23 +398,6 @@ fun ControlScreen(
                         )
                         OutlinedButton(onClick = { onAction("set breakeven $beText") }) { Text("Apply") }
                     }
-                    // LIVE TP ladder: on/off + number of rungs (1R..nR).
-                    var rungText by remember(engine.configRev) { mutableStateOf(engine.ladderRungs.toString()) }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("TP ladder", modifier = Modifier.weight(1f))
-                        Switch(
-                            checked = engine.ladderOn,
-                            onCheckedChange = { onAction(if (it) "set ladder on" else "set ladder off") },
-                        )
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            rungText, { rungText = it },
-                            label = { Text("Ladder rungs (2-6)") }, singleLine = true,
-                            modifier = Modifier.weight(1f),
-                        )
-                        OutlinedButton(onClick = { onAction("set ladder rungs $rungText") }) { Text("Apply") }
-                    }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             ttText, { ttText = it },
