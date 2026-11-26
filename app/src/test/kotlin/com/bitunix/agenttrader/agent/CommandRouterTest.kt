@@ -10,6 +10,7 @@ class CommandRouterTest {
     fun scanner_commands_go_to_the_engine_not_the_llm() {
         assertTrue(CommandRouter.parse("set universe INITUSDT,KGENUSDT") is CommandRouter.Parsed.Trader)
         assertTrue(CommandRouter.parse("set symbols INITUSDT") is CommandRouter.Parsed.Trader)
+        assertTrue(CommandRouter.parse("set timeframes 3m,15m,1h") is CommandRouter.Parsed.Trader)
         assertTrue(CommandRouter.parse("set scan top 10") is CommandRouter.Parsed.Trader)
         assertTrue(CommandRouter.parse("set min agree 4") is CommandRouter.Parsed.Trader)
         assertTrue(CommandRouter.parse("set min tf 60") is CommandRouter.Parsed.Trader)
