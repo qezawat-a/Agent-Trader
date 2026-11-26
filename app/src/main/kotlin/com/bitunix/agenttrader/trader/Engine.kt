@@ -2149,7 +2149,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val closedSymbols = seenLive.keys.filter { it !in nowSeen }
         for (sym in closedSymbols) {
             seenLive.remove(sym)
-            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym)
+            liveBest.remove(sym); liveLastStop.remove(sym); liveBreakevenDone.remove(sym); armAttemptAt.remove(sym)
             // Pull the net result from history so the user immediately sees the PnL.
             val net = runCatching {
                 val h = rest.historyPositions(sym, limit = 1)
@@ -2213,6 +2213,15 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             if (curStop != null && curStopIsReal) liveLastStop[sym] = curStop
             else if (!curStopIsReal) liveLastStop.remove(sym)
+            // GUARD: a live position must never sit without a Position TP/SL
+            // (Bitunix guide "Four TP/SL Methods": Position TP/SL for the stop,
+            // Partial TP/SL with tpQty for the rungs). Covers entries whose arm
+            // step failed, positions opened in the Bitunix app, and restarts.
+            if (!curStopIsReal) {
+                if (armMissingTpSl(sym, positionId, dir, entry, mark, lev, mmr, p, events)) {
+                    curStop = liveLastStop[sym] ?: curStop
+                }
+            }
             // Breakeven: SL to entry once ROI passes the level. The "done" flag
             // is set only when the stop really moved — a rejected or failed move
             // is retried on the next tick instead of being given up on.
@@ -2360,6 +2369,65 @@ class TraderEngine(private val rest: BitunixRest) {
      * exchange minimum merge into the next one; the last rung takes the
      * remainder. Returns (rungs placed, skip reasons).
      */
+    private val armAttemptAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /**
+     * Arms a Position TP/SL (stop) plus the partial TP rungs on a live position
+     * that has none. Levels come from the chat model, like every entry; no fixed
+     * fallback numbers. Throttled to one attempt per symbol per minute.
+     */
+    private fun armMissingTpSl(
+        sym: String, positionId: String, dir: Int, entry: Double, mark: Double,
+        lev: Int, mmr: Double, p: org.json.JSONObject, events: MutableList<String>,
+    ): Boolean {
+        val now = System.currentTimeMillis()
+        val last = armAttemptAt[sym]
+        if (last != null && now - last < 60_000L) return false
+        armAttemptAt[sym] = now
+        val (advice, why) = manualAdvice(sym, dir, basis = entry, levAt = lev, mmrAt = mmr)
+        if (advice == null) {
+            events.add("WARNING: $sym has NO TP/SL on the exchange — model gave no levels ($why). Retrying in 1 min.")
+            return false
+        }
+        val plan = planForFilledEntry(dir, entry, lev, mmr, advice, slPctForSignal(1.0), tpR)
+        val stop = plan?.stop
+        if (plan == null || stop == null) {
+            events.add("WARNING: $sym has NO TP/SL — model levels invalid at entry ${fmt(entry)}. Retrying in 1 min.")
+            return false
+        }
+        if (!slTriggerValid(dir, stop, mark)) {
+            events.add("WARNING: $sym has NO TP/SL — model stop ${fmt(stop)} is already past mark ${fmt(mark)}. Retrying in 1 min.")
+            return false
+        }
+        val rungs = plan.ladder
+        val usePartial = rungs.size > 1
+        val tp = if (usePartial) null else rungs.lastOrNull()?.first
+        return try {
+            rest.placePositionTpSl(
+                sym, positionId,
+                tpPrice = tp?.let { formatPrice(sym, it) },
+                slPrice = formatPrice(sym, stop),
+            )
+            liveLastStop[sym] = formatPrice(sym, stop).toDoubleOrNull() ?: stop
+            var note = ""
+            if (usePartial) {
+                val q = posQty(p).toDoubleOrNull() ?: 0.0
+                val (placed, skip) = placePartialRungs(sym, positionId, q, rungs)
+                note = if (placed > 0) ", $placed partial TP rung(s)" + (if (skip.isNotEmpty()) " (skipped: $skip)" else "")
+                else {
+                    val fin = rungs.last().first
+                    runCatching { rest.modifyPositionTpSl(sym, positionId, tpPrice = formatPrice(sym, fin), slPrice = formatPrice(sym, stop)) }
+                    ", partial not placed ($skip) — TP ${fmt(fin)} on the Position TP/SL"
+                }
+            }
+            events.add("TP/SL GUARD: $sym had no TP/SL — armed SL ${fmt(stop)}" + (tp?.let { ", TP ${fmt(it)}" } ?: "") + note)
+            true
+        } catch (e: Exception) {
+            events.add("WARNING: $sym has NO TP/SL — arm failed: ${e.message ?: e.javaClass.simpleName}. Retrying in 1 min.")
+            false
+        }
+    }
+
     internal fun placePartialRungs(
         symbol: String, pid: String, posQty: Double, rungs: List<Pair<Double, Double>>,
     ): Pair<Int, String> {
