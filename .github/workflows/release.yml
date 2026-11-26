@@ -71,7 +71,7 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: gradle :app:assembleRelease :app:bundleRelease --stacktrace
+        run: gradle :app:assembleRelease --stacktrace
 
       - name: Collect artifacts
         run: |
@@ -83,11 +83,8 @@ jobs:
             echo "WARNING: no signed release APK produced"
             ls app/build/outputs/apk/release/ || true
           fi
-          if [ -f app/build/outputs/bundle/release/app-release.aab ]; then
-            cp app/build/outputs/bundle/release/app-release.aab dist/Agent-Trader-release.aab
-          fi
           cd dist
-          sha256sum *.apk *.aab 2>/dev/null > SHA256SUMS.txt || sha256sum *.apk > SHA256SUMS.txt
+          sha256sum *.apk > SHA256SUMS.txt
           ls -la
 
       - name: Create GitHub release

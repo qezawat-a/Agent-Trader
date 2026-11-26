@@ -28,12 +28,12 @@ verified against the live Bitunix API, and a private WebSocket feed that streams
 position, order and TP/SL updates into the chat,
 and a keyless public WebSocket market feed (tickers + price) that keeps engine prices live.
 
-## The screens
+## The four screens
 
 | Screen | What it does |
 |---|---|
 | **Chat** | The brain. Ask anything or type a slash command — "why is there no signal?", "what is the confidence?" — and it answers with the real rows, not a guess. Live position/order/TP-SL events from the WebSocket feed arrive in the same thread. |
-| **Trade** | The K-line chart (symbol picker, 5m/15m/1h/4h/1d, candles or line) with the open position's entry, SL, mark and liquidation lines drawn on it, and the live board of positions, orders and TP/SL with a per-position **Close** and **Refresh**. There are no entry buttons here: entries come from chat or the scanner. |
+| **Trade** | One-tap entries: symbol chips, size slider, LONG/SHORT, per-position close, live price refresh. |
 | **Signals** | The live signal board: every symbol's 15m and 1h verdict, how many independent signals agree, the confidence, and — when a symbol does not qualify — the exact gate that blocked it, with the per-strategy votes one tap away. |
 | **Control** | Every switch and slider in one place: engine, trading, scanner, periodic report, **notifications**, leverage (1–200x, clamped per symbol), margin per trade (1–100%), report interval — plus scan / signals / funding / tiers / close-all / cancel-all / diagnose / repair. |
 | **Settings** | LLM provider, key and model, the persona ("soul"), Bitunix API keys, margin and position mode, PAPER/LIVE switch. *Auto pick model* fetches what the key can see and chooses a default — free-tier (`:free`) models first, so it works with a zero-credit key. Any model id is accepted (nothing hard-capped); *List models* shows what the key can use. Every setting persists across restarts. |
@@ -115,7 +115,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off) ·
 `fire breakeven [SYMBOL]` · `fire trailing [SYMBOL]` (fire the stop move NOW — the ROI trigger is bypassed, but a stop is never widened)
 
-With **Auto TP/SL** on, the agent (your chat model) sets the stop-loss and take-profit of every signal entry itself: it reads the recent candles of each timeframe, each timeframe's signal, the combined strength, the leverage and the liquidation price, and returns both prices with a one-line reason. There is no fixed percentage or formula behind it. The app checks only the exchange's own rules (each level on the right side of the entry, the stop before liquidation, re-checked at the mark price before a live order); a missing or invalid answer skips the entry instead of opening it with a made-up stop. With Auto TP/SL off, and for manual entries, the stop is your own `set sl <pct>` (`0` = none). LIVE arms one documented Position TP/SL (SL and TP, closing the whole position) after the fill; PAPER additionally simulates partial take-profit rungs.
+Stop-loss is the user's own setting: `set sl <pct>` attaches a stop that many percent from the entry; `0` attaches none (a plain market order) — the app never invents a stop, a fraction of liquidation, or a volatility floor. The take-profit ladder (1R..4R) is sized on this distance and only exists when a stop is set.
 
 The Control screen (the fourth window) holds every gate and exit control in one place: **Timeframes** (TF), **TF min %** (confidence per timeframe), **Min conf %** (combined confidence), **Auto TP/SL** (on/off — persisted), and the **Fire breakeven** / **Fire trailing** buttons. The Fire buttons act on the open position immediately: they bypass the ROI trigger only; the stop still never widens and the exchange still has to accept the trigger side of the current mark. The general **Settings** navigation stays in the bottom bar — it is not duplicated in Control.
 
@@ -152,12 +152,9 @@ Verified against the live API and the official docs (2026-11):
 - **Signed REST** — `digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)`,
   `sign = SHA256(digest + secretKey)`; 8 req/s global throttle plus the per-endpoint
   limits the docs state; retries on 10001 / 10005 / 10006 / 10009 / 40007; keys never logged.
-- **Orders** — `place_order` sends the required `marginCoin`; `side` names the
-  *position* (BUY opens long); `tradeSide` only in hedge mode. LIVE entries use one
-  documented exit method: the market entry has no attached TP/SL; after the fill the
-  engine reads the position's `positionId` and `avgOpenPrice`, validates the levels at
-  that actual entry, places Position TP/SL (`MARK_PRICE` stop, `LAST_PRICE` target,
-  market execution), and confirms it by reading the pending order back.
+- **Orders** — `place_order` always sends the required `marginCoin`; `side` names the
+  *position* (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with
+  `LAST_PRICE` stop type and `MARKET` order type per project rule.
 - **Market data** — kline (closed candles only, `endTime`+`limit` paging backwards, LAST/MARK
   price), tickers, trading pairs (precision, min volume, max leverage), funding rate and
   batch funding rates, depth (fixed gears `1|5|15|50|max`).
@@ -259,10 +256,9 @@ endpoint clamps `limit` to the documented maximum.
   Anything less is reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
-- TP/SL plan: in Auto TP/SL the agent sets SL and TP per entry. LIVE uses one Position
-  TP/SL order that closes the whole position; PAPER also simulates partial TP rungs.
-  Breakeven (SL moves to entry,
-  plus the round-trip fee on LIVE) and the trailing stop trigger on your ROI settings.
+- TP/SL plan: partial TP ladder 1R–4R at 25% each (sized on the configured SL distance, and
+  only built when one is set), plus a user-configured risk manager: SL (`set sl <pct>`, none by
+  default), breakeven (SL moves to entry) and a trailing stop behind the best price.
 
 ### Risk manager
 
@@ -274,7 +270,7 @@ or by asking the agent:
 | `set breakeven <pct>` | 25% | Once ROI reaches it, the stop moves to entry (0 = off) |
 | `set trail trigger <pct>` | 40% | Trailing starts once ROI reaches it (0 = off) |
 | `set trail distance <pct>` | 25% | Trailing keeps this much ROI behind the best price |
-| `set sl <pct>` | **0 (none)** | Your stop distance, % of price, for manual entries and when Auto TP/SL is off. 0 = no stop |
+| `set sl <pct>` | **0 (none)** | Stop distance from the entry, % of price. 0 = no stop (a plain market order) |
 | `set max positions <1-20>` | 3 | Blocks new paper entries at the cap |
 | `set guard <sec>` | 300s | Minimum seconds between two entries (0 = off) |
 
@@ -344,11 +340,11 @@ runs the unit tests and publishes a GitHub release with checksums.
 ## Project layout
 
 ```
-app/src/main/kotlin/com/bitunix/agenttrader/
+app/src/main/kotlin/com/codeassist/agenttrader/
 ├── agent/      AgentBrain (prompt, mood, tools) · SelfRepair · ModelClient · CommandRouter
 ├── bitunix/    BitunixRest (signed REST) · BitunixWs (public + private feed)
-├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood · AgentTpSl
-├── ui/         Control + Trade surfaces (chart, position board)
+├── trader/     Engine (paper/live) · Signals (37 strategies) · MarketMood
+├── ui/         Control + Trade surfaces
 ├── util/       Format (locale-independent number formatting)
 └── MainActivity.kt
 ```
@@ -384,6 +380,7 @@ restored is the trading loop — after a restart you tap *Trading* to start trad
 
 ## Roadmap
 
+- Place the 1R–4R ladder as real partial TP/SL orders after a live fill.
 - Public market channels on the WebSocket feed (kline, ticker, depth) to cut REST polling.
 - Strategy backtesting harness over the paged kline history.
 - Optional on-device code editing: the brain proposes a patch, the app applies it and runs

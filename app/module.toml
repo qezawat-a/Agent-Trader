@@ -11,11 +11,6 @@ scope = "TEST_IMPLEMENTATION"
 java = ["src/androidTest/java", "src/androidTest/kotlin"]
 resources = ["src/androidTest/resources"]
 
-[sourceSets.composeResources]
-scope = "IMPLEMENTATION"
-java = ["build/compose-resources/kotlin"]
-resources = ["build/compose-resources/resources"]
-
 [sourceSets.debug]
 scope = "IMPLEMENTATION"
 aidl = ["src/debug/aidl"]
@@ -49,11 +44,11 @@ java = ["src/test/java", "src/test/kotlin"]
 resources = ["src/test/resources"]
 
 [dependencies]
-implementation = ["androidx.activity:activity-compose:1.13.0", "androidx.compose.ui:ui:1.11.2", "androidx.compose.foundation:foundation:1.11.2", "androidx.compose.material3:material3:1.4.0", "androidx.compose.ui:ui-tooling-preview:1.11.2", "com.squareup.okhttp3:okhttp:4.12.0", "androidx.compose.material:material-icons-core:1.7.8", "kotlin-stdlib", { library = "org.jetbrains.kotlin:kotlin-stdlib:2.2.21", exclude = ["org.jetbrains:annotations"] }, "org.jetbrains.compose.components:components-resources:1.11.1", "androidx.databinding:viewbinding:8.7.3"]
+implementation = ["org.jetbrains.kotlin:kotlin-stdlib:2.2.21", "androidx.activity:activity-compose:1.13.0", "androidx.compose.ui:ui:1.11.2", "androidx.compose.foundation:foundation:1.11.2", "androidx.compose.material3:material3:1.4.0", "androidx.compose.ui:ui-tooling-preview:1.11.2", "com.squareup.okhttp3:okhttp:4.12.0", "androidx.compose.material:material-icons-core:1.7.8", "kotlin-stdlib"]
 testImplementation = ["org.jetbrains.kotlin:kotlin-test:2.2.21", "org.json:json:20240303", "org.jetbrains.kotlin:kotlin-test-junit:2.2.21"]
 
 [android]
-namespace = "com.bitunix.agenttrader"
+namespace = "com.codeassist.agenttrader"
 compileSdk = 36
 minSdk = 23
 targetSdk = 36
@@ -63,12 +58,5 @@ versionName = "1.0"
 isApplication = true
 manifestPlaceholders = []
 buildConfigFields = []
-buildTypes = [{ name = "debug", debuggable = true, minifyEnabled = false, shrinkResources = false, signingConfig = "picked-972238ec-agent-trader" }, { name = "release", debuggable = false, minifyEnabled = true, shrinkResources = true, proguardFiles = ["proguard-android-optimize.txt", "proguard-rules.pro"], signingConfig = "picked-972238ec-agent-trader" }]
-nonTransitiveRClass = true
-viewBinding = true
+buildTypes = [{ name = "debug", debuggable = true, minifyEnabled = false, shrinkResources = false }, { name = "release", debuggable = false, minifyEnabled = false, shrinkResources = false, proguardFiles = ["proguard-android-optimize.txt", "proguard-rules.pro"] }]
 compose = true
-parcelize = true
-
-[composeResources]
-package = "com.codeassist.agenttrader.generated.resources"
-roots = ["src/main/composeResources"]

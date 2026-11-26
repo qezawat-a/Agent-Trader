@@ -6,9 +6,5 @@
 # -keep class com.example.SomeClass { *; }
 #
 # Preserve line numbers for readable crash stack traces, then hide the original file name:
--keepattributes SourceFile,LineNumberTable,Signature,*Annotation*
--renamesourcefileattribute SourceFile
--dontwarn okhttp3.internal.platform.**
--dontwarn org.conscrypt.**
--dontwarn org.bouncycastle.**
--dontwarn org.openjsse.**
+# -keepattributes SourceFile,LineNumberTable
+# -renamesourcefileattribute SourceFile
