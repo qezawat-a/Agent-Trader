@@ -93,3 +93,11 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.json:json:20240303")
 }
+
+// Full assertion messages in CI logs (which value a failing test saw).
+tasks.withType<Test>().configureEach {
+    testLogging {
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+        events("failed")
+    }
+}
