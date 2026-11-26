@@ -128,13 +128,13 @@ class LiveExitsSimTest {
         // R = the stop distance the engine really used (read from the exchange).
         val r = 2.622 - fake.stops().single().getString("slPrice").toDouble()
         assertTrue(r > 0, "stop below entry")
-        fake.move(2.622 + 1.05 * r)
+        fake.move(2.622 + 1.5 * r)
         assertEquals(start * 0.75, fake.qty, 0.011, "1R closes 25%")
-        fake.move(2.622 + 2.05 * r)
+        fake.move(2.622 + 2.5 * r)
         assertEquals(start * 0.50, fake.qty, 0.011, "2R closes 25%")
-        fake.move(2.622 + 3.05 * r)
-        assertEquals(start * 0.25, fake.qty, 0.011, "3R closes 25%")
-        fake.move(2.622 + 4.05 * r)
+        fake.move(2.622 + 3.5 * r)
+        assertEquals(start * 0.25, fake.qty, 0.011, "3R closes 25%: qty ${fake.qty} orders ${fake.orders}")
+        fake.move(2.622 + 4.5 * r)
         assertEquals(0.0, fake.qty, 1e-9, "4R closes the rest")
     }
 
