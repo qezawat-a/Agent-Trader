@@ -51,6 +51,11 @@ class WsPushShapeTest {
             BitunixWs.PUBLIC_CHANNELS,
         )
         assertEquals(listOf("balance", "order", "position", "tpsl"), BitunixWs.PRIVATE_CHANNELS)
+        assertEquals(
+            listOf("balance", "order", "position"),
+            BitunixWs.PRIVATE_SUBSCRIPTION_CHANNELS,
+            "tpsl is pushed automatically after private login",
+        )
     }
 
     @Test

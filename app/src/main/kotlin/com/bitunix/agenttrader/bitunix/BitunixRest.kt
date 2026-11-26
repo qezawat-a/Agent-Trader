@@ -20,18 +20,13 @@ import java.util.UUID
  *  - kline fields: time/open/high/low/close/baseVol/quoteVol, newest first (we sort ascending)
  *  - tickers fields: symbol/lastPrice/markPrice/open/high/low/quoteVol/baseVol
  *  - trading_pairs fields: basePrecision, quotePrecision, minTradeVolume, maxLeverage
- *  - kline interval enum: 1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
+ *  - kline interval enum: 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
  *
  * Every path and parameter below is matched against the official docs
  * (https://www.bitunix.com/api-docs/futures/), endpoint by endpoint:
  *  - every request carries EVERY documented parameter (query string or body);
  *  - the per-endpoint rate limits the docs state ("Rate Limit: N req/sec/uid")
  *    are enforced locally, so the exchange never answers 10005/10006.
- *
- * Deliberate deviations (live-verified project rules, not doc requirements):
- *  - `marginCoin` is sent on trade endpoints even where the docs omit it. The
- *    exchange ignores unknown query/body keys (verified live: an extra
- *    `bogusParam` still returns code 0), so the extra field is harmless.
  *
  * Documented history that changed the implementation:
  *  - 2026-10-27 changelog: Get Kline no longer supports `startTime`. The
@@ -129,7 +124,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             throw IllegalStateException("Bitunix HTTP $code: ${text.take(200)}")
         }
         val json = JSONObject(text)
-        val apiCode = json.optInt("code", 0)
+        if (!json.has("code")) {
+            throw IllegalStateException("Bitunix response is missing required code")
+        }
+        val apiCode = json.optInt("code", Int.MIN_VALUE)
+        if (apiCode == Int.MIN_VALUE) {
+            throw IllegalStateException("Bitunix response has an invalid code")
+        }
         if (apiCode != 0) {
             val msg = "Bitunix error $apiCode: ${json.optString("msg")}"
             if (apiCode in RETRYABLE_CODES) throw RetryableError(msg)
@@ -303,12 +304,20 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         signedPost("/api/v1/futures/account/change_leverage", JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("leverage", leverage))
 
-    fun changeMarginMode(symbol: String, marginCoin: String = "USDT", mode: String): JSONObject =
-        signedPost("/api/v1/futures/account/change_margin_mode", JSONObject()
+    fun changeMarginMode(symbol: String, marginCoin: String = "USDT", mode: String): JSONObject {
+        require(mode == "ISOLATION" || mode == "CROSS") {
+            "marginMode must be ISOLATION or CROSS"
+        }
+        return signedPost("/api/v1/futures/account/change_margin_mode", JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("marginMode", mode))
+    }
 
-    fun changePositionMode(mode: String): JSONObject =
-        signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
+    fun changePositionMode(mode: String): JSONObject {
+        require(mode == "ONE_WAY" || mode == "HEDGE") {
+            "positionMode must be ONE_WAY or HEDGE"
+        }
+        return signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
+    }
 
     /** Leverage + margin mode for one symbol. */
     fun leverageMarginMode(symbol: String, marginCoin: String = "USDT"): JSONObject = dataObject(signedGet(
@@ -327,14 +336,21 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         positionId: String? = null,
         marginCoin: String = "USDT",
     ): JSONObject {
-        // Docs: "Either side or positionId required".
-        require(side != null || positionId != null) {
+        require(symbol.isNotBlank()) { "adjust_position_margin needs a symbol" }
+        require(marginCoin.isNotBlank()) { "adjust_position_margin needs a marginCoin" }
+        require(amount.isNotBlank()) { "adjust_position_margin needs an amount" }
+        val normalizedSide = side?.uppercase()
+        val normalizedPositionId = positionId?.takeIf { it.isNotBlank() }
+        require(normalizedSide == "LONG" || normalizedSide == "SHORT" || normalizedPositionId != null) {
             "adjust_position_margin needs a side or a positionId"
+        }
+        require(normalizedSide == null || normalizedSide == "LONG" || normalizedSide == "SHORT") {
+            "side must be LONG or SHORT"
         }
         val body = JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("amount", amount)
-        if (side != null) body.put("side", side)
-        if (positionId != null) body.put("positionId", positionId)
+        if (normalizedSide != null) body.put("side", normalizedSide)
+        if (normalizedPositionId != null) body.put("positionId", normalizedPositionId)
         return signedPost("/api/v1/futures/account/adjust_position_margin", body)
     }
 
@@ -425,7 +441,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      *  - `positionId` is required when tradeSide is "CLOSE".
      *  - `price` is required when orderType is LIMIT; `tpOrderPrice` /
      *    `slOrderPrice` are required when the matching order type is LIMIT.
-     *  - `marginCoin` is sent even though the docs omit it (project rule).
      */
     fun placeOrder(
         symbol: String,
@@ -446,7 +461,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         slStopType: String? = null,
         slOrderType: String? = null,
         slOrderPrice: String? = null,
-        marginCoin: String = "USDT",
     ): JSONObject {
         val body = placeOrderBody(
             symbol = symbol, qty = qty, side = side, orderType = orderType,
@@ -454,14 +468,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             effect = effect, clientId = clientId, reduceOnly = reduceOnly,
             tpPrice = tpPrice, tpStopType = tpStopType, tpOrderType = tpOrderType,
             tpOrderPrice = tpOrderPrice, slPrice = slPrice, slStopType = slStopType,
-            slOrderType = slOrderType, slOrderPrice = slOrderPrice, marginCoin = marginCoin,
+            slOrderType = slOrderType, slOrderPrice = slOrderPrice,
         )
         return dataObject(signedPost("/api/v1/futures/trade/place_order", body))
     }
 
     /**
      * Places a market order.
-     *  - marginCoin is REQUIRED by the exchange even though docs list it as optional.
      *  - side names the POSITION: BUY opens long, SELL opens short.
      *  - tradeSide ("OPEN"/"CLOSE") is only sent in hedge mode; pass null in one-way mode.
      *  - tpPrice/slPrice attach the documented Order TP/SL to this entry order;
@@ -476,7 +489,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun placeMarketOrder(
         symbol: String, qty: String, side: String, tradeSide: String?,
         tpPrice: String?, slPrice: String?, reduceOnly: Boolean = false,
-        marginCoin: String = "USDT", clientId: String = "",
+        clientId: String = "",
         positionId: String? = null,
     ): JSONObject = placeOrder(
         symbol = symbol, qty = qty, side = side, orderType = "MARKET",
@@ -487,7 +500,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         tpOrderType = tpPrice?.let { "MARKET" },
         slPrice = slPrice, slStopType = slPrice?.let { "MARK_PRICE" },
         slOrderType = slPrice?.let { "MARKET" },
-        marginCoin = marginCoin,
     )
 
     /** Order detail; data holds orderId, status (NEW/PART_FILLED/FILLED/CANCELED/...).
@@ -515,17 +527,20 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         endTime: Long? = null,
         skip: Int = 0,
         limit: Int = 20,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
             if (orderId.isNotBlank()) put("orderId", orderId)
             if (clientId.isNotBlank()) put("clientId", clientId)
-            if (status.isNotBlank()) put("status", status)
+            if (status.isNotBlank()) {
+                require(status in PENDING_ORDER_STATUSES) {
+                    "pending order status must be NEW or PART_FILLED"
+                }
+                put("status", status)
+            }
             if (startTime != null) put("startTime", startTime.toString())
             if (endTime != null) put("endTime", endTime.toString())
             put("skip", skip.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
             put("limit", limit.coerceIn(1, 100).toString())
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_pending_orders", q))
@@ -542,7 +557,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         endTime: Long? = null,
         skip: Int = 0,
         limit: Int = 20,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
@@ -551,7 +565,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             if (startTime != null) put("startTime", startTime.toString())
             if (endTime != null) put("endTime", endTime.toString())
             put("skip", skip.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
             put("limit", limit.coerceIn(1, 100).toString())
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_history_trades", q))
@@ -576,21 +589,29 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         limit: Int = 20,
         queryCanceled: Boolean? = null,
         subAccountId: Long? = null,
-        marginCoin: String = "USDT",
     ): JSONArray {
         val q = buildMap {
             if (symbol.isNotBlank()) put("symbol", symbol)
             if (orderId.isNotBlank()) put("orderId", orderId)
             if (clientId.isNotBlank()) put("clientId", clientId)
-            if (status.isNotBlank()) put("status", status)
-            if (type.isNotBlank()) put("type", type)
+            if (status.isNotBlank()) {
+                require(status in HISTORY_ORDER_STATUSES) {
+                    "history order status must be FILLED, CANCELED, PART_FILLED_CANCELED, or EXPIRED"
+                }
+                put("status", status)
+            }
+            if (type.isNotBlank()) {
+                require(type == "LIMIT" || type == "MARKET") {
+                    "history order type must be LIMIT or MARKET"
+                }
+                put("type", type)
+            }
             if (startTime != null) put("startTime", startTime.toString())
             if (endTime != null) put("endTime", endTime.toString())
             put("skip", skip.toString())
             put("limit", limit.coerceIn(1, 100).toString())
             if (queryCanceled != null) put("queryCanceled", queryCanceled.toString())
             if (subAccountId != null) put("subAccountId", subAccountId.toString())
-            put("marginCoin", marginCoin) // not in the docs; sent per project rule
         }
         return dataArray(signedGet("/api/v1/futures/trade/get_history_orders", q))
     }
@@ -602,22 +623,21 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      * exchange's live-verified limit, not a documented one.
      * `marginCoin` is sent per project rule.
      */
-    fun cancelOrders(symbol: String, orderIds: List<String>, marginCoin: String = "USDT"): JSONObject =
-        cancelOrdersByRef(symbol, orderIds.map { OrderRef(orderId = it) }, marginCoin)
+    fun cancelOrders(symbol: String, orderIds: List<String>): JSONObject =
+        cancelOrdersByRef(symbol, orderIds.map { OrderRef(orderId = it) })
 
     /** Cancels orders addressed by order id or client id — the documented orderList shape. */
     fun cancelOrdersByRef(
         symbol: String,
         refs: List<OrderRef>,
-        marginCoin: String = "USDT",
     ): JSONObject {
-        val body = cancelOrdersBody(symbol, refs, marginCoin)
+        val body = cancelOrdersBody(symbol, refs)
         return signedPost("/api/v1/futures/trade/cancel_orders", body)
     }
 
     /** Cancels all open orders. `symbol` is optional per the docs — omitted when blank. */
-    fun cancelAllOrders(symbol: String = "", marginCoin: String = "USDT"): JSONObject {
-        val body = JSONObject().put("marginCoin", marginCoin) // not in the docs; sent per project rule
+    fun cancelAllOrders(symbol: String = ""): JSONObject {
+        val body = JSONObject()
         if (symbol.isNotBlank()) body.put("symbol", symbol)
         return signedPost("/api/v1/futures/trade/cancel_all_orders", body)
     }
@@ -655,13 +675,17 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(!orderId.isNullOrBlank() || !clientId.isNullOrBlank()) {
             "modify_order needs an orderId or a clientId"
         }
-        // Docs: qty is required ("Amount (base coin)").
-        require(qty != null) { "modify_order needs a qty" }
+        require(!qty.isNullOrBlank()) { "modify_order needs a qty" }
+        require(!price.isNullOrBlank()) { "modify_order needs a price" }
         val body = JSONObject()
         if (orderId != null) body.put("orderId", orderId)
         if (clientId != null) body.put("clientId", clientId)
         body.put("qty", qty) // required by the docs, so it is never null here
         if (price != null) body.put("price", price)
+        if (!orderId.isNullOrBlank()) body.put("orderId", orderId)
+        if (!clientId.isNullOrBlank()) body.put("clientId", clientId)
+        body.put("qty", qty)
+        body.put("price", price)
         if (tpPrice != null) body.put("tpPrice", tpPrice)
         if (tpStopType != null) body.put("tpStopType", tpStopType)
         if (tpOrderType != null) body.put("tpOrderType", tpOrderType)
@@ -750,6 +774,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(tpPrice != null || slPrice != null) {
             "position TP/SL needs a tpPrice or an slPrice"
         }
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
         if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
         if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
@@ -757,9 +783,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     /** Cancels a TP/SL order. */
-    fun cancelTpSl(symbol: String, orderId: String): JSONObject =
-        signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
+    fun cancelTpSl(symbol: String, orderId: String): JSONObject {
+        require(symbol.isNotBlank()) { "cancel TP/SL needs a symbol" }
+        require(orderId.isNotBlank()) { "cancel TP/SL needs an orderId" }
+        return signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
             .put("symbol", symbol).put("orderId", orderId))
+    }
 
     /**
      * Partial TP/SL order on an open position: at least one of tpPrice/slPrice
@@ -790,6 +819,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(symbol.isNotBlank()) { "place TP/SL needs a symbol" }
         require(positionId.isNotBlank()) { "place TP/SL needs a positionId" }
         validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -830,6 +861,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }
         require(orderId.isNotBlank()) { "modify TP/SL needs an orderId" }
         validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("orderId", orderId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -849,6 +882,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     /** Current position mode of the account: ONE_WAY or HEDGE. */
     fun positionMode(): JSONObject =
         dataObject(signedGet("/api/v1/futures/account/position_mode"))
+
+    private fun validateStopType(value: String, field: String) {
+        require(value == "MARK_PRICE" || value == "LAST_PRICE") {
+            "$field must be MARK_PRICE or LAST_PRICE"
+        }
+    }
 
     /**
      * Pending TP/SL orders. Documented filters: symbol, positionId, side (int32),
@@ -898,11 +937,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         return dataArray(signedGet("/api/v1/futures/tpsl/get_history_orders", q))
     }
 
-    /** Market-closes one position by id. Docs list positionId only; `marginCoin`
-     *  is sent per project rule. */
-    fun flashClose(positionId: String, marginCoin: String = "USDT"): JSONObject =
-        dataObject(signedPost("/api/v1/futures/trade/flash_close_position", JSONObject()
-            .put("positionId", positionId).put("marginCoin", marginCoin)))
+    /** Market-closes one position by id. Docs list positionId only. */
+    fun flashClose(positionId: String): JSONObject {
+        require(positionId.isNotBlank()) { "flash_close_position needs a positionId" }
+        return dataObject(signedPost("/api/v1/futures/trade/flash_close_position", JSONObject()
+            .put("positionId", positionId)))
+    }
 
     /** Market-closes everything. `symbol` is optional per the docs — omitted when blank. */
     fun closeAllPositions(symbol: String = ""): JSONObject {
@@ -941,11 +981,14 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         /** Depth gears the endpoint accepts ("1", "5", "15", "50", "max"). */
         val DEPTH_LIMITS = listOf("1", "5", "15", "50", "max")
 
-        /** Kline intervals the docs list (3m is live-verified but undocumented). */
+        /** Kline intervals listed by the REST documentation. */
         val KLINE_INTERVALS = listOf(
-            "1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
+            "1m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h",
             "1d", "3d", "1w", "1M",
         )
+        private val PENDING_ORDER_STATUSES = setOf("NEW", "PART_FILLED")
+        private val HISTORY_ORDER_STATUSES =
+            setOf("FILLED", "CANCELED", "PART_FILLED_CANCELED", "EXPIRED")
 
         /**
          * Per-endpoint rate limits from the official docs ("Rate Limit: N
@@ -1013,6 +1056,13 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             endTime: Long? = null,
             type: String? = null,
         ): Map<String, String> {
+            require(symbol.isNotBlank()) { "kline needs a symbol" }
+            require(interval in KLINE_INTERVALS) {
+                "unsupported REST kline interval: $interval"
+            }
+            require(type == null || type == "LAST_PRICE" || type == "MARK_PRICE") {
+                "kline type must be LAST_PRICE or MARK_PRICE"
+            }
             val q = mutableMapOf(
                 "symbol" to symbol,
                 "interval" to interval,
@@ -1056,17 +1106,15 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             slStopType: String? = null,
             slOrderType: String? = null,
             slOrderPrice: String? = null,
-            marginCoin: String = "USDT",
         ): JSONObject {
+            validateOrderFields(symbol, qty, side, orderType, tradeSide, effect, price)
             validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+            validateStopTypes(tpPrice, tpStopType, slPrice, slStopType)
             val body = JSONObject()
                 .put("symbol", symbol)
                 .put("qty", qty)
                 .put("side", side)
                 .put("orderType", orderType)
-            // marginCoin is not in the docs but the exchange requires it here
-            // (project rule, live-verified).
-            body.put("marginCoin", marginCoin)
             if (price != null) body.put("price", price)
             // Docs: effect is "Required if the orderType is limit"; GTC is the
             // documented default, so a LIMIT order never goes out without one.
@@ -1091,8 +1139,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         fun cancelOrdersBody(
             symbol: String,
             refs: List<OrderRef>,
-            marginCoin: String = "USDT",
         ): JSONObject {
+            require(symbol.isNotBlank()) { "cancel_orders needs a symbol" }
             require(refs.isNotEmpty()) { "cancel_orders needs at least one order reference" }
             require(refs.size <= 20) { "cancel_orders accepts at most 20 orders (got ${refs.size})" } // live-verified exchange limit
             val list = JSONArray()
@@ -1107,7 +1155,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             }
             return JSONObject()
                 .put("symbol", symbol)
-                .put("marginCoin", marginCoin) // not in the docs; sent per project rule
                 .put("orderList", list)
         }
 
@@ -1144,7 +1191,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             slOrderType: String? = null,
             slOrderPrice: String? = null,
         ): JSONObject {
+            validateOrderFields("", qty, side, orderType, tradeSide, effect, price, requireSymbol = false)
             validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+            validateStopTypes(tpPrice, tpStopType, slPrice, slStopType)
             return JSONObject()
             .put("qty", qty)
             .put("side", side)
@@ -1180,11 +1229,52 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             require(slOrderType == null || slOrderType == "LIMIT" || slOrderType == "MARKET") {
                 "slOrderType must be LIMIT or MARKET"
             }
-            if (tpOrderType == "LIMIT") require(tpOrderPrice != null) {
+            if (tpOrderType == "LIMIT") require(!tpOrderPrice.isNullOrBlank()) {
                 "tpOrderPrice is required when tpOrderType is LIMIT"
             }
-            if (slOrderType == "LIMIT") require(slOrderPrice != null) {
+            if (slOrderType == "LIMIT") require(!slOrderPrice.isNullOrBlank()) {
                 "slOrderPrice is required when slOrderType is LIMIT"
+            }
+        }
+
+        private fun validateStopTypes(
+            tpPrice: String?,
+            tpStopType: String?,
+            slPrice: String?,
+            slStopType: String?,
+        ) {
+            require(tpStopType == null || tpStopType == "MARK_PRICE" || tpStopType == "LAST_PRICE") {
+                "tpStopType must be MARK_PRICE or LAST_PRICE"
+            }
+            require(slStopType == null || slStopType == "MARK_PRICE" || slStopType == "LAST_PRICE") {
+                "slStopType must be MARK_PRICE or LAST_PRICE"
+            }
+        }
+
+        private fun validateOrderFields(
+            symbol: String,
+            qty: String,
+            side: String,
+            orderType: String,
+            tradeSide: String?,
+            effect: String?,
+            price: String?,
+            requireSymbol: Boolean = true,
+        ) {
+            if (requireSymbol) require(symbol.isNotBlank()) { "order needs a symbol" }
+            require(qty.isNotBlank()) { "order needs a qty" }
+            require(side == "BUY" || side == "SELL") { "side must be BUY or SELL" }
+            require(orderType == "LIMIT" || orderType == "MARKET") {
+                "orderType must be LIMIT or MARKET"
+            }
+            require(tradeSide == null || tradeSide == "OPEN" || tradeSide == "CLOSE") {
+                "tradeSide must be OPEN or CLOSE"
+            }
+            require(effect == null || effect in setOf("GTC", "IOC", "FOK", "POST_ONLY")) {
+                "effect must be GTC, IOC, FOK, or POST_ONLY"
+            }
+            if (orderType == "LIMIT") require(!price.isNullOrBlank()) {
+                "price is required when orderType is LIMIT"
             }
         }
 

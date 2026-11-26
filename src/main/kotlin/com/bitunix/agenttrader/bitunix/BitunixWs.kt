@@ -181,15 +181,15 @@ class BitunixWs(
         send(pubState, "unsubscribe", ch, symbol)
     }
 
-    /** Private channels: "order", "position", "tpsl", "balance" (no symbol). */
+    /** Subscribes to private channels that require an explicit subscription (no symbol). */
     fun subscribePrivate(ch: String) {
         if (book(privState, ch to null) != Book.NEW) return
         send(privState, "subscribe", ch, null)
     }
 
     /**
-     * Subscribes to several private channels in ONE frame, the way the official
-     * client does ("balance", "position", "order", "tpsl").
+     * Subscribes to several private channels in ONE frame. The TP/SL channel
+     * is excluded because the docs say it is pushed automatically after login.
      */
     fun subscribePrivateAll(channels: List<String>) {
         if (channels.isEmpty()) return
@@ -418,6 +418,9 @@ class BitunixWs(
 
         /** All documented private channels. */
         val PRIVATE_CHANNELS = listOf(CH_BALANCE, CH_ORDER, CH_POSITION, CH_TPSL)
+
+        /** Private channels requiring subscribe; TP/SL is pushed automatically after login. */
+        val PRIVATE_SUBSCRIPTION_CHANNELS = listOf(CH_BALANCE, CH_ORDER, CH_POSITION)
 
         /**
          * Channels whose ARRAY elements carry the symbol in the `s` field.
