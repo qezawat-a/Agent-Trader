@@ -641,7 +641,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun modifyOrder(
         orderId: String? = null,
         clientId: String? = null,
-        symbol: String? = null,
         qty: String? = null,
         price: String? = null,
         tpPrice: String? = null,
@@ -661,7 +660,6 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         val body = JSONObject()
         if (orderId != null) body.put("orderId", orderId)
         if (clientId != null) body.put("clientId", clientId)
-        if (symbol != null) body.put("symbol", symbol)
         body.put("qty", qty) // required by the docs, so it is never null here
         if (price != null) body.put("price", price)
         if (tpPrice != null) body.put("tpPrice", tpPrice)
