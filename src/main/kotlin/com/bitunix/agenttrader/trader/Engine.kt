@@ -1726,14 +1726,11 @@ class TraderEngine(private val rest: BitunixRest) {
             }
         }
         try {
-            // The final TP sits tpR × the stop distance away (set tp r <n>) and
-            // closes what is left; the rungs below it are armed after the fill
-            // as partial TP/SL orders. Exists only when there is a stop.
-            val tp = plan.ladder.lastOrNull()?.first
+            // Use ONE documented method: Position TP/SL. It belongs to the
+            // filled position, so the market entry carries no order-level TP/SL.
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
-                tpPrice = tp?.let { formatPrice(symbol, it) },
-                slPrice = plan.stop?.let { formatPrice(symbol, it) },
+                tpPrice = null, slPrice = null,
                 reduceOnly = false,
             )
             val orderId = order.optString("orderId")
@@ -1742,35 +1739,65 @@ class TraderEngine(private val rest: BitunixRest) {
             if (status == "FILLED" || status == "PART_FILLED") {
                 liveOpenCount += 1
                 noteEntry()
-                // The entry order's slPrice is an ORDER-level stop. Breakeven and
-                // trailing move the POSITION-level TP/SL order, which does not
-                // exist yet — so arm it now, from the position the exchange just
-                // opened. Without this the first move has to create it, and until
-                // then the exchange holds a stop the risk manager cannot see.
-                // place_order's tpPrice/slPrice normally creates that order already;
-                // "Each position can only have one Position TP/SL Order", so
-                // placing a second one was rejected on every entry. Place only
-                // when none is armed.
+                // Position TP/SL requires the real positionId. Its TP/SL side
+                // rules are relative to avgOpenPrice, not the pre-fill ticker.
                 val pos = runCatching { rest.pendingPositions(symbol) }.getOrNull()
-                val pid: String = (if (pos != null && pos.length() > 0) pos.getJSONObject(0).optString("positionId") else "").toString()
-                val armed = runCatching {
-                    if (pid.isBlank()) return@runCatching null
-                    if (rest.positionTpSlOrder(symbol, pid) == null && (tp != null || plan.stop != null)) {
-                        rest.placePositionTpSl(
-                            symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
-                            slPrice = plan.stop?.let { formatPrice(symbol, it) },
-                        )
+                val filled = pos?.let { filledPosition(it, symbol, dir) }
+                val pid = filled?.optString("positionId").orEmpty()
+                val avgOpenPrice = filled?.let { posEntry(it).toDoubleOrNull() }
+                var fillPlan: TpSlPlan? = null
+                var armError: String? = null
+                var armed = false
+                if (pid.isBlank() || avgOpenPrice == null || avgOpenPrice <= 0.0) {
+                    armError = "filled positionId/avgOpenPrice unavailable"
+                } else {
+                    fillPlan = planForFilledEntry(
+                        dir, avgOpenPrice, lev, mmr, advice, slPctForSignal(confidence), tpR,
+                    )
+                    if (fillPlan == null && advice != null) {
+                        val (fresh, why) = reAsk?.invoke(avgOpenPrice, lev, mmr)
+                            ?: (null to "levels invalid at avgOpenPrice ${fmt(avgOpenPrice)}")
+                        if (fresh == null) {
+                            armError = why
+                        } else {
+                            advice = fresh
+                            fillPlan = planForFilledEntry(
+                                dir, avgOpenPrice, lev, mmr, advice, slPctForSignal(confidence), tpR,
+                            )
+                            if (fillPlan == null) armError = "re-asked levels invalid at avgOpenPrice ${fmt(avgOpenPrice)}"
+                        }
                     }
-                    pid
-                }.getOrNull()
-                // The partial TP ladder was removed (2026-11-26): on the
-                // exchange each rung closed the whole position. One position
+                    val fillTp = fillPlan?.ladder?.lastOrNull()?.first
+                    val fillSl = fillPlan?.stop
+                    if (fillPlan != null && (fillTp != null || fillSl != null)) {
+                        try {
+                            rest.placePositionTpSl(
+                                symbol, pid,
+                                tpPrice = fillTp?.let { formatPrice(symbol, it) },
+                                slPrice = fillSl?.let { formatPrice(symbol, it) },
+                            )
+                            val readBack = rest.positionTpSlOrder(symbol, pid)
+                            fun confirmed(field: String, expected: Double?): Boolean {
+                                if (expected == null) return true
+                                val target = formatPrice(symbol, expected).toDoubleOrNull() ?: expected
+                                val actual = readBack?.optString(field)?.toDoubleOrNull() ?: return false
+                                return kotlin.math.abs(actual - target) <= kotlin.math.max(1e-9, target * 1e-4)
+                            }
+                            armed = confirmed("slPrice", fillSl) && confirmed("tpPrice", fillTp)
+                            if (!armed) armError = "exchange read-back did not confirm the Position TP/SL"
+                        } catch (e: Exception) {
+                            armError = e.message ?: e.javaClass.simpleName
+                        }
+                    }
+                }
+                // The partial TP ladder was removed (2026-11-26): one Position
                 // TP/SL (agent SL + TP) is the only exit order now.
                 val ladderNote = ""
+                val activePlan = fillPlan ?: plan
                 val slNote = when {
-                    plan.stop == null -> ""
-                    armed != null -> " | SL armed on position"
-                    else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
+                    activePlan.stop == null -> ""
+                    armed -> " | Position TP/SL confirmed at avgOpenPrice ${avgOpenPrice?.let { fmt(it) }}"
+                    else -> " | WARNING: Position TP/SL not armed — ${armError ?: "not confirmed"}"
                 }
                 return "LIVE OPEN ${if (dir > 0) "LONG" else "SHORT"} $symbol qty $qty @ ~${fmt(price)}$conf " +
                     "| margin ${fmt2(margin)} USDT | order $orderId $status$levLine$slNote$ladderNote" +
@@ -1804,6 +1831,28 @@ class TraderEngine(private val rest: BitunixRest) {
             onEvent?.invoke(line)
             return line
         }
+    }
+
+    /**
+     * Rechecks the agent's absolute levels against the exchange's actual fill.
+     * Bitunix's Position TP/SL rules use avgOpenPrice; a pre-fill quote cannot
+     * prove that the same levels are valid for the opened position.
+     */
+    internal fun planForFilledEntry(
+        dir: Int,
+        avgOpenPrice: Double,
+        leverage: Int,
+        mmr: Double,
+        advice: TpSlAdvice?,
+        fallbackSlPct: Double,
+        fallbackTpR: Double,
+    ): TpSlPlan? {
+        if (avgOpenPrice <= 0.0) return null
+        val liq = TpSlPlanner.liqPrice(avgOpenPrice, dir, leverage, mmr)
+        if (advice != null && AgentTpSl.invalidReason(advice, dir, avgOpenPrice, liq) != null) return null
+        val (slPctUse, tpRUse) = adviceToPlan(advice, avgOpenPrice)
+            ?.let { (r, k) -> r.slPct to k } ?: (fallbackSlPct to fallbackTpR)
+        return TpSlPlanner.plan(avgOpenPrice, dir, leverage, slPctUse / 100.0, mmr, tpRUse)
     }
 
     /** Polls an order until terminal status (FILLED / CANCELED / PART_FILLED_CANCELED / EXPIRED). */
@@ -3097,6 +3146,17 @@ internal fun posQty(p: org.json.JSONObject): String =
 /** Average entry price: `avgOpenPrice` per the REST docs, `entryPrice` as fallback. */
 internal fun posEntry(p: org.json.JSONObject): String =
     p.optString("avgOpenPrice").ifBlank { p.optString("entryPrice") }
+
+/**
+ * Selects the just-filled position by the documented symbol and LONG/SHORT
+ * side. In hedge mode, taking row zero could arm another position's TP/SL.
+ */
+internal fun filledPosition(rows: JSONArray, symbol: String, dir: Int): JSONObject? {
+    val wantedSide = if (dir > 0) "LONG" else "SHORT"
+    return (0 until rows.length()).mapNotNull { rows.optJSONObject(it) }.firstOrNull {
+        it.optString("symbol") == symbol && it.optString("side").uppercase() == wantedSide
+    }
+}
 
 /**
  * Position notional in quote currency: `qty × entry`. The tiered risk limit is

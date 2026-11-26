@@ -152,9 +152,12 @@ Verified against the live API and the official docs (2026-11):
 - **Signed REST** — `digest = SHA256(nonce + timestamp + apiKey + sortedQueryParams + body)`,
   `sign = SHA256(digest + secretKey)`; 8 req/s global throttle plus the per-endpoint
   limits the docs state; retries on 10001 / 10005 / 10006 / 10009 / 40007; keys never logged.
-- **Orders** — `place_order` always sends the required `marginCoin`; `side` names the
-  *position* (BUY opens long); `tradeSide` only in hedge mode; TP/SL attached with
-  `LAST_PRICE` stop type and `MARKET` order type per project rule.
+- **Orders** — `place_order` sends the required `marginCoin`; `side` names the
+  *position* (BUY opens long); `tradeSide` only in hedge mode. LIVE entries use one
+  documented exit method: the market entry has no attached TP/SL; after the fill the
+  engine reads the position's `positionId` and `avgOpenPrice`, validates the levels at
+  that actual entry, places Position TP/SL (`MARK_PRICE` stop, `LAST_PRICE` target,
+  market execution), and confirms it by reading the pending order back.
 - **Market data** — kline (closed candles only, `endTime`+`limit` paging backwards, LAST/MARK
   price), tickers, trading pairs (precision, min volume, max leverage), funding rate and
   batch funding rates, depth (fixed gears `1|5|15|50|max`).
