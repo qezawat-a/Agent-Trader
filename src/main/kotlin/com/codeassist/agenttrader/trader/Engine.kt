@@ -2511,18 +2511,21 @@ class TraderEngine(private val rest: BitunixRest) {
             }
             t.startsWith("tpsl") -> if (live) {
                 val fromWs = feedTpSl()
-                if (liveFeedOn && fromWs.isNotEmpty()) {
+                if (t.startsWith("tpsl ws") && liveFeedOn && fromWs.isNotEmpty()) {
                     "TP/SL (live WS, ${fromWs.size} events):\n" + fromWs.joinToString("\n") { o ->
                         "${o.optString("symbol")} ${o.optString("event")} ${o.optString("status")} " +
                             "tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} id ${o.optString("orderId")}"
                     }
                 } else try {
-                    val arr = rest.pendingTpSlOrders(limit = 10)
+                    val arr = rest.pendingTpSlOrders(limit = 50)
                     if (arr.length() == 0) "No pending TP/SL orders."
                     else (0 until arr.length()).joinToString("\n") { i ->
                         val o = arr.getJSONObject(i)
-                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} sl ${o.optString("slPrice")} " +
-                            "qty ${o.optString("qty")} ${o.optString("status")}"
+                        // tpQty/slQty as the exchange holds them: shows whether a
+                        // rung really closes part of the position or all of it.
+                        "${o.optString("symbol")} tp ${o.optString("tpPrice")} tpQty ${o.optString("tpQty").ifBlank { "-" }} " +
+                            "sl ${o.optString("slPrice")} slQty ${o.optString("slQty").ifBlank { "-" }} " +
+                            "id ${o.optString("id").ifBlank { o.optString("orderId") }}"
                     }
                 } catch (e: Exception) {
                     "TP/SL failed: ${e.message}"
