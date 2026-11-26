@@ -1633,6 +1633,11 @@ class TraderEngine(private val rest: BitunixRest) {
                     val pos = rest.pendingPositions(symbol)
                     val pid = if (pos.length() > 0) pos.getJSONObject(0).optString("positionId") else ""
                     if (pid.isBlank()) return@runCatching null
+                    // The entry order already carried tpPrice/slPrice, and Bitunix
+                    // turns that into a TP/SL order on the position. Placing a
+                    // Position TP/SL on top of it gave TWO TP/SL orders. Only arm
+                    // one when the exchange shows no stop for this position yet.
+                    if (stopOrderFor(symbol, pid) != null) return@runCatching pid
                     rest.placePositionTpSl(
                         symbol, pid, tpPrice = tp?.let { formatPrice(symbol, it) },
                         slPrice = plan.stop?.let { formatPrice(symbol, it) },
@@ -2074,9 +2079,21 @@ class TraderEngine(private val rest: BitunixRest) {
         //    place fails when one already exists ("Each position can only have
         //    one Position TP/SL Order"). Asking first makes the choice exact.
         val existing = runCatching { rest.positionTpSlOrder(sym, positionId) }.getOrNull()
+        // The stop set with the entry order lives in its own TP/SL order (it
+        // carries a qty). Move THAT order instead of opening a second stop.
+        val entryStop = if (existing == null) runCatching { stopOrderFor(sym, positionId) }.getOrNull() else null
+        val entryStopId = entryStop?.let { o -> o.optString("id").ifBlank { o.optString("orderId") } }.orEmpty()
         try {
             if (existing != null) {
                 rest.modifyPositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
+            } else if (entryStop != null && entryStopId.isNotBlank()) {
+                // Keep its TP exactly as it is; change only the stop price.
+                val tpP = entryStop.optString("tpPrice").takeIf { (it.toDoubleOrNull() ?: 0.0) > 0 }
+                val tpQ = entryStop.optString("tpQty").takeIf { it.isNotBlank() && tpP != null }
+                val slQ = entryStop.optString("slQty").ifBlank { entryStop.optString("tpQty") }.takeIf { it.isNotBlank() }
+                rest.modifyTpSlOrder(
+                    entryStopId, tpPrice = tpP, slPrice = price, tpQty = tpQ, slQty = slQ,
+                )
             } else {
                 // The stop came from the entry order (place_order's slPrice), so
                 // no position-level order exists yet — CREATE it.
@@ -2089,7 +2106,14 @@ class TraderEngine(private val rest: BitunixRest) {
         // 2. Verify on the exchange before claiming anything. Read the
         //    POSITION-LEVEL order specifically: a partial TP/SL order carries its
         //    own slPrice and would otherwise be mistaken for the position's stop.
-        val applied = runCatching { findPositionSlPrice(sym, positionId) }.getOrNull()
+        val applied = runCatching {
+            if (existing == null && entryStopId.isNotBlank()) {
+                val orders = rest.pendingTpSlOrders(sym, positionId)
+                (0 until orders.length()).mapNotNull { orders.optJSONObject(it) }
+                    .firstOrNull { (it.optString("id").ifBlank { it.optString("orderId") }) == entryStopId }
+                    ?.optString("slPrice")?.toDoubleOrNull()?.takeIf { it > 0 }
+            } else findPositionSlPrice(sym, positionId)
+        }.getOrNull()
         if (applied == null || applied <= 0) {
             events.add("Risk manager: SL on $sym NOT confirmed on the exchange — retrying")
             return false
@@ -2112,6 +2136,17 @@ class TraderEngine(private val rest: BitunixRest) {
         for (j in 0 until orders.length()) {
             val v = orders.getJSONObject(j).optString("slPrice").toDoubleOrNull()
             if (v != null && v > 0) return v
+        }
+        return null
+    }
+
+    /** Any pending TP/SL order on this position that holds a stop (null when none). */
+    internal fun stopOrderFor(symbol: String, positionId: String): org.json.JSONObject? {
+        val orders = rest.pendingTpSlOrders(symbol, positionId)
+        for (j in 0 until orders.length()) {
+            val o = orders.optJSONObject(j) ?: continue
+            if (o.optString("positionId").let { it.isNotBlank() && it != positionId }) continue
+            if ((o.optString("slPrice").toDoubleOrNull() ?: 0.0) > 0) return o
         }
         return null
     }
