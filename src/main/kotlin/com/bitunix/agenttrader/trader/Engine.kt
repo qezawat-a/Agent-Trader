@@ -1202,7 +1202,7 @@ class TraderEngine(private val rest: BitunixRest) {
         val rows = symbols.mapNotNull { sym ->
             runCatching {
                 val byTf = timeframes.associateWith { candles(sym, it) }
-                val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs) }
+                val perTf = byTf.mapValues { (tf, cs) -> SignalAggregator.evaluateTimeframe(tf, cs, gates()) }
                 val price = byTf[timeframes.first()]?.lastOrNull()?.close ?: 0.0
                 SignalAggregator.evaluate(sym, price, perTf, gates())
             }.getOrNull()
@@ -1390,7 +1390,7 @@ class TraderEngine(private val rest: BitunixRest) {
             // One kline fetch per timeframe; the price reuses the 15m series
             // instead of asking the exchange for the very same candles twice.
             val byTf = timeframes.associateWith { candles(sym, it) }
-            val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
+            val perTf = byTf.mapValues { (tf, series) -> SignalAggregator.evaluateTimeframe(tf, series, gates()).let { TfSignal(it.dir, it.confidence, it.agreeing) } }
             val sig = SignalAggregator.combine(perTf, gates()) ?: continue
             val price = byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close
                 ?: candles(sym, PRICE_TIMEFRAME).last().close
@@ -1482,7 +1482,7 @@ class TraderEngine(private val rest: BitunixRest) {
         basis: Double? = null, levAt: Int? = null, mmrAt: Double? = null,
     ): Pair<TpSlAdvice?, String?> = runCatching {
         val byTf = timeframes.associateWith { candles(sym, it) }
-        val perTf = byTf.mapValues { (_, series) -> SignalAggregator.timeframe(series) }
+        val perTf = byTf.mapValues { (tf, series) -> SignalAggregator.evaluateTimeframe(tf, series, gates()).let { TfSignal(it.dir, it.confidence, it.agreeing) } }
         val conf = SignalAggregator.combine(perTf, gates())?.takeIf { it.dir == dir }?.confidence ?: 0.0
         val price = basis ?: byTf[PRICE_TIMEFRAME]?.lastOrNull()?.close ?: symbolPrice(sym)
         val lev = levAt ?: entryLeverage(sym).first
