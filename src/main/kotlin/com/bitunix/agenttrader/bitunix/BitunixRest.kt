@@ -303,12 +303,20 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         signedPost("/api/v1/futures/account/change_leverage", JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("leverage", leverage))
 
-    fun changeMarginMode(symbol: String, marginCoin: String = "USDT", mode: String): JSONObject =
-        signedPost("/api/v1/futures/account/change_margin_mode", JSONObject()
+    fun changeMarginMode(symbol: String, marginCoin: String = "USDT", mode: String): JSONObject {
+        require(mode == "ISOLATION" || mode == "CROSS") {
+            "marginMode must be ISOLATION or CROSS"
+        }
+        return signedPost("/api/v1/futures/account/change_margin_mode", JSONObject()
             .put("symbol", symbol).put("marginCoin", marginCoin).put("marginMode", mode))
+    }
 
-    fun changePositionMode(mode: String): JSONObject =
-        signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
+    fun changePositionMode(mode: String): JSONObject {
+        require(mode == "ONE_WAY" || mode == "HEDGE") {
+            "positionMode must be ONE_WAY or HEDGE"
+        }
+        return signedPost("/api/v1/futures/account/change_position_mode", JSONObject().put("positionMode", mode))
+    }
 
     /** Leverage + margin mode for one symbol. */
     fun leverageMarginMode(symbol: String, marginCoin: String = "USDT"): JSONObject = dataObject(signedGet(
@@ -752,6 +760,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(tpPrice != null || slPrice != null) {
             "position TP/SL needs a tpPrice or an slPrice"
         }
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
         if (tpPrice != null) body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
         if (slPrice != null) body.put("slPrice", slPrice).put("slStopType", slStopType)
@@ -759,9 +769,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     }
 
     /** Cancels a TP/SL order. */
-    fun cancelTpSl(symbol: String, orderId: String): JSONObject =
-        signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
+    fun cancelTpSl(symbol: String, orderId: String): JSONObject {
+        require(symbol.isNotBlank()) { "cancel TP/SL needs a symbol" }
+        require(orderId.isNotBlank()) { "cancel TP/SL needs an orderId" }
+        return signedPost("/api/v1/futures/tpsl/cancel_order", JSONObject()
             .put("symbol", symbol).put("orderId", orderId))
+    }
 
     /**
      * Partial TP/SL order on an open position: at least one of tpPrice/slPrice
@@ -792,6 +805,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(symbol.isNotBlank()) { "place TP/SL needs a symbol" }
         require(positionId.isNotBlank()) { "place TP/SL needs a positionId" }
         validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -832,6 +847,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         }
         require(orderId.isNotBlank()) { "modify TP/SL needs an orderId" }
         validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+        if (tpPrice != null) validateStopType(tpStopType, "tpStopType")
+        if (slPrice != null) validateStopType(slStopType, "slStopType")
         val body = JSONObject().put("orderId", orderId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -851,6 +868,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     /** Current position mode of the account: ONE_WAY or HEDGE. */
     fun positionMode(): JSONObject =
         dataObject(signedGet("/api/v1/futures/account/position_mode"))
+
+    private fun validateStopType(value: String, field: String) {
+        require(value == "MARK_PRICE" || value == "LAST_PRICE") {
+            "$field must be MARK_PRICE or LAST_PRICE"
+        }
+    }
 
     /**
      * Pending TP/SL orders. Documented filters: symbol, positionId, side (int32),

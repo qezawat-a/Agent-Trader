@@ -304,6 +304,35 @@ class BitunixDocParamsTest {
     }
 
     @Test
+    fun tp_sl_requires_documented_ids_and_enum_values() {
+        val rest = BitunixRest("k", "s")
+        assertFailsWith<IllegalArgumentException> { rest.cancelTpSl("BTCUSDT", "") }
+        assertFailsWith<IllegalArgumentException> {
+            rest.placePositionTpSl(
+                "BTCUSDT", "1", tpPrice = "100", slPrice = null, tpStopType = "MARK",
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            rest.placeTpSlOrder(
+                "BTCUSDT", "1", tpPrice = "100", tpQty = "0.1",
+                tpOrderType = "POST_ONLY",
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyTpSlOrder("", tpPrice = "100", tpQty = "0.1")
+        }
+    }
+
+    @Test
+    fun account_mode_updates_reject_undocumented_enum_values() {
+        val rest = BitunixRest("k", "s")
+        assertFailsWith<IllegalArgumentException> { rest.changePositionMode("BOTH") }
+        assertFailsWith<IllegalArgumentException> {
+            rest.changeMarginMode("BTCUSDT", mode = "BOTH")
+        }
+    }
+
+    @Test
     fun limit_child_orders_require_their_order_price() {
         val rest = BitunixRest("k", "s")
         // Docs: tpOrderPrice/slOrderPrice are required when the matching
