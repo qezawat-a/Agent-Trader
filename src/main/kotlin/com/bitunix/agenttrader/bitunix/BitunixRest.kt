@@ -464,8 +464,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      *  - marginCoin is REQUIRED by the exchange even though docs list it as optional.
      *  - side names the POSITION: BUY opens long, SELL opens short.
      *  - tradeSide ("OPEN"/"CLOSE") is only sent in hedge mode; pass null in one-way mode.
-     *  - tpPrice/slPrice attach a position-level TP/SL on fill; TP uses LAST_PRICE
-     *    and MARKET order type per project rule.
+     *  - tpPrice/slPrice attach the documented Order TP/SL to this entry order;
+     *    TP uses LAST_PRICE and MARKET order type per project rule. Position
+     *    TP/SL is a separate method and is placed against positionId.
      *  - the STOP triggers on MARK_PRICE, not LAST_PRICE: the exchange liquidates
      *    against the MARK price, so a stop that watches the LAST price can be
      *    bypassed in a fast move (mark reaches the liquidation price before the
@@ -479,7 +480,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         positionId: String? = null,
     ): JSONObject = placeOrder(
         symbol = symbol, qty = qty, side = side, orderType = "MARKET",
-        tradeSide = tradeSide, positionId = positionId, effect = "GTC",
+        tradeSide = tradeSide, positionId = positionId, effect = null,
         clientId = clientId.takeIf { it.isNotBlank() },
         reduceOnly = reduceOnly.takeIf { it },
         tpPrice = tpPrice, tpStopType = tpPrice?.let { "LAST_PRICE" },
@@ -686,8 +687,12 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     fun placePositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
         tpStopType: String = "LAST_PRICE", slStopType: String = "MARK_PRICE",
-    ): JSONObject = positionTpSlBody(
+    ): JSONObject {
+        require(symbol.isNotBlank()) { "place_position_tp_sl_order needs a symbol" }
+        require(positionId.isNotBlank()) { "place_position_tp_sl_order needs a positionId" }
+        return positionTpSlBody(
         "/api/v1/futures/tpsl/position/place_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+    }
 
     /**
      * Modifies an existing position-level TP/SL. The stop moves on MARK_PRICE
@@ -696,15 +701,19 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
      *
      * Docs: "Each position can only have one Position TP/SL Order" — this
      * endpoint MODIFIES that order and fails when the position has none. A
-     * position whose stop was attached on the entry order (place_order's
-     * `slPrice`) has no position-level order, so callers must fall back to
+     * position whose stop was attached as Order TP/SL (place_order's `slPrice`)
+     * has no position-level order, so callers must fall back to
      * [placePositionTpSl]; see [TraderEngine.applyLiveSl].
      */
     fun modifyPositionTpSl(
         symbol: String, positionId: String, tpPrice: String?, slPrice: String?,
         tpStopType: String = "LAST_PRICE", slStopType: String = "MARK_PRICE",
-    ): JSONObject = positionTpSlBody(
-        "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+    ): JSONObject {
+        require(symbol.isNotBlank()) { "modify_position_tp_sl_order needs a symbol" }
+        require(positionId.isNotBlank()) { "modify_position_tp_sl_order needs a positionId" }
+        return positionTpSlBody(
+            "/api/v1/futures/tpsl/position/modify_order", symbol, positionId, tpPrice, slPrice, tpStopType, slStopType)
+    }
 
     /**
      * The position-level TP/SL order currently armed on a position, or null.
@@ -778,6 +787,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(tpQty != null || slQty != null) {
             "partial TP/SL needs a tpQty or an slQty"
         }
+        require(symbol.isNotBlank()) { "place TP/SL needs a symbol" }
+        require(positionId.isNotBlank()) { "place TP/SL needs a positionId" }
+        validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
         val body = JSONObject().put("symbol", symbol).put("positionId", positionId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -816,6 +828,8 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
         require(tpQty != null || slQty != null) {
             "partial TP/SL needs a tpQty or an slQty"
         }
+        require(orderId.isNotBlank()) { "modify TP/SL needs an orderId" }
+        validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
         val body = JSONObject().put("orderId", orderId)
         if (tpPrice != null) {
             body.put("tpPrice", tpPrice).put("tpStopType", tpStopType)
@@ -1044,6 +1058,7 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             slOrderPrice: String? = null,
             marginCoin: String = "USDT",
         ): JSONObject {
+            validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
             val body = JSONObject()
                 .put("symbol", symbol)
                 .put("qty", qty)
@@ -1128,7 +1143,9 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
             slStopType: String? = null,
             slOrderType: String? = null,
             slOrderPrice: String? = null,
-        ): JSONObject = JSONObject()
+        ): JSONObject {
+            validateChildOrderTypes(tpOrderType, tpOrderPrice, slOrderType, slOrderPrice)
+            return JSONObject()
             .put("qty", qty)
             .put("side", side)
             .put("orderType", orderType)
@@ -1150,6 +1167,26 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
                 if (slOrderType != null) put("slOrderType", slOrderType)
                 if (slOrderPrice != null) put("slOrderPrice", slOrderPrice)
             }
+        }
+
+        /** The official contract requires a child order price for every LIMIT TP/SL. */
+        private fun validateChildOrderTypes(
+            tpOrderType: String?, tpOrderPrice: String?,
+            slOrderType: String?, slOrderPrice: String?,
+        ) {
+            require(tpOrderType == null || tpOrderType == "LIMIT" || tpOrderType == "MARKET") {
+                "tpOrderType must be LIMIT or MARKET"
+            }
+            require(slOrderType == null || slOrderType == "LIMIT" || slOrderType == "MARKET") {
+                "slOrderType must be LIMIT or MARKET"
+            }
+            if (tpOrderType == "LIMIT") require(tpOrderPrice != null) {
+                "tpOrderPrice is required when tpOrderType is LIMIT"
+            }
+            if (slOrderType == "LIMIT") require(slOrderPrice != null) {
+                "slOrderPrice is required when slOrderType is LIMIT"
+            }
+        }
 
         /**
          * The tickers endpoint ignores the `symbols` filter and returns every

@@ -99,9 +99,14 @@ object SignalAggregator {
             val mine = all.filter { it.dir == dir }
             val origins = mine.map { it.origin }.distinct()
             if (origins.size < MIN_AGREEING) continue
-            val strong = mine.filter { it.confidence >= TIMEFRAME_CONFIDENCE }
+            // One market view contributes one confidence value. If two strategies
+            // share an origin, keep the strongest one; otherwise duplicate views
+            // could inflate both the average and the agreement bonus.
+            val byOrigin = mine.groupBy { it.origin }
+                .mapValues { (_, votes) -> votes.maxOf { it.confidence } }
+            val strong = byOrigin.values.filter { it >= TIMEFRAME_CONFIDENCE }
             if (strong.isEmpty()) continue
-            val conf = sideConfidence(strong.map { it.confidence.toDouble() }, MIN_AGREEING)
+            val conf = sideConfidence(strong.map(Int::toDouble), MIN_AGREEING)
             if (conf > best.confidence) best = TfEvaluation(timeframe, dir, conf, origins.size, all)
         }
         return best

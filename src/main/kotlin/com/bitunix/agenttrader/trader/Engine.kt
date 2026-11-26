@@ -1354,7 +1354,7 @@ class TraderEngine(private val rest: BitunixRest) {
         appendLine("  gates: >=$minAgreeing strategies per timeframe · >=${minTfConfidence.toInt()}% per timeframe · >=${minConfidence.toInt()}% combined · ${minSideTfs.coerceAtMost(timeframes.size)} of ${timeframes.size} timeframes must share the side")
         appendLine("  leverage ${leverage}x · margin per trade ${(riskFraction * 100).toInt()}% of the free balance · report ${if (reportOn) "on" else "off"} every $reportIntervalMin min")
         appendLine("  exits: breakeven ${offable(risk.breakevenRoiPct)} ROI → SL to entry · trailing trigger ${offable(risk.trailingTriggerRoiPct)} ROI, ${fmt0(risk.trailDistanceRoiPct)}% behind best · SL ${if (risk.slPct > 0) "${fmt1(risk.slPct)}% from entry" else "none (set sl <pct> — no stop by default)"}")
-        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); TP/SL method: SL + final TP as the position TP/SL (closes all), plus partial TP orders of 25% at every 1R before it" else "off — entries carry the user's stop only"}")
+        appendLine("  auto tpsl: ${if (autoTpsl) "on — the agent sets SL and TP for each signal entry from the signal and the candles (no fixed %); LIVE uses one Position TP/SL (closes all) after the fill; PAPER also simulates partial TP rungs" else "off — entries carry the user's stop only"}")
         appendLine("  risk manager: max open positions $maxOpenPositions · guard interval ${if (guardIntervalSec > 0) "${guardIntervalSec}s" else "off"}")
         appendLine("  feed: ${if (liveFeedOn) "connected" else "off"}")
         append("  change with: set universe <A,B,C> · set timeframes <15m,1h> · set scan top <n> · " +
@@ -1741,8 +1741,7 @@ class TraderEngine(private val rest: BitunixRest) {
                 noteEntry()
                 // Position TP/SL requires the real positionId. Its TP/SL side
                 // rules are relative to avgOpenPrice, not the pre-fill ticker.
-                val pos = runCatching { rest.pendingPositions(symbol) }.getOrNull()
-                val filled = pos?.let { filledPosition(it, symbol, dir) }
+                val filled = waitForFilledPosition(symbol, dir)
                 val pid = filled?.optString("positionId").orEmpty()
                 val avgOpenPrice = filled?.let { posEntry(it).toDoubleOrNull() }
                 var fillPlan: TpSlPlan? = null
@@ -1771,12 +1770,28 @@ class TraderEngine(private val rest: BitunixRest) {
                     val fillSl = fillPlan?.stop
                     if (fillPlan != null && (fillTp != null || fillSl != null)) {
                         try {
-                            rest.placePositionTpSl(
-                                symbol, pid,
-                                tpPrice = fillTp?.let { formatPrice(symbol, it) },
-                                slPrice = fillSl?.let { formatPrice(symbol, it) },
-                            )
-                            val readBack = rest.positionTpSlOrder(symbol, pid)
+                            val existing = rest.positionTpSlOrder(symbol, pid)
+                            val result = if (existing == null) {
+                                rest.placePositionTpSl(
+                                    symbol, pid,
+                                    tpPrice = fillTp?.let { formatPrice(symbol, it) },
+                                    slPrice = fillSl?.let { formatPrice(symbol, it) },
+                                )
+                            } else {
+                                // The position allows only one Position TP/SL order.
+                                // If one already exists, the documented action is modify,
+                                // not a second place call.
+                                rest.modifyPositionTpSl(
+                                    symbol, pid,
+                                    tpPrice = fillTp?.let { formatPrice(symbol, it) },
+                                    slPrice = fillSl?.let { formatPrice(symbol, it) },
+                                )
+                            }
+                            val tpSlId = result.optString("orderId").ifBlank { result.optString("id") }
+                            val readBack = rest.pendingTpSlOrders(symbol, pid).let { orders ->
+                                (0 until orders.length()).mapNotNull { orders.optJSONObject(it) }
+                                    .firstOrNull { it.optString("id") == tpSlId || it.optString("orderId") == tpSlId }
+                            }
                             fun confirmed(field: String, expected: Double?): Boolean {
                                 if (expected == null) return true
                                 val target = formatPrice(symbol, expected).toDoubleOrNull() ?: expected
@@ -1831,6 +1846,17 @@ class TraderEngine(private val rest: BitunixRest) {
             onEvent?.invoke(line)
             return line
         }
+    }
+
+    /** Waits for the filled position to become visible and returns the matching side. */
+    private fun waitForFilledPosition(symbol: String, dir: Int, tries: Int = 5): JSONObject? {
+        repeat(tries) {
+            val rows = runCatching { rest.pendingPositions(symbol) }.getOrNull()
+            val found = rows?.let { filledPosition(it, symbol, dir) }
+            if (found != null) return found
+            Thread.sleep(300)
+        }
+        return null
     }
 
     /**
@@ -2031,8 +2057,7 @@ class TraderEngine(private val rest: BitunixRest) {
         // The stop already on the exchange is the baseline: the candidate must
         // improve it, never widen it.
         val curStop = liveLastStop[sym]
-            ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
-            ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
+            ?: runCatching { findPositionSlPrice(sym, positionId) }.getOrNull()
         val candidate = when (rule) {
             ManualStopRule.BREAKEVEN -> entry
             ManualStopRule.TRAILING -> {
@@ -2156,8 +2181,7 @@ class TraderEngine(private val rest: BitunixRest) {
             var curStop: Double? = liveLastStop[sym]
             var curStopIsReal = curStop != null
             if (curStop == null) {
-                curStop = runCatching { findSlPrice(rest.pendingTpSlOrders(sym, positionId)) }.getOrNull()
-                    ?: runCatching { findSlPrice(rest.pendingTpSlOrders(sym)) }.getOrNull()
+                curStop = runCatching { findPositionSlPrice(sym, positionId) }.getOrNull()
                 curStopIsReal = curStop != null
             }
             // No exchange SL visible (never attached, rejected, or the query
@@ -2268,8 +2292,8 @@ class TraderEngine(private val rest: BitunixRest) {
                 val keepTp = existing.optString("tpPrice").takeIf { it.isNotBlank() && it != "0" }
                 rest.modifyPositionTpSl(sym, positionId, tpPrice = keepTp, slPrice = price)
             } else {
-                // The stop came from the entry order (place_order's slPrice), so
-                // no position-level order exists yet — CREATE it.
+                // No Position TP/SL exists yet — CREATE it with the dedicated
+                // documented position endpoint.
                 rest.placePositionTpSl(sym, positionId, tpPrice = null, slPrice = price)
             }
         } catch (e: Exception) {
@@ -2291,8 +2315,9 @@ class TraderEngine(private val rest: BitunixRest) {
             events.add("Risk manager: SL on $sym still ${fmt(applied)} — not ${fmt(sl)}, retrying")
             return false
         }
-        // One stop per position: cancel any other TP/SL order on it (an extra
-        // stop the old code added, or an old partial rung that closes 100%).
+        // This engine uses one Position TP/SL method. Remove stale TP/SL
+        // orders left on the same position by an earlier build, so an old
+        // partial/duplicate order cannot close the position unexpectedly.
         runCatching {
             val keep = rest.positionTpSlOrder(sym, positionId)?.optString("id")
                 ?.ifBlank { null } ?: rest.positionTpSlOrder(sym, positionId)?.optString("orderId")

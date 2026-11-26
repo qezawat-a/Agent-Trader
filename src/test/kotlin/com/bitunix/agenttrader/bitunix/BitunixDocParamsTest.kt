@@ -294,6 +294,42 @@ class BitunixDocParamsTest {
         assertFailsWith<IllegalArgumentException> {
             rest.modifyPositionTpSl("BTCUSDT", "1", tpPrice = null, slPrice = null)
         }
+        // Both position endpoints require symbol + positionId.
+        assertFailsWith<IllegalArgumentException> {
+            rest.placePositionTpSl("", "1", tpPrice = "100", slPrice = null)
+        }
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyPositionTpSl("BTCUSDT", "", tpPrice = "100", slPrice = null)
+        }
+    }
+
+    @Test
+    fun limit_child_orders_require_their_order_price() {
+        val rest = BitunixRest("k", "s")
+        // Docs: tpOrderPrice/slOrderPrice are required when the matching
+        // child order type is LIMIT.
+        assertFailsWith<IllegalArgumentException> {
+            rest.placeTpSlOrder(
+                "BTCUSDT", "1", tpPrice = "110", tpQty = "0.1", tpOrderType = "LIMIT",
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            rest.modifyTpSlOrder(
+                "12", slPrice = "90", slQty = "0.1", slOrderType = "LIMIT",
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BitunixRest.placeOrderBody(
+                symbol = "BTCUSDT", qty = "0.5", side = "BUY", orderType = "MARKET",
+                tpPrice = "110", tpOrderType = "LIMIT",
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            BitunixRest.batchOrderItem(
+                qty = "0.5", side = "BUY", orderType = "MARKET",
+                slPrice = "90", slOrderType = "LIMIT",
+            )
+        }
     }
 
     // ---- Documented required flags ----

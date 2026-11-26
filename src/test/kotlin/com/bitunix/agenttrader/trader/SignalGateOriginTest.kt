@@ -40,6 +40,22 @@ class SignalGateOriginTest {
     }
 
     @Test
+    fun duplicate_views_do_not_inflate_confidence() {
+        val votes = listOf(
+            vote("a", "a", conf = 70),
+            vote("a-copy", "a", conf = 95),
+            vote("b", "b", conf = 70),
+            vote("c", "c", conf = 70),
+        )
+        val e = SignalAggregator.evaluateVotes("15m", votes)
+        assertEquals(1, e.dir)
+        assertEquals(3, e.agreeing)
+        // The duplicate contributes one origin value (its strongest 95%), but
+        // it must not count as a fourth vote or earn an agreement bonus.
+        assertEquals((95.0 + 70.0 + 70.0) / 3.0, e.confidence, 0.001)
+    }
+
+    @Test
     fun abstentions_never_count_toward_the_gate() {
         val votes = listOf(vote("a", "a"), vote("b", "b"), vote("c", "c", dir = 0))
         val e = SignalAggregator.evaluateVotes("15m", votes)

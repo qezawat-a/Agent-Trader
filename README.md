@@ -115,7 +115,7 @@ Grab the APKs from the [Releases](https://github.com/qezawat-a/Agent-Trader/rele
 `set breakeven <pct>` (0 = off) · `set trail trigger <pct>` (0 = off) · `set trail distance <pct>` · `set sl <pct>` (0 = none) · `set max positions <1-20>` · `set guard <sec>` (0 = off) ·
 `fire breakeven [SYMBOL]` · `fire trailing [SYMBOL]` (fire the stop move NOW — the ROI trigger is bypassed, but a stop is never widened)
 
-With **Auto TP/SL** on, the agent (your chat model) sets the stop-loss and take-profit of every signal entry itself: it reads the recent candles of each timeframe, each timeframe's signal, the combined strength, the leverage and the liquidation price, and returns both prices with a one-line reason. There is no fixed percentage or formula behind it. The app checks only the exchange's own rules (each level on the right side of the entry, the stop before liquidation, re-checked at the mark price before a live order); a missing or invalid answer skips the entry instead of opening it with a made-up stop. With Auto TP/SL off, and for manual entries, the stop is your own `set sl <pct>` (`0` = none). The take-profit ladder closes 25% at each 1R below the target and the rest at the target.
+With **Auto TP/SL** on, the agent (your chat model) sets the stop-loss and take-profit of every signal entry itself: it reads the recent candles of each timeframe, each timeframe's signal, the combined strength, the leverage and the liquidation price, and returns both prices with a one-line reason. There is no fixed percentage or formula behind it. The app checks only the exchange's own rules (each level on the right side of the entry, the stop before liquidation, re-checked at the mark price before a live order); a missing or invalid answer skips the entry instead of opening it with a made-up stop. With Auto TP/SL off, and for manual entries, the stop is your own `set sl <pct>` (`0` = none). LIVE arms one documented Position TP/SL (SL and TP, closing the whole position) after the fill; PAPER additionally simulates partial take-profit rungs.
 
 The Control screen (the fourth window) holds every gate and exit control in one place: **Timeframes** (TF), **TF min %** (confidence per timeframe), **Min conf %** (combined confidence), **Auto TP/SL** (on/off — persisted), and the **Fire breakeven** / **Fire trailing** buttons. The Fire buttons act on the open position immediately: they bypass the ROI trigger only; the stop still never widens and the exchange still has to accept the trigger side of the current mark. The general **Settings** navigation stays in the bottom bar — it is not duplicated in Control.
 
@@ -259,8 +259,9 @@ endpoint clamps `limit` to the documented maximum.
   Anything less is reported as *no trade*, with the failing
   gate named (both in chat and on the Signals screen).
 - The periodic report includes the top signals, not just balance and P&L.
-- TP/SL plan: in Auto TP/SL the agent sets SL and TP per entry; the TP ladder closes 25% per
-  1R below the agent's target (real partial TP orders on LIVE). Breakeven (SL moves to entry,
+- TP/SL plan: in Auto TP/SL the agent sets SL and TP per entry. LIVE uses one Position
+  TP/SL order that closes the whole position; PAPER also simulates partial TP rungs.
+  Breakeven (SL moves to entry,
   plus the round-trip fee on LIVE) and the trailing stop trigger on your ROI settings.
 
 ### Risk manager
