@@ -39,7 +39,7 @@ import java.util.UUID
  *    with and without it), so it is not sent any more — history pages with
  *    `endTime` + `limit`, counting backwards, exactly as the docs describe.
  */
-class BitunixRest(private val apiKey: String, private val secretKey: String) {
+open class BitunixRest(private val apiKey: String, private val secretKey: String) {
 
     private val base = "https://fapi.bitunix.com"
 
@@ -49,15 +49,15 @@ class BitunixRest(private val apiKey: String, private val secretKey: String) {
     private val lastCallMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     /** Public GET, no signature. */
-    fun publicGet(path: String, query: Map<String, String> = emptyMap()): JSONObject =
+    open fun publicGet(path: String, query: Map<String, String> = emptyMap()): JSONObject =
         call("GET", path, query, null, signed = false)
 
     /** Signed GET. */
-    fun signedGet(path: String, query: Map<String, String> = emptyMap()): JSONObject =
+    open fun signedGet(path: String, query: Map<String, String> = emptyMap()): JSONObject =
         call("GET", path, query, null, signed = true)
 
     /** Signed POST with a JSON body. */
-    fun signedPost(path: String, body: JSONObject): JSONObject =
+    open fun signedPost(path: String, body: JSONObject): JSONObject =
         call("POST", path, emptyMap(), body.toString(), signed = true)
 
     private fun call(
