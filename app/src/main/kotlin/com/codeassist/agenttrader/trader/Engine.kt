@@ -1616,9 +1616,11 @@ class TraderEngine(private val rest: BitunixRest) {
             // TP sits tpR × the stop distance away from entry (set tp r <n>) —
             // exists only when the user configured a stop (set sl <pct>).
             val rDist = plan.stop?.let { kotlin.math.abs(triggerBasis - it) }?.coerceAtLeast(1e-12)
-            // With the ladder on, the entry's own TP is the LAST rung (nR).
-            val tpMult = if (ladderOn) ladderRungs.toDouble() else tpR
-            val tp = rDist?.let { if (dir > 0) triggerBasis + tpMult * it else triggerBasis - tpMult * it }
+            // With the ladder on, the entry carries NO TP: a TP on the entry
+            // order closes the whole position, so every rung (the last one too)
+            // is its own partial TP order with its own qty, placed after the fill.
+            val tp = if (ladderOn) null
+                else rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
                 tpPrice = tp?.let { formatPrice(symbol, it) },
@@ -1651,23 +1653,10 @@ class TraderEngine(private val rest: BitunixRest) {
                     )
                     pid
                 }.getOrNull()
-                // Ladder rungs 1R..(n-1)R: partial TP orders, 1/n of the qty each.
-                val ladderNote = if (!ladderOn || rDist == null || armed == null) "" else {
-                    val rungQty = formatQty(symbol, (qty.toDoubleOrNull() ?: 0.0) / ladderRungs)
-                    if (rungQty == null) " | ladder skipped: 1/$ladderRungs of qty is below the min volume"
-                    else {
-                        val errs = mutableListOf<String>()
-                        var ok = 0
-                        for (r in 1 until ladderRungs) {
-                            val px = if (dir > 0) triggerBasis + r * rDist else triggerBasis - r * rDist
-                            runCatching {
-                                rest.placeTpSlOrder(symbol, armed, tpPrice = formatPrice(symbol, px), tpQty = rungQty)
-                            }.onSuccess { ok++ }.onFailure { errs.add("${r}R: ${it.message ?: it.javaClass.simpleName}") }
-                        }
-                        " | ladder $ok/${ladderRungs - 1} rungs placed (qty $rungQty each, last rung = TP)" +
-                            if (errs.isNotEmpty()) " — FAILED ${errs.joinToString("; ")}" else ""
-                    }
-                }
+                // Ladder rungs 1R..nR: one partial TP order each, 1/n of the qty;
+                // the last rung takes the remainder so the sum is exactly the qty.
+                val ladderNote = if (!ladderOn || rDist == null || armed == null) "" else
+                    placeLadder(symbol, armed, dir, triggerBasis, rDist, qty)
                 val slNote = ladderNote + when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
@@ -2162,6 +2151,28 @@ class TraderEngine(private val rest: BitunixRest) {
             if (v != null && v > 0) return v
         }
         return null
+    }
+
+    /** Places the LIVE TP ladder; returns the note for the LIVE OPEN line. */
+    internal fun placeLadder(
+        symbol: String, positionId: String, dir: Int, basis: Double, rDist: Double, qty: String,
+    ): String {
+        val total = qty.toDoubleOrNull() ?: 0.0
+        val n = ladderRungs.coerceIn(2, 6)
+        val rungQty = formatQty(symbol, total / n)
+            ?: return " | ladder skipped: 1/$n of qty is below the min volume"
+        val each = rungQty.toDoubleOrNull() ?: 0.0
+        val errs = mutableListOf<String>()
+        var ok = 0
+        for (r in 1..n) {
+            val q = if (r < n) rungQty else formatQty(symbol, total - each * (n - 1)) ?: rungQty
+            val px = if (dir > 0) basis + r * rDist else basis - r * rDist
+            runCatching {
+                rest.placeTpSlOrder(symbol, positionId, tpPrice = formatPrice(symbol, px), tpQty = q)
+            }.onSuccess { ok++ }.onFailure { errs.add("${r}R: ${it.message ?: it.javaClass.simpleName}") }
+        }
+        return " | ladder $ok/$n rungs placed (qty $rungQty each)" +
+            if (errs.isNotEmpty()) " — FAILED ${errs.joinToString("; ")}" else ""
     }
 
     /** Any pending TP/SL order on this position that holds a stop (null when none). */
