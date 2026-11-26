@@ -480,6 +480,11 @@ class TraderEngine(private val rest: BitunixRest) {
     /** Take-profit distance as an R-multiple of the stop distance (live orders attach
      *  this rung for the full qty; paper keeps its 4-rung ladder). 1.0 = at the SL distance. */
     var tpR: Double = 1.0
+    /** LIVE TP ladder (off by default). When on, TP is split into [ladderRungs]
+     *  steps at 1R, 2R … nR, each closing 1/n of the position; the last step is
+     *  the entry order's own TP and closes the rest. */
+    var ladderOn: Boolean = false
+    var ladderRungs: Int = 4
 
     /**
      * Signal-driven entries get an automatic TP/SL: a stop scaled by the signal
@@ -1611,7 +1616,9 @@ class TraderEngine(private val rest: BitunixRest) {
             // TP sits tpR × the stop distance away from entry (set tp r <n>) —
             // exists only when the user configured a stop (set sl <pct>).
             val rDist = plan.stop?.let { kotlin.math.abs(triggerBasis - it) }?.coerceAtLeast(1e-12)
-            val tp = rDist?.let { if (dir > 0) triggerBasis + tpR * it else triggerBasis - tpR * it }
+            // With the ladder on, the entry's own TP is the LAST rung (nR).
+            val tpMult = if (ladderOn) ladderRungs.toDouble() else tpR
+            val tp = rDist?.let { if (dir > 0) triggerBasis + tpMult * it else triggerBasis - tpMult * it }
             val order = rest.placeMarketOrder(
                 symbol = symbol, qty = qty, side = side, tradeSide = tradeSide,
                 tpPrice = tp?.let { formatPrice(symbol, it) },
@@ -1644,7 +1651,24 @@ class TraderEngine(private val rest: BitunixRest) {
                     )
                     pid
                 }.getOrNull()
-                val slNote = when {
+                // Ladder rungs 1R..(n-1)R: partial TP orders, 1/n of the qty each.
+                val ladderNote = if (!ladderOn || rDist == null || armed == null) "" else {
+                    val rungQty = formatQty(symbol, (qty.toDoubleOrNull() ?: 0.0) / ladderRungs)
+                    if (rungQty == null) " | ladder skipped: 1/$ladderRungs of qty is below the min volume"
+                    else {
+                        val errs = mutableListOf<String>()
+                        var ok = 0
+                        for (r in 1 until ladderRungs) {
+                            val px = if (dir > 0) triggerBasis + r * rDist else triggerBasis - r * rDist
+                            runCatching {
+                                rest.placeTpSlOrder(symbol, armed, tpPrice = formatPrice(symbol, px), tpQty = rungQty)
+                            }.onSuccess { ok++ }.onFailure { errs.add("${r}R: ${it.message ?: it.javaClass.simpleName}") }
+                        }
+                        " | ladder $ok/${ladderRungs - 1} rungs placed (qty $rungQty each, last rung = TP)" +
+                            if (errs.isNotEmpty()) " — FAILED ${errs.joinToString("; ")}" else ""
+                    }
+                }
+                val slNote = ladderNote + when {
                     plan.stop == null -> ""
                     armed != null -> " | SL armed on position"
                     else -> " | WARNING: position-level SL not armed — breakeven/trailing will create it on first move"
@@ -2630,6 +2654,19 @@ class TraderEngine(private val rest: BitunixRest) {
                     risk = risk.copy(trailDistanceRoiPct = v)
                     configRev++
                     "Trailing distance set to ${fmt0(v)}% ROI behind the best price."
+                }
+            }
+            t.startsWith("set ladder") -> {
+                val a = t.removePrefix("set ladder").trim()
+                when {
+                    a == "on" -> { ladderOn = true; configRev++; "LIVE TP ladder on: $ladderRungs rungs at 1R..${ladderRungs}R, 1/$ladderRungs of the position each. Applies to new entries." }
+                    a == "off" -> { ladderOn = false; configRev++; "LIVE TP ladder off: one TP at ${tpR}R closes the whole position." }
+                    a.startsWith("rungs") -> {
+                        val v = extractNumber(a.removePrefix("rungs"))?.toInt()
+                        if (v == null || v !in 2..6) "Usage: set ladder rungs <2-6>"
+                        else { ladderRungs = v; configRev++; "Ladder rungs set to $v (1R..${v}R)." }
+                    }
+                    else -> "Usage: set ladder on | set ladder off | set ladder rungs <2-6>"
                 }
             }
             t.startsWith("set tp r") || t.startsWith("set tp ") -> {

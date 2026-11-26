@@ -158,6 +158,14 @@ class AgentConfig(context: Context) {
         get() = prefs.getFloat("tp_r", 0f)
         set(value) = prefs.edit().putFloat("tp_r", value).apply()
 
+    /** LIVE TP ladder on/off and its rung count (2-6). */
+    var ladderOn: Boolean
+        get() = prefs.getBoolean("ladder_on", false)
+        set(value) = prefs.edit().putBoolean("ladder_on", value).apply()
+    var ladderRungs: Int
+        get() = prefs.getInt("ladder_rungs", 4)
+        set(value) = prefs.edit().putInt("ladder_rungs", value.coerceIn(2, 6)).apply()
+
     /**
      * Automatic TP/SL on signal entries. On by default: a signal entry gets a
      * strength-scaled stop plus the 1R..4R TP ladder.
@@ -229,6 +237,8 @@ class AgentConfig(context: Context) {
         "trail_distance_set" to trailDistanceSet,
         "sl_pct" to slPct,
         "tp_r" to tpR,
+        "ladder_on" to ladderOn,
+        "ladder_rungs" to ladderRungs,
         "auto_tpsl" to autoTpsl,
         "auto_universe" to autoUniverse,
         "auto_min_volume_usd" to autoMinVolumeUsd,
@@ -277,6 +287,8 @@ class AgentConfig(context: Context) {
         restoreChosen(int("trail_distance"), bool("trail_distance_set")) { trailDistanceRoiPct = it }
         int("sl_pct")?.let { slPct = it }
         num("tp_r")?.let { tpR = it.toFloat() }
+        bool("ladder_on")?.let { ladderOn = it }
+        int("ladder_rungs")?.let { ladderRungs = it }
         bool("auto_tpsl")?.let { autoTpsl = it }
         bool("auto_universe")?.let { autoUniverse = it }
         num("auto_min_volume_usd")?.let { autoMinVolumeUsd = it }

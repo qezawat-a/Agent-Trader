@@ -188,6 +188,8 @@ fun AgentScreen(config: AgentConfig, post: (Runnable) -> Unit) {
                 risk = risk.copy(slPct = config.slPct.toDouble())
             }
             if (config.tpR > 0f) tpR = config.tpR.toDouble()
+            ladderOn = config.ladderOn
+            ladderRungs = config.ladderRungs
             // Automatic TP/SL on signal entries — persisted so the Control
             // screen's switch survives a restart.
             autoTpsl = config.autoTpsl
@@ -303,6 +305,8 @@ fun AgentApp(
         config.trailDistanceRoiPct = engine.risk.trailDistanceRoiPct.toInt()
         config.slPct = engine.risk.slPct.toInt()
         config.tpR = engine.tpR.toFloat()
+        config.ladderOn = engine.ladderOn
+        config.ladderRungs = engine.ladderRungs
         config.autoTpsl = engine.autoTpsl
         config.autoUniverse = engine.autoUniverse
         config.autoMinVolumeUsd = engine.autoMinVolumeUsd
