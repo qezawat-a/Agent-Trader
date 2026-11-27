@@ -93,5 +93,4 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.json:json:20240303")
     implementation("androidx.databinding:viewbinding:8.7.3")
-    implementation("org.jetbrains.kotlin:kotlin-parcelize-runtime:2.4.0")
 }
